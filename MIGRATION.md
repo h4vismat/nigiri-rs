@@ -85,10 +85,11 @@ much of the argument the CLI actually echoed, so an elided value (`Invalid descr
 "wpkh(cQr..."`) is covered too. It remains textual matching: a CLI that re-encodes an
 argument, or echoes only its tail, can still surface that form.
 
-Killing a timed-out or over-limit child signals the direct child only. Real `nigiri` is a
-shell wrapper around `docker`, so a `docker exec` it already started continues to
-completion. A mutating RPC that times out may therefore still commit on the node; the host
-owns recovery.
+Killing a timed-out or over-limit child signals that one process only. `nigiri` runs the
+`docker` CLI as its own child, which survives as an orphan. Independently of that, an RPC
+already dispatched to the node completes inside the container: killing a client does not
+cancel work the node has accepted. A mutating RPC that times out may therefore still commit,
+and recovery remains host-owned.
 
 ### RPC failure detection changed
 

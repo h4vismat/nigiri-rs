@@ -33,17 +33,36 @@ unverified. Make it idempotent so re-running a failed release does not error.
 
 ### Kill the whole process group, not just the direct child
 
-**Priority:** P1
+**Priority:** P3
 
-`kill_and_reap` in `src/rpc.rs` signals only the child the crate spawned. Real `nigiri` is a
-shell wrapper that execs `docker`, so SIGKILL to the wrapper leaves the `docker exec` and the
-RPC it already dispatched running to completion. A mutating RPC that times out can therefore
-still commit on the node, which is exactly what the timeout is supposed to prevent.
+`kill_and_reap` in `src/rpc.rs` signals only the process the crate spawned. `nigiri` (a Go
+binary) runs the `docker` CLI as its own child, verified by observing the tree during an RPC:
 
-The fixture is a single `sh` with no children, so both marker tests pass while the host case is
-unprotected. Fix: `Command::process_group(0)` on Unix and signal the group. Needs a fixture
-method that backgrounds a grandchild so the gap is testable. Documented as a known limitation
-in README.md and MIGRATION.md as of 0.3.0.
+```
+nigiri   pid 59328
+docker   pid 59364, ppid 59328
+```
+
+SIGKILL to `nigiri` orphans `docker`, which reparents to init and keeps its inherited stdout
+and stderr write ends open. Two consequences worth fixing:
+
+- Every timeout leaks one `docker` process, each holding an exec session against dockerd.
+- Pipe EOF requires every writer to close, so the orphan is why `capture_process_output`
+  depends on the outer timeout to escape rather than on the streams actually ending.
+
+Fix: `Command::process_group(0)` on Unix, then signal the group. Needs `libc` (or `nix`) as a
+direct dependency for `killpg`, and a fixture method that backgrounds a grandchild so the gap
+becomes testable.
+
+**This does not make timeouts atomic.** Once `docker exec` has handed an RPC to the node, that
+work completes inside the container; killing a client is not cancellation. An earlier revision
+of this item claimed process-group kill would stop a timed-out mutating RPC from committing.
+It will not, which is why this is P3 and not P1. Node-state recovery stays host-owned.
+
+Related test-integrity problem, and the stronger reason to do this: both marker tests assert
+that a killed child cannot perform a follow-up side effect, but the fixture is a single `sh`
+with no children, so they pass by construction and cannot fail for the production shape they
+are named after.
 
 ### Cap the error excerpt independently of the response limit
 

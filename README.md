@@ -119,7 +119,7 @@ A method that exits zero, writes nothing to stdout, and writes non-whitespace co
 
 Arbitrary RPC methods may mutate node wallets or active chain state. Tests using mutating RPCs must coordinate host access and restore valid state. This API does not start, stop, delete, or otherwise manage Nigiri.
 
-On timeout or a stream-limit breach the crate kills and reaps the child it spawned. Because real `nigiri` is a shell wrapper around `docker`, a `docker exec` it already started is not in that process group and runs to completion, so a mutating RPC that times out may still commit on the node.
+On timeout or a stream-limit breach the crate kills and reaps the child it spawned. `nigiri` in turn runs the `docker` CLI as its own child, which the kill does not reach, so that process survives as an orphan. More importantly, the RPC it already handed to the node runs to completion inside the container regardless: killing a client is not cancellation. A mutating RPC that times out may still commit, and recovery remains host-owned.
 
 ### Bitcoin Core v30 response types
 
