@@ -53,6 +53,9 @@ mod network;
 mod rpc;
 mod types;
 
+#[cfg(feature = "bitcoin-rpc-types")]
+pub use corepc_types as bitcoin_rpc_types;
+
 pub use client::NigiriClient;
 pub use config::NigiriConfig;
 pub use error::NigiriError;
