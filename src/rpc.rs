@@ -395,9 +395,8 @@ fn validate_rpc_method(method: &str) -> Result<(), NigiriError> {
         return Ok(());
     }
 
-    Err(NigiriError::InvalidResponse {
-        operation: "RPC method validation".into(),
-        detail: "method must contain only ASCII letters, digits, and underscores".to_owned(),
+    Err(NigiriError::InvalidRequest {
+        detail: "RPC method must contain only ASCII letters, digits, and underscores".into(),
     })
 }
 
@@ -675,6 +674,24 @@ mod tests {
         }
     }
 
+    /// Budget for confirming a killed child never performed its side effect.
+    ///
+    /// Comfortably exceeds the fixture's `sleep 1` so a surviving child has every
+    /// chance to write. Polling means a broken kill fails fast instead of racing a
+    /// fixed sleep, where the marker could land just after a single check.
+    const MARKER_WATCH: Duration = Duration::from_secs(5);
+
+    async fn marker_stays_absent(marker: &std::path::Path) -> bool {
+        let deadline = tokio::time::Instant::now() + MARKER_WATCH;
+        while tokio::time::Instant::now() < deadline {
+            if marker.exists() {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        !marker.exists()
+    }
+
     fn fake_client<N: crate::NigiriNetwork>(timeout: Duration) -> NigiriClient<N> {
         fake_client_with_limit(timeout, DEFAULT_MAX_RPC_RESPONSE_BYTES)
     }
@@ -838,11 +855,15 @@ mod tests {
             .rpc::<(), _, _>("invalid-method", std::iter::empty::<&str>())
             .await
             .unwrap_err();
-        assert!(matches!(
-            error,
-            NigiriError::InvalidResponse { ref operation, .. }
-                if operation.as_ref() == "RPC method validation"
-        ));
+        // The variant itself now says the input was rejected before any spawn,
+        // so no caller needs to string-match a synthetic operation label.
+        let NigiriError::InvalidRequest { detail } = &error else {
+            panic!("expected an invalid request, got {error}");
+        };
+        assert!(
+            detail.contains("ASCII letters, digits, and underscores"),
+            "unhelpful detail: {detail}"
+        );
     }
 
     #[tokio::test]
@@ -880,9 +901,8 @@ mod tests {
             } else {
                 assert!(matches!(error, NigiriError::InvalidResponse { .. }));
             }
-            tokio::time::sleep(Duration::from_millis(1_200)).await;
             assert!(
-                !marker.exists(),
+                marker_stays_absent(&marker).await,
                 "stream-limited child survived and wrote {}",
                 marker.display()
             );
@@ -993,11 +1013,45 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(matches!(
-            error,
-            NigiriError::InvalidResponse { ref operation, .. }
-                if operation.as_ref() == "configuration"
-        ));
+        let NigiriError::InvalidRequest { detail } = &error else {
+            panic!("expected an invalid request, got {error}");
+        };
+        assert!(
+            detail.contains("greater than zero"),
+            "unhelpful detail: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_response_limit_is_rejected_during_configuration() {
+        // An unbounded ceiling would let one RPC failure allocate its way to an
+        // out-of-memory abort while formatting the error.
+        let error = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+            chopsticks_url: Url::parse("http://127.0.0.1:1").unwrap(),
+            esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
+            executable: PathBuf::from("nigiri"),
+            timeout: Duration::from_secs(1),
+            max_rpc_response_bytes: crate::MAX_RPC_RESPONSE_BYTES_LIMIT + 1,
+        })
+        .unwrap_err();
+
+        let NigiriError::InvalidRequest { detail } = &error else {
+            panic!("expected an invalid request, got {error}");
+        };
+        assert!(
+            detail.contains("MAX_RPC_RESPONSE_BYTES_LIMIT"),
+            "unhelpful detail: {detail}"
+        );
+
+        // The boundary itself must be accepted.
+        NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+            chopsticks_url: Url::parse("http://127.0.0.1:1").unwrap(),
+            esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
+            executable: PathBuf::from("nigiri"),
+            timeout: Duration::from_secs(1),
+            max_rpc_response_bytes: crate::MAX_RPC_RESPONSE_BYTES_LIMIT,
+        })
+        .expect("the documented maximum must be accepted");
     }
 
     #[tokio::test]
@@ -1299,10 +1353,10 @@ mod tests {
             NigiriError::Timeout { ref operation, .. }
                 if operation.as_ref() == "timeout"
         ));
-        tokio::time::sleep(Duration::from_millis(1_200)).await;
         assert!(
-            !marker.exists(),
-            "timed-out child survived and wrote marker"
+            marker_stays_absent(&marker).await,
+            "timed-out child survived and wrote {}",
+            marker.display()
         );
     }
 

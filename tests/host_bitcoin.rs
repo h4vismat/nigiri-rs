@@ -71,6 +71,10 @@ async fn bitcoin_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
 #[tokio::test]
 #[ignore = "requires host Nigiri"]
 async fn bitcoin_public_rpc_deserializes_native_and_core_v30_types() -> Result<(), BoxError> {
+    // Deliberately no HostChainLock: this test only reads. Its assertions (a
+    // nonzero height, hashes that deserialize) hold even against a tip observed
+    // mid-reorg by a neighbouring test, so the exclusive mutation lock would only
+    // serialize work that does not mutate. See README, "Host integration tests".
     let client = NigiriClient::<Bitcoin>::new();
     client.wait_ready().await?;
 

@@ -72,11 +72,10 @@ fn invalid_configuration_is_rejected() {
     };
 
     let error = NigiriClient::<Liquid>::with_config(config).unwrap_err();
-    assert!(matches!(
-        error,
-        NigiriError::InvalidResponse { ref operation, .. }
-            if operation.as_ref() == "configuration"
-    ));
+    assert!(
+        matches!(error, NigiriError::InvalidRequest { .. }),
+        "expected a pre-spawn rejection, got {error}"
+    );
 }
 
 #[test]

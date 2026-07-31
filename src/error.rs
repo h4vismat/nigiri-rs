@@ -38,6 +38,13 @@ pub enum NigiriError {
         operation: Cow<'static, str>,
         duration: Duration,
     },
+    /// Caller input was rejected before any Nigiri process was spawned.
+    ///
+    /// Distinct from [`NigiriError::InvalidResponse`], which means Nigiri ran and
+    /// returned something unusable. Covers configuration validation and RPC method
+    /// name validation.
+    #[error("invalid request: {detail}")]
+    InvalidRequest { detail: Cow<'static, str> },
     #[error("invalid response during {operation}: {detail}")]
     InvalidResponse {
         operation: Cow<'static, str>,
