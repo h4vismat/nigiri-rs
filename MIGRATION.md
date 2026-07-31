@@ -1,4 +1,16 @@
-# Migrating from nigiri-rs 0.1.x to 0.2.0
+# Migrating nigiri-rs
+
+## From 0.2.x to 0.3.0
+
+Version 0.3.0 adds a public, type-directed `NigiriClient::rpc<R>()` escape hatch for Bitcoin and Liquid. This deliberately reverses the 0.2 policy that arbitrary RPC was unavailable.
+
+Existing curated methods remain supported and source-compatible. Use them when their stronger native return contracts cover the required operation.
+
+Enable `bitcoin-rpc-types` to use the optional `corepc-types` re-export. Nigiri v0.5.16 runs Bitcoin Core v30.0, so its verified response module is `nigiri_rs::bitcoin_rpc_types::v30`.
+
+RPC arguments are separate CLI-style strings. The method never accepts one combined command string and never invokes a shell. Arbitrary methods can mutate wallet and chain state; lifecycle and test synchronization remain host-owned.
+
+## From 0.1.x to 0.2.0
 
 Version 0.2.0 intentionally breaks the Liquid-only, stringly typed API.
 
@@ -45,6 +57,6 @@ The former synchronous `cli_mint` and `cli_faucet_asset` helpers were removed. U
 
 ## RPC and lifecycle boundaries
 
-There is no public raw RPC method. Public wrappers parse their exact expected response into native types.
+In version 0.2.0, there was no public raw RPC method. Public wrappers parsed their exact expected response into native types.
 
 The host must start and stop Nigiri. Version 0.2.0 does not start containers, detect-and-skip a missing host, delete datadirs, or clean up Nigiri from `Drop`.
