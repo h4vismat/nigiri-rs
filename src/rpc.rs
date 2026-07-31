@@ -35,7 +35,38 @@ where
 }
 
 impl<N: NigiriNetwork> NigiriClient<N> {
-    pub(crate) async fn rpc<I, S>(
+    /// Invokes a node RPC through Nigiri and deserializes its response.
+    ///
+    /// Arguments use the same separate CLI-style strings accepted by
+    /// `nigiri rpc`; this method never invokes a shell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NigiriError`] when the method name is invalid, Nigiri cannot be
+    /// executed, the process fails or times out, or the response does not match
+    /// `R`. Caller arguments and successful response content are omitted from
+    /// deserialization errors.
+    ///
+    /// # State changes
+    ///
+    /// RPC methods may mutate node wallets or active chain state. The caller owns
+    /// synchronization and restoration for mutating host tests.
+    pub async fn rpc<R, I, S>(&self, method: &'static str, args: I) -> Result<R, NigiriError>
+    where
+        R: DeserializeOwned,
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        validate_rpc_method(method)?;
+        let args: Vec<OsString> = args
+            .into_iter()
+            .map(|argument| OsString::from(argument.as_ref()))
+            .collect();
+        let stdout = self.rpc_stdout(method, args).await?;
+        parse_rpc_response(method, &stdout)
+    }
+
+    pub(crate) async fn rpc_stdout<I, S>(
         &self,
         method: &'static str,
         args: I,
@@ -112,7 +143,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     pub async fn new_address(&self) -> Result<N::Address, NigiriError> {
         const OPERATION: &str = "new address";
         let stdout = self
-            .rpc("getnewaddress", std::iter::empty::<&str>())
+            .rpc_stdout("getnewaddress", std::iter::empty::<&str>())
             .await?;
         N::parse_address(OPERATION, &stdout)
     }
@@ -121,7 +152,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     pub async fn best_block_hash(&self) -> Result<N::BlockHash, NigiriError> {
         const OPERATION: &str = "best block hash";
         let stdout = self
-            .rpc("getbestblockhash", std::iter::empty::<&str>())
+            .rpc_stdout("getbestblockhash", std::iter::empty::<&str>())
             .await?;
         N::parse_block_hash(OPERATION, &stdout)
     }
@@ -141,7 +172,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         }
         let blocks = blocks.to_string();
         let stdout = self
-            .rpc("generatetoaddress", [blocks.as_str(), address])
+            .rpc_stdout("generatetoaddress", [blocks.as_str(), address])
             .await?;
         let hashes: Vec<String> =
             serde_json::from_str(&stdout).map_err(|_| NigiriError::InvalidResponse {
@@ -166,7 +197,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
 
     async fn rpc_unit(&self, method: &'static str, hash: &N::BlockHash) -> Result<(), NigiriError> {
         let hash = hash.to_string();
-        let stdout = self.rpc(method, [hash.as_str()]).await?;
+        let stdout = self.rpc_stdout(method, [hash.as_str()]).await?;
         if stdout.is_empty() || stdout == "null" {
             Ok(())
         } else {
@@ -378,7 +409,7 @@ mod tests {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
         let secret = "caller-secret-descriptor";
 
-        let error = client.rpc("fail", [secret]).await.unwrap_err();
+        let error = client.rpc::<(), _, _>("fail", [secret]).await.unwrap_err();
 
         let NigiriError::RpcFailed {
             method,
@@ -398,7 +429,10 @@ mod tests {
         let client = fake_client::<Liquid>(Duration::from_secs(2));
         let secret = "caller-secret-descriptor";
 
-        let error = client.rpc("rpc_error", [secret]).await.unwrap_err();
+        let error = client
+            .rpc::<(), _, _>("rpc_error", [secret])
+            .await
+            .unwrap_err();
 
         let NigiriError::RpcFailed {
             method,
@@ -419,7 +453,10 @@ mod tests {
         let client = fake_client::<Liquid>(Duration::from_secs(2));
         let secret = "caller-secret-descriptor";
 
-        let error = client.rpc("stderr_zero", [secret]).await.unwrap_err();
+        let error = client
+            .rpc::<(), _, _>("stderr_zero", [secret])
+            .await
+            .unwrap_err();
 
         let NigiriError::RpcFailed {
             method,
@@ -432,6 +469,106 @@ mod tests {
         assert_eq!(method, "stderr_zero");
         assert_eq!(exit_code, Some(0));
         assert!(!stderr.contains(secret));
+    }
+
+    #[tokio::test]
+    async fn public_rpc_deserializes_bitcoin_and_liquid_results() {
+        let bitcoin = fake_client::<Bitcoin>(Duration::from_secs(2));
+        let height: u64 = bitcoin
+            .rpc("json_number", std::iter::empty::<&str>())
+            .await
+            .unwrap();
+        assert_eq!(height, 42);
+
+        let liquid = fake_client::<Liquid>(Duration::from_secs(2));
+        let txid: elements::Txid = liquid
+            .rpc("unquoted_id", std::iter::empty::<&str>())
+            .await
+            .unwrap();
+        assert_eq!(
+            txid.to_string(),
+            "7777777777777777777777777777777777777777777777777777777777777777"
+        );
+
+        let result: () = liquid
+            .rpc("void_result", std::iter::empty::<&str>())
+            .await
+            .unwrap();
+        assert_eq!(result, ());
+    }
+
+    #[tokio::test]
+    async fn public_rpc_rejects_invalid_method_before_process_spawn() {
+        let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+            chopsticks_url: Url::parse("http://127.0.0.1:1").unwrap(),
+            esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
+            executable: PathBuf::from("/definitely/missing/nigiri/binary"),
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap();
+
+        let error = client
+            .rpc::<(), _, _>("invalid-method", std::iter::empty::<&str>())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            NigiriError::InvalidResponse {
+                operation: "RPC method validation",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn public_rpc_does_not_copy_invalid_response_into_error() {
+        let client = fake_client::<Liquid>(Duration::from_secs(2));
+        let error = client
+            .rpc::<Vec<u64>, _, _>("invalid_response", std::iter::empty::<&str>())
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().contains("response-secret-material"));
+    }
+
+    #[tokio::test]
+    async fn public_rpc_preserves_bounded_process_output_contracts() {
+        let client = fake_client::<Bitcoin>(Duration::from_secs(2));
+
+        let stdout_error = client
+            .rpc::<String, _, _>("oversized_stdout", std::iter::empty::<&str>())
+            .await
+            .unwrap_err();
+        assert!(matches!(stdout_error, NigiriError::InvalidResponse { .. }));
+
+        let stderr_error = client
+            .rpc::<(), _, _>("oversized_stderr", std::iter::empty::<&str>())
+            .await
+            .unwrap_err();
+        let NigiriError::RpcFailed { stderr, .. } = stderr_error else {
+            panic!("expected bounded RPC failure");
+        };
+        assert!(stderr.ends_with("…[truncated]"));
+        assert!(stderr.len() <= super::MAX_BODY_BYTES + "…[truncated]".len());
+    }
+
+    #[tokio::test]
+    async fn public_rpc_deserializes_string_and_json_value_results() {
+        let client = fake_client::<Bitcoin>(Duration::from_secs(2));
+
+        let id: String = client
+            .rpc("unquoted_id", std::iter::empty::<&str>())
+            .await
+            .unwrap();
+        assert_eq!(
+            id,
+            "7777777777777777777777777777777777777777777777777777777777777777"
+        );
+
+        let response: serde_json::Value = client
+            .rpc("json_number", std::iter::empty::<&str>())
+            .await
+            .unwrap();
+        assert_eq!(response, serde_json::json!(42));
     }
 
     #[tokio::test]
@@ -473,7 +610,7 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
 
         let error = client
-            .rpc("timeout", [marker.as_os_str()])
+            .rpc_stdout("timeout", [marker.as_os_str()])
             .await
             .unwrap_err();
         assert!(matches!(

@@ -31,6 +31,24 @@ case "$method" in
         sleep 1
         printf alive > "$marker"
         ;;
+    json_number)
+        printf '42\n'
+        ;;
+    unquoted_id)
+        printf '7777777777777777777777777777777777777777777777777777777777777777\n'
+        ;;
+    void_result)
+        ;;
+    invalid_response)
+        printf 'response-secret-material\n'
+        ;;
+    oversized_stdout)
+        head -c 70000 /dev/zero | tr '\000' x
+        ;;
+    oversized_stderr)
+        head -c 70000 /dev/zero | tr '\000' x >&2
+        exit 18
+        ;;
     *)
         printf 'unsupported fake method\n' >&2
         exit 19
