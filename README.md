@@ -115,9 +115,11 @@ let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
 # }
 ```
 
-A method that exits zero, writes nothing to stdout, and writes to stderr is reported as `NigiriError::RpcFailed`, because that is how the node CLIs surface some errors. Keep the host `nigiri` wrapper's stderr free of unrelated noise or void RPCs will report spurious failures.
+A method that exits zero, writes nothing to stdout, and writes non-whitespace content to stderr is reported as `NigiriError::RpcFailed`, because that is how the node CLIs surface some errors. Whitespace-only stderr does not fail a void result. Keep the host `nigiri` wrapper's stderr free of unrelated noise or void RPCs will report spurious failures.
 
 Arbitrary RPC methods may mutate node wallets or active chain state. Tests using mutating RPCs must coordinate host access and restore valid state. This API does not start, stop, delete, or otherwise manage Nigiri.
+
+On timeout or a stream-limit breach the crate kills and reaps the child it spawned. Because real `nigiri` is a shell wrapper around `docker`, a `docker exec` it already started is not in that process group and runs to completion, so a mutating RPC that times out may still commit on the node.
 
 ### Bitcoin Core v30 response types
 

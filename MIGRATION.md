@@ -45,14 +45,22 @@ Crate-owned labels stay borrowed, so this allocates nothing for the curated meth
 
 The CLI executor drains stdout and stderr concurrently under the configured timeout, so a
 child that fills one pipe can no longer deadlock the read. Breaching the retention limit or
-the timeout kills and reaps the child before it can perform a follow-up side effect. Retained
-stderr is bounded, has ANSI escape sequences stripped, and preserves UTF-8 through lossy
-decoding.
+the timeout kills and reaps the spawned child, subject to the process-group limit noted
+below. Retained stderr is bounded, has ANSI escape sequences stripped, and preserves UTF-8
+through lossy decoding.
 
 Caller arguments are redacted from retained stderr on every code path. Each invocation
 builder declares where its caller-supplied values begin, so the non-RPC subcommands
 (`mint`, `faucet_asset`) redact their address, quantity, and asset arguments the same way
-`rpc()` redacts its own.
+`rpc()` redacts its own. Redaction anchors on a 16-byte prefix and extends over however
+much of the argument the CLI actually echoed, so an elided value (`Invalid descriptor
+"wpkh(cQr..."`) is covered too. It remains textual matching: a CLI that re-encodes an
+argument, or echoes only its tail, can still surface that form.
+
+Killing a timed-out or over-limit child signals the direct child only. Real `nigiri` is a
+shell wrapper around `docker`, so a `docker exec` it already started continues to
+completion. A mutating RPC that times out may therefore still commit on the node; the host
+owns recovery.
 
 ### RPC failure detection changed
 
