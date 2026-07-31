@@ -4,6 +4,7 @@ use std::{
     process::Stdio,
 };
 
+use serde::de::DeserializeOwned;
 use tokio::process::Command;
 
 use crate::{NigiriClient, NigiriError, NigiriNetwork, http::MAX_BODY_BYTES};
@@ -177,6 +178,43 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     }
 }
 
+fn validate_rpc_method(method: &'static str) -> Result<(), NigiriError> {
+    if !method.is_empty()
+        && method
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Ok(());
+    }
+
+    Err(NigiriError::InvalidResponse {
+        operation: "RPC method validation",
+        detail: "method must contain only ASCII letters, digits, and underscores".to_owned(),
+    })
+}
+
+fn parse_rpc_response<R>(operation: &'static str, stdout: &str) -> Result<R, NigiriError>
+where
+    R: DeserializeOwned,
+{
+    let direct = if stdout.is_empty() { "null" } else { stdout };
+    if let Ok(response) = serde_json::from_str(direct) {
+        return Ok(response);
+    }
+
+    if !stdout.is_empty() {
+        let quoted = serde_json::to_string(stdout).expect("serializing a string cannot fail");
+        if let Ok(response) = serde_json::from_str(&quoted) {
+            return Ok(response);
+        }
+    }
+
+    Err(NigiriError::InvalidResponse {
+        operation,
+        detail: "RPC response did not match the requested type".to_owned(),
+    })
+}
+
 fn bounded_redacted(stderr: &[u8], args: &[OsString]) -> String {
     let bounded = &stderr[..stderr.len().min(MAX_BODY_BYTES)];
     let mut text = String::from_utf8_lossy(bounded).into_owned();
@@ -213,9 +251,80 @@ fn strip_ansi(input: &str) -> String {
 mod tests {
     use std::{ffi::OsString, path::PathBuf, time::Duration};
 
+    use serde::Deserialize;
     use url::Url;
 
     use crate::{Bitcoin, Liquid, NigiriClient, NigiriConfig, NigiriError};
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct FixtureInfo {
+        chain: String,
+        blocks: u64,
+    }
+
+    #[test]
+    fn typed_rpc_parser_handles_json_and_unquoted_native_values() {
+        let object: FixtureInfo =
+            super::parse_rpc_response("fixture object", r#"{"chain":"regtest","blocks":42}"#)
+                .unwrap();
+        assert_eq!(
+            object,
+            FixtureInfo {
+                chain: "regtest".to_owned(),
+                blocks: 42,
+            }
+        );
+
+        let height: u64 = super::parse_rpc_response("fixture height", "42").unwrap();
+        assert_eq!(height, 42);
+
+        let hashes: Vec<u64> = super::parse_rpc_response("fixture array", "[1,2,3]").unwrap();
+        assert_eq!(hashes, vec![1, 2, 3]);
+
+        let active: bool = super::parse_rpc_response("fixture boolean", "true").unwrap();
+        assert!(active);
+
+        let absent: Option<u64> = super::parse_rpc_response("fixture null", "null").unwrap();
+        assert_eq!(absent, None);
+
+        let hash: elements::BlockHash = super::parse_rpc_response(
+            "fixture hash",
+            "5555555555555555555555555555555555555555555555555555555555555555",
+        )
+        .unwrap();
+        assert_eq!(
+            hash.to_string(),
+            "5555555555555555555555555555555555555555555555555555555555555555"
+        );
+
+        let unit: () = super::parse_rpc_response("fixture void", "").unwrap();
+        assert_eq!(unit, ());
+    }
+
+    #[test]
+    fn typed_rpc_parser_omits_malformed_response_content_from_errors() {
+        let secret = "response-secret-material";
+        let error = super::parse_rpc_response::<Vec<u64>>("fixture malformed", secret).unwrap_err();
+        let rendered = error.to_string();
+        assert!(!rendered.contains(secret));
+        assert!(matches!(
+            error,
+            NigiriError::InvalidResponse {
+                operation: "fixture malformed",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rpc_method_validation_accepts_tokens_and_rejects_unsafe_names() {
+        assert!(super::validate_rpc_method("getblockchaininfo").is_ok());
+        assert!(super::validate_rpc_method("future_rpc2").is_ok());
+
+        for invalid in ["", "get-block", "get block", "get\nblock"] {
+            assert!(super::validate_rpc_method(invalid).is_err());
+        }
+    }
 
     fn fake_client<N: crate::NigiriNetwork>(timeout: Duration) -> NigiriClient<N> {
         let fixture =
