@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
-use nigiri_rs::{Liquid, NigiriClient, NigiriConfig};
+use nigiri_rs::{DEFAULT_MAX_RPC_RESPONSE_BYTES, Liquid, NigiriClient, NigiriConfig};
 use serde::Deserialize;
 use url::Url;
 
@@ -15,6 +15,7 @@ fn fake_client<N: nigiri_rs::NigiriNetwork>() -> NigiriClient<N> {
         esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
         executable,
         timeout: Duration::from_secs(2),
+        max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
     })
     .unwrap()
 }

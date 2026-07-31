@@ -1,4 +1,14 @@
 #!/bin/sh
+# Nigiri's non-RPC subcommands take caller values directly after the subcommand
+# name, so they exercise a different redaction boundary than `nigiri rpc`.
+case "$1" in
+    mint|faucet)
+        printf 'cli failed args:' >&2
+        printf ' %s' "$@" >&2
+        printf '\n' >&2
+        exit 22
+        ;;
+esac
 if [ "$2" = "--liquid" ]; then
     method="$3"
     shift_count=3
@@ -75,6 +85,15 @@ case "$method" in
         ;;
     unicode_json)
         printf '\033[32m%s\033[0m\n' '{"message":"ação 日本語 🚀"}'
+        ;;
+    invalid_utf8_stdout)
+        printf 'prefix\377\376suffix\n'
+        ;;
+    inline_error_phrase)
+        printf '%s\n' '{"message":"the operator log said error code: -8 last week"}'
+        ;;
+    blank_stderr_void)
+        printf '\n' >&2
         ;;
     bounded_both_streams)
         head -c 60000 /dev/zero | tr '\000' o
