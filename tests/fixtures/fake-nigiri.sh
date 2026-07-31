@@ -25,6 +25,9 @@ case "$method" in
     generatetoaddress)
         printf '["5555555555555555555555555555555555555555555555555555555555555555","6666666666666666666666666666666666666666666666666666666666666666"]\n'
         ;;
+    getblockchaininfo)
+        printf '%s\n' '{"chain":"regtest","blocks":101,"headers":101,"bestblockhash":"5555555555555555555555555555555555555555555555555555555555555555","bits":"207fffff","target":"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","difficulty":4.656542373906925e-10,"time":1700000000,"mediantime":1700000000,"verificationprogress":1.0,"initialblockdownload":false,"chainwork":"02","size_on_disk":4096,"pruned":false,"warnings":[]}'
+        ;;
     timeout)
         shift "$shift_count"
         marker="$1"
