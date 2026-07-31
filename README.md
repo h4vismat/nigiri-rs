@@ -1,113 +1,144 @@
 # nigiri-rs
 
-A Rust client library for [Nigiri](https://github.com/vulpemventures/nigiri), providing an async API to interact with a local Liquid regtest environment. Designed for end-to-end testing of applications built on the [Liquid Network](https://liquid.net).
+`nigiri-rs` is a typed asynchronous client for Bitcoin and Liquid services in an already-running [Nigiri](https://github.com/vulpemventures/nigiri) regtest environment.
 
-## Prerequisites
+Version 0.2.0 is a breaking release. Network marker types select native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
 
-- [Nigiri](https://github.com/vulpemventures/nigiri) installed and running with the `--liquid` flag:
+## Lifecycle ownership
+
+The host owns Nigiri's complete lifecycle. This library provides readiness checks but never:
+
+- starts or stops Nigiri;
+- invokes Docker;
+- provisions or deletes datadirs;
+- removes containers or volumes;
+- performs cleanup from `Drop`.
+
+Start the required services before running a client or an explicitly ignored host test:
 
 ```sh
+# Bitcoin only
+nigiri start
+
+# Bitcoin and Liquid
 nigiri start --liquid
 ```
 
-## Installation
+The verified CLI and port contract is Nigiri v0.5.16, commit `39fd5891d093bfb8c2575b79640b95a830834f9c`.
 
-Add to your `Cargo.toml`:
+## Quick start
 
-```toml
-[dev-dependencies]
-nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs" }
+```rust,no_run
+use bitcoin::Amount;
+use nigiri_rs::{Bitcoin, Liquid, NigiriClient};
+
+# async fn example() -> Result<(), nigiri_rs::NigiriError> {
+let bitcoin = NigiriClient::<Bitcoin>::new();
+let liquid = NigiriClient::<Liquid>::new();
+
+bitcoin.wait_ready().await?;
+liquid.wait_ready().await?;
+
+let bitcoin_address = bitcoin.new_address().await?;
+let bitcoin_address_text = bitcoin_address.to_string();
+let bitcoin_txid = bitcoin
+    .faucet(&bitcoin_address_text, Some(Amount::from_sat(100_000)))
+    .await?;
+
+let liquid_address = liquid.new_address().await?;
+let liquid_txid = liquid
+    .faucet(&liquid_address.to_string(), Some(Amount::from_sat(100_000)))
+    .await?;
+
+println!("Bitcoin funding: {bitcoin_txid}");
+println!("Liquid funding: {liquid_txid}");
+# Ok(())
+# }
 ```
 
-## Quick Start
+There is deliberately no default generic parameter. `NigiriClient::new()` without an explicit network is not supported.
+
+## Verified default endpoints
+
+| Network | Chopsticks | Esplora/electrs |
+| --- | --- | --- |
+| Bitcoin | `http://localhost:3000/` | `http://localhost:30000/` |
+| Liquid | `http://localhost:3001/` | `http://localhost:30001/` |
+
+Nigiri v0.5.16 invokes node RPCs in these forms:
+
+```text
+nigiri rpc <method> <args...>
+nigiri rpc --liquid <method> <args...>
+```
+
+The RPC executor is private. The public API exposes only typed fixture operations such as address creation, mining, invalidation, and reconsideration. Arbitrary raw RPC access is intentionally absent.
+
+## Custom configuration
 
 ```rust
-use nigiri_rs::NigiriClient;
+use std::{path::PathBuf, time::Duration};
+use nigiri_rs::{Bitcoin, NigiriClient, NigiriConfig};
+use url::Url;
 
-#[tokio::main]
-async fn main() -> Result<(), nigiri_rs::NigiriError> {
-    let client = NigiriClient::new();
+let config = NigiriConfig {
+    chopsticks_url: Url::parse("http://regtest-host:4300")?,
+    esplora_url: Url::parse("http://regtest-host:4301")?,
+    executable: PathBuf::from("/opt/nigiri/bin/nigiri"),
+    timeout: Duration::from_secs(20),
+};
 
-    // Wait for Nigiri to be ready
-    client.wait_ready().await?;
-
-    // Send L-BTC to an address
-    let txid = client.faucet("el1qq...", Some(1.0)).await?;
-    println!("Faucet txid: {txid}");
-
-    // Mint a custom Liquid asset
-    let mint = client.mint("el1qq...", 1000, "MyToken", "MTK").await?;
-    println!("Asset: {}, txid: {}", mint.asset, mint.txid);
-
-    // Query UTXOs
-    let utxos = client.get_utxos("el1qq...").await?;
-    println!("UTXOs: {}", utxos.len());
-
-    Ok(())
-}
+let client = NigiriClient::<Bitcoin>::with_config(config)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## API
+Construction accepts only HTTP(S) base URLs, normalizes their trailing slash, rejects query/fragment components, requires a nonempty executable path, and requires a nonzero timeout. Cloning a client clones only immutable configuration and the shared HTTP transport; it never implies ownership of an external process.
 
-### Client
+## Typed network differences
 
-```rust
-// Default local ports (Chopsticks: 3001, Electrs: 30001)
-let client = NigiriClient::new();
+Shared methods live on `NigiriClient<N>` and return the associated native types selected by `NigiriNetwork`:
 
-// Custom URLs
-let client = NigiriClient::with_urls("http://host:3001", "http://host:30001");
-```
+| Contract | Bitcoin | Liquid |
+| --- | --- | --- |
+| Transaction ID | `bitcoin::Txid` | `elements::Txid` |
+| Block hash | `bitcoin::BlockHash` | `elements::BlockHash` |
+| New address | checked regtest `bitcoin::Address` | regtest `elements::Address` |
+| UTXO | `BitcoinUtxo` | `LiquidUtxo` with explicit/commitment fields |
+| Transaction | `BitcoinTxInfo` | `LiquidTxInfo` |
+| Address information | `BitcoinAddressInfo` | `LiquidAddressInfo` |
 
-### Faucet & Mint
+Address inputs used as HTTP paths or CLI arguments remain `&str`, which avoids unnecessary conversions for LWK confidential addresses. Monetary Bitcoin and L-BTC values use `bitcoin::Amount`; serialization is exact decimal BTC and never passes through `f64`.
 
-| Method | Description |
-|--------|-------------|
-| `faucet(address, amount)` | Send L-BTC to an address (auto-mines a block) |
-| `cli_faucet_asset(address, amount, asset_id)` | Send a specific asset via CLI |
-| `mint(address, quantity, name, ticker)` | Mint a new Liquid asset |
-| `cli_mint(address, quantity, name, ticker)` | Mint via CLI, returns `(asset_id, txid)` |
+Liquid-only methods exist solely on `NigiriClient<Liquid>`:
 
-### Queries
+- `mint`;
+- `faucet_asset`.
 
-| Method | Description |
-|--------|-------------|
-| `get_utxos(address)` | List UTXOs for an address |
-| `has_funds(address)` | Check if an address has any UTXOs |
-| `get_address_info(address)` | Address stats (tx count, funded/spent totals) |
-| `get_tx(txid)` | Transaction details |
-| `get_tx_status(txid)` | Confirmation status |
-| `block_height()` | Current block height |
+They cannot be called on `NigiriClient<Bitcoin>`; compile-fail documentation tests enforce this boundary.
 
-### Broadcasting & Confirmation
+The dependency family is aligned with LWK 0.18.1: `elements 0.25.3` and compatible `bitcoin 0.32.x` types. `nigiri-rs` does not depend on LWK.
 
-| Method | Description |
-|--------|-------------|
-| `broadcast_tx(tx_hex)` | Broadcast a raw transaction (auto-mines a block) |
-| `wait_for_confirmation(txid, timeout)` | Poll until a transaction is confirmed |
+## Tests
 
-### Utilities
-
-| Method / Constant | Description |
-|-------------------|-------------|
-| `esplora_url()` | Returns the Esplora API base URL (useful with `EsploraClientBuilder`) |
-| `LBTC_REGTEST_ASSET` | Policy asset ID for L-BTC on regtest |
-
-## Architecture
-
-The client talks to two Nigiri services:
-
-- **Chopsticks** (`localhost:3001`) — state-changing operations: faucet, mint, broadcast. Automatically mines a block after each operation.
-- **Electrs** (`localhost:30001`) — read-only Esplora REST API: UTXOs, transactions, blocks.
-
-## Running Tests
+Pure parsers, command construction, exact amounts, HTTP bounds, process failure, timeout termination, and network types run in the ordinary suite:
 
 ```sh
-nigiri start --liquid
 cargo test
+cargo test --doc
 ```
 
-Tests skip gracefully if Nigiri is not running.
+Host integration tests are always explicit and never silently skip. They reuse the existing host chain, acquire an exclusive cross-process mutation lock, and do not stop or delete Nigiri:
+
+```sh
+cargo test --test host_bitcoin -- --ignored --test-threads=1
+cargo test --test host_liquid -- --ignored --test-threads=1
+```
+
+The reorg tests record their baseline, invalidate only a tip created by that test, reconsider it before releasing the lock, and leave a valid active chain.
+
+## Migrating from 0.1.x
+
+See [MIGRATION.md](MIGRATION.md) for the breaking API changes.
 
 ## License
 

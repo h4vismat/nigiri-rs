@@ -1,12 +1,21 @@
 [package]
 name = "nigiri-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Typed Bitcoin and Liquid clients for host-owned Nigiri regtest infrastructure"
+repository = "https://github.com/h4vismat/nigiri-rs"
 
 [dependencies]
-backon = "1.6.0"
+bitcoin = { version = "0.32.7", features = ["serde"] }
+elements = { version = "0.25.3", features = ["serde"] }
 reqwest = { version = "0.13.2", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }
 thiserror = "2.0.18"
-tokio = { version = "1.50.0", features = ["macros", "test-util", "tokio-macros"] }
+tokio = { version = "1.50.0", features = ["io-util", "macros", "net", "process", "rt", "test-util", "time"] }
+url = "2.5.8"
+
+[dev-dependencies]
+fs2 = "0.4.3"
