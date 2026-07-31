@@ -74,6 +74,27 @@ nigiri rpc --liquid <method> <args...>
 
 The RPC executor is private. The public API exposes only typed fixture operations such as address creation, mining, invalidation, and reconsideration. Arbitrary raw RPC access is intentionally absent.
 
+## Supported API
+
+Both `NigiriClient<Bitcoin>` and `NigiriClient<Liquid>` provide:
+
+- readiness and block-height checks;
+- address funding with exact `bitcoin::Amount` values;
+- typed UTXO, address, transaction, and confirmation-status queries;
+- raw transaction broadcast with a native transaction ID result;
+- confirmation polling;
+- native address creation and active-tip lookup;
+- variable block generation;
+- block invalidation and reconsideration.
+
+`NigiriClient<Liquid>` additionally provides typed asset minting and asset faucet operations. These methods do not exist on the Bitcoin client.
+
+### Deliberate scope limits
+
+Nigiri v0.5.16's default Liquid regtest configuration does not enable PAK enforcement. Consequently, `initpegoutwallet` and `sendtomainchain` fail on the default environment and are not wrapped by this crate. `nigiri-rs` also does not simulate peg-in or peg-out behavior with unrelated transfers.
+
+The crate models only capabilities that the verified default Nigiri networks can execute. Custom federation lifecycle, chain configuration, and cross-chain orchestration remain the host application's responsibility.
+
 ## Custom configuration
 
 ```rust
@@ -133,6 +154,8 @@ Host integration tests are always explicit and never silently skip. They reuse t
 cargo test --test host_bitcoin -- --ignored --test-threads=1
 cargo test --test host_liquid -- --ignored --test-threads=1
 ```
+
+Both Esplora endpoints must be ready before running the host suites. When reusing a stale regtest chain, the host may need to mine a fresh block so the node leaves initial block download and electrs begins serving requests.
 
 The reorg tests record their baseline, invalidate only a tip created by that test, reconsider it before releasing the lock, and leave a valid active chain.
 
