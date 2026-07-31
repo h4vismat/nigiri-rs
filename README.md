@@ -2,7 +2,9 @@
 
 `nigiri-rs` is a typed asynchronous client for Bitcoin and Liquid services in an already-running [Nigiri](https://github.com/vulpemventures/nigiri) regtest environment.
 
-Version 0.2.0 is a breaking release. Network marker types select native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
+Version 0.3.0 adds a public, type-directed `rpc<R>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
+
+Version 0.2.0 was the breaking release that introduced network marker types selecting native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
 
 ## Lifecycle ownership
 
@@ -217,7 +219,7 @@ cargo test
 cargo test --doc
 ```
 
-Host integration tests are always explicit and never silently skip. They reuse the existing host chain, acquire an exclusive cross-process mutation lock, and do not stop or delete Nigiri:
+Host integration tests are always explicit and never silently skip. They reuse the existing host chain and do not stop or delete Nigiri. Mutating tests acquire an exclusive cross-process mutation lock; read-only public RPC tests deliberately run without that lock:
 
 ```sh
 cargo test --test host_bitcoin -- --ignored --test-threads=1

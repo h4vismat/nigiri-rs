@@ -1,13 +1,19 @@
 use std::{
     ffi::{OsStr, OsString},
     path::PathBuf,
-    process::Stdio,
+    process::{ExitStatus, Stdio},
 };
 
 use serde::de::DeserializeOwned;
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncReadExt, Error as IoError},
+    process::{Child, ChildStderr, ChildStdout, Command},
+};
 
 use crate::{NigiriClient, NigiriError, NigiriNetwork, http::MAX_BODY_BYTES};
+
+const PIPE_READ_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_CAPTURE_BYTES: usize = MAX_BODY_BYTES + PIPE_READ_CHUNK_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RpcInvocation {
@@ -92,35 +98,76 @@ impl<N: NigiriNetwork> NigiriClient<N> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|source| NigiriError::ProcessSpawn { operation, source })?;
-        let output = tokio::time::timeout(self.config.timeout, child.wait_with_output())
-            .await
-            .map_err(|_| NigiriError::Timeout {
-                operation,
-                duration: self.config.timeout,
-            })?
-            .map_err(|source| NigiriError::ProcessSpawn { operation, source })?;
+        let stdout = child
+            .stdout
+            .take()
+            .expect("piped child stdout must be available");
+        let stderr = child
+            .stderr
+            .take()
+            .expect("piped child stderr must be available");
+        let caller_args = &invocation.args[N::rpc_prefix().len() + 1..];
+        let capture = tokio::time::timeout(
+            self.config.timeout,
+            capture_process_output(&mut child, stdout, stderr),
+        )
+        .await;
+        let output = match capture {
+            Ok(Ok(CaptureOutcome::Complete(output))) => output,
+            Ok(Ok(CaptureOutcome::StdoutLimit)) => {
+                kill_and_reap(&mut child)
+                    .await
+                    .map_err(|source| NigiriError::ProcessSpawn { operation, source })?;
+                return Err(NigiriError::InvalidResponse {
+                    operation,
+                    detail: "RPC stdout exceeded the configured safety limit".to_owned(),
+                });
+            }
+            Ok(Ok(CaptureOutcome::StderrLimit { stderr })) => {
+                let status = kill_and_reap(&mut child)
+                    .await
+                    .map_err(|source| NigiriError::ProcessSpawn { operation, source })?;
+                return Err(NigiriError::RpcFailed {
+                    method: operation,
+                    exit_code: status.code(),
+                    stderr: bounded_redacted(&stderr, caller_args),
+                });
+            }
+            Ok(Err(source)) => {
+                kill_and_reap(&mut child).await.map_err(|kill_source| {
+                    NigiriError::ProcessSpawn {
+                        operation,
+                        source: kill_source,
+                    }
+                })?;
+                return Err(NigiriError::ProcessSpawn { operation, source });
+            }
+            Err(_) => {
+                kill_and_reap(&mut child)
+                    .await
+                    .map_err(|source| NigiriError::ProcessSpawn { operation, source })?;
+                return Err(NigiriError::Timeout {
+                    operation,
+                    duration: self.config.timeout,
+                });
+            }
+        };
 
         if !output.status.success() {
             return Err(NigiriError::RpcFailed {
                 method: operation,
                 exit_code: output.status.code(),
-                stderr: bounded_redacted(&output.stderr, &invocation.args),
+                stderr: bounded_redacted(&output.stderr, caller_args),
             });
         }
         if output.stdout.is_empty() && !output.stderr.is_empty() {
             return Err(NigiriError::RpcFailed {
                 method: operation,
                 exit_code: output.status.code(),
-                stderr: bounded_redacted(&output.stderr, &invocation.args),
-            });
-        }
-        if output.stdout.len() > MAX_BODY_BYTES {
-            return Err(NigiriError::InvalidResponse {
-                operation,
-                detail: "RPC stdout exceeded the configured safety limit".to_owned(),
+                stderr: bounded_redacted(&output.stderr, caller_args),
             });
         }
         let stdout =
@@ -133,7 +180,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
             return Err(NigiriError::RpcFailed {
                 method: operation,
                 exit_code: output.status.code(),
-                stderr: bounded_redacted(stdout.as_bytes(), &invocation.args),
+                stderr: bounded_redacted(stdout.as_bytes(), caller_args),
             });
         }
         Ok(stdout)
@@ -209,6 +256,89 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     }
 }
 
+struct CapturedOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+enum CaptureOutcome {
+    Complete(CapturedOutput),
+    StdoutLimit,
+    StderrLimit { stderr: Vec<u8> },
+}
+
+async fn capture_process_output(
+    child: &mut Child,
+    mut stdout: ChildStdout,
+    mut stderr: ChildStderr,
+) -> Result<CaptureOutcome, IoError> {
+    let mut stdout_capture = Vec::with_capacity(MAX_CAPTURE_BYTES);
+    let mut stderr_capture = Vec::with_capacity(MAX_CAPTURE_BYTES);
+    let mut stdout_chunk = [0_u8; PIPE_READ_CHUNK_BYTES];
+    let mut stderr_chunk = [0_u8; PIPE_READ_CHUNK_BYTES];
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut status = None;
+
+    loop {
+        if !stdout_open && !stderr_open {
+            let status = match status {
+                Some(status) => status,
+                None => child.wait().await?,
+            };
+            return Ok(CaptureOutcome::Complete(CapturedOutput {
+                status,
+                stdout: stdout_capture,
+                stderr: stderr_capture,
+            }));
+        }
+
+        tokio::select! {
+            read = stdout.read(&mut stdout_chunk), if stdout_open => {
+                let read = read?;
+                if read == 0 {
+                    stdout_open = false;
+                } else {
+                    stdout_capture.extend_from_slice(&stdout_chunk[..read]);
+                    if stdout_capture.len() > MAX_BODY_BYTES {
+                        return Ok(CaptureOutcome::StdoutLimit);
+                    }
+                }
+            }
+            read = stderr.read(&mut stderr_chunk), if stderr_open => {
+                let read = read?;
+                if read == 0 {
+                    stderr_open = false;
+                } else {
+                    stderr_capture.extend_from_slice(&stderr_chunk[..read]);
+                    if stderr_capture.len() > MAX_BODY_BYTES {
+                        return Ok(CaptureOutcome::StderrLimit {
+                            stderr: stderr_capture,
+                        });
+                    }
+                }
+            }
+            child_status = child.wait(), if status.is_none() => {
+                status = Some(child_status?);
+            }
+        }
+    }
+}
+
+async fn kill_and_reap(child: &mut Child) -> Result<ExitStatus, IoError> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+    match child.start_kill() {
+        Ok(()) => child.wait().await,
+        Err(source) => match child.try_wait()? {
+            Some(status) => Ok(status),
+            None => Err(source),
+        },
+    }
+}
+
 fn validate_rpc_method(method: &'static str) -> Result<(), NigiriError> {
     if !method.is_empty()
         && method
@@ -247,32 +377,124 @@ where
 }
 
 fn bounded_redacted(stderr: &[u8], args: &[OsString]) -> String {
-    let bounded = &stderr[..stderr.len().min(MAX_BODY_BYTES)];
-    let mut text = String::from_utf8_lossy(bounded).into_owned();
+    let was_truncated = stderr.len() > MAX_BODY_BYTES;
+    let mut redaction_deltas = vec![0_i32; stderr.len() + 1];
     for argument in args.iter().filter_map(|argument| argument.to_str()) {
         if !argument.is_empty() {
-            text = text.replace(argument, "[redacted]");
+            mark_argument_occurrences(
+                stderr,
+                argument.as_bytes(),
+                was_truncated,
+                &mut redaction_deltas,
+            );
         }
     }
-    if stderr.len() > MAX_BODY_BYTES {
+
+    let mut retained = Vec::with_capacity(MAX_BODY_BYTES);
+    let mut active_redactions = 0_i32;
+    let mut inside_redaction = false;
+    let mut retention_truncated = false;
+    for (index, &byte) in stderr.iter().enumerate() {
+        active_redactions += redaction_deltas[index];
+        if active_redactions > 0 {
+            if !inside_redaction {
+                retention_truncated |=
+                    !extend_bounded(&mut retained, b"[redacted]", MAX_BODY_BYTES);
+                inside_redaction = true;
+            }
+        } else {
+            inside_redaction = false;
+            retention_truncated |= !extend_bounded(&mut retained, &[byte], MAX_BODY_BYTES);
+        }
+    }
+
+    let mut text = String::from_utf8_lossy(&retained).into_owned();
+    truncate_utf8(&mut text, MAX_BODY_BYTES);
+    if was_truncated || retention_truncated {
         text.push_str("…[truncated]");
     }
     text
 }
 
+fn mark_argument_occurrences(
+    input: &[u8],
+    argument: &[u8],
+    input_truncated: bool,
+    deltas: &mut [i32],
+) {
+    let pattern = &argument[..argument.len().min(input.len())];
+    if pattern.is_empty() {
+        return;
+    }
+    let mut prefix_lengths = vec![0_usize; pattern.len()];
+    let mut matched = 0;
+    for index in 1..pattern.len() {
+        while matched > 0 && pattern[index] != pattern[matched] {
+            matched = prefix_lengths[matched - 1];
+        }
+        if pattern[index] == pattern[matched] {
+            matched += 1;
+            prefix_lengths[index] = matched;
+        }
+    }
+
+    matched = 0;
+    for (index, &byte) in input.iter().enumerate() {
+        while matched > 0 && byte != pattern[matched] {
+            matched = prefix_lengths[matched - 1];
+        }
+        if byte == pattern[matched] {
+            matched += 1;
+        }
+        if matched == pattern.len() {
+            let end = index + 1;
+            if argument.len() == pattern.len() || (input_truncated && end == input.len()) {
+                mark_redaction(deltas, end - pattern.len(), end);
+            }
+            matched = prefix_lengths[matched - 1];
+        }
+    }
+
+    if input_truncated && matched > 0 {
+        mark_redaction(deltas, input.len() - matched, input.len());
+    }
+}
+
+fn mark_redaction(deltas: &mut [i32], start: usize, end: usize) {
+    deltas[start] += 1;
+    deltas[end] -= 1;
+}
+
+fn extend_bounded(output: &mut Vec<u8>, bytes: &[u8], limit: usize) -> bool {
+    let retained = bytes.len().min(limit.saturating_sub(output.len()));
+    output.extend_from_slice(&bytes[..retained]);
+    retained == bytes.len()
+}
+
+fn truncate_utf8(text: &mut String, limit: usize) {
+    if text.len() <= limit {
+        return;
+    }
+    let mut boundary = limit;
+    while !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    text.truncate(boundary);
+}
+
 fn strip_ansi(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
-    let mut bytes = input.bytes().peekable();
-    while let Some(byte) = bytes.next() {
-        if byte == 0x1b && bytes.peek() == Some(&b'[') {
-            let _ = bytes.next();
-            for control in bytes.by_ref() {
-                if control.is_ascii_alphabetic() {
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' && characters.peek() == Some(&'[') {
+            let _ = characters.next();
+            for control in characters.by_ref() {
+                if ('@'..='~').contains(&control) {
                     break;
                 }
             }
         } else {
-            output.push(char::from(byte));
+            output.push(character);
         }
     }
     output
@@ -291,6 +513,11 @@ mod tests {
     struct FixtureInfo {
         chain: String,
         blocks: u64,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct UnicodeFixture {
+        message: String,
     }
 
     #[test]
@@ -523,11 +750,101 @@ mod tests {
     #[tokio::test]
     async fn public_rpc_does_not_copy_invalid_response_into_error() {
         let client = fake_client::<Liquid>(Duration::from_secs(2));
+        let caller_secret = "caller-secret-descriptor";
         let error = client
-            .rpc::<Vec<u64>, _, _>("invalid_response", std::iter::empty::<&str>())
+            .rpc::<Vec<u64>, _, _>("invalid_response", [caller_secret])
             .await
             .unwrap_err();
-        assert!(!error.to_string().contains("response-secret-material"));
+        let rendered = error.to_string();
+        assert!(!rendered.contains("response-secret-material"));
+        assert!(!rendered.contains(caller_secret));
+    }
+
+    #[tokio::test]
+    async fn stream_limit_breaches_kill_the_child_before_follow_up_side_effects() {
+        let client = fake_client::<Bitcoin>(Duration::from_secs(3));
+
+        for (method, expected_stderr_failure) in [
+            ("oversized_stdout_then_marker", false),
+            ("oversized_stderr_then_marker", true),
+        ] {
+            let marker = std::env::temp_dir()
+                .join(format!("nigiri-rs-{method}-marker-{}", std::process::id()));
+            let _ = std::fs::remove_file(&marker);
+            let marker_text = marker.to_string_lossy().into_owned();
+
+            let error = client
+                .rpc::<(), _, _>(method, [marker_text.as_str()])
+                .await
+                .unwrap_err();
+            if expected_stderr_failure {
+                assert!(matches!(error, NigiriError::RpcFailed { .. }));
+            } else {
+                assert!(matches!(error, NigiriError::InvalidResponse { .. }));
+            }
+            tokio::time::sleep(Duration::from_millis(1_200)).await;
+            assert!(
+                !marker.exists(),
+                "stream-limited child survived and wrote {}",
+                marker.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stderr_redaction_hides_a_caller_argument_cut_by_the_retention_boundary() {
+        let client = fake_client::<Bitcoin>(Duration::from_secs(2));
+        let secret = format!(
+            "caller-secret-prefix-{}",
+            "s".repeat(super::MAX_BODY_BYTES + 2 * super::PIPE_READ_CHUNK_BYTES)
+        );
+
+        let error = client
+            .rpc::<(), _, _>("long_stderr_secret", [secret.as_str()])
+            .await
+            .unwrap_err();
+        let NigiriError::RpcFailed { stderr, .. } = error else {
+            panic!("expected RPC failure");
+        };
+        assert!(!stderr.contains("caller-secret-prefix"));
+        assert!(stderr.contains("[redacted]"));
+        assert!(stderr.ends_with("…[truncated]"));
+    }
+
+    #[tokio::test]
+    async fn public_rpc_preserves_unicode_while_stripping_ansi() {
+        let client = fake_client::<Liquid>(Duration::from_secs(2));
+
+        let response: UnicodeFixture = client
+            .rpc("unicode_json", std::iter::empty::<&str>())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response,
+            UnicodeFixture {
+                message: "ação 日本語 🚀".to_owned(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_stdout_and_stderr_are_drained_concurrently_without_deadlock() {
+        let client = fake_client::<Bitcoin>(Duration::from_secs(2));
+
+        let error = client
+            .rpc::<(), _, _>("bounded_both_streams", std::iter::empty::<&str>())
+            .await
+            .unwrap_err();
+
+        let NigiriError::RpcFailed {
+            exit_code, stderr, ..
+        } = error
+        else {
+            panic!("expected RPC failure");
+        };
+        assert_eq!(exit_code, Some(21));
+        assert_eq!(stderr.len(), 60_000);
     }
 
     #[tokio::test]

@@ -43,7 +43,8 @@ case "$method" in
     void_result)
         ;;
     invalid_response)
-        printf 'response-secret-material\n'
+        shift "$shift_count"
+        printf 'response-secret-material %s\n' "$1"
         ;;
     oversized_stdout)
         head -c 70000 /dev/zero | tr '\000' x
@@ -51,6 +52,34 @@ case "$method" in
     oversized_stderr)
         head -c 70000 /dev/zero | tr '\000' x >&2
         exit 18
+        ;;
+    oversized_stdout_then_marker)
+        shift "$shift_count"
+        marker="$1"
+        head -c 70000 /dev/zero | tr '\000' x
+        sleep 1
+        printf alive > "$marker"
+        ;;
+    oversized_stderr_then_marker)
+        shift "$shift_count"
+        marker="$1"
+        head -c 70000 /dev/zero | tr '\000' x >&2
+        sleep 1
+        printf alive > "$marker"
+        exit 18
+        ;;
+    long_stderr_secret)
+        shift "$shift_count"
+        printf 'rejected caller value %s\n' "$1" >&2
+        exit 20
+        ;;
+    unicode_json)
+        printf '\033[32m%s\033[0m\n' '{"message":"ação 日本語 🚀"}'
+        ;;
+    bounded_both_streams)
+        head -c 60000 /dev/zero | tr '\000' o
+        head -c 60000 /dev/zero | tr '\000' e >&2
+        exit 21
         ;;
     *)
         printf 'unsupported fake method\n' >&2
