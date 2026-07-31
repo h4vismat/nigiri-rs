@@ -33,8 +33,15 @@ pub(crate) struct RpcInvocation {
 }
 
 impl RpcInvocation {
+    /// Arguments to redact from retained stderr.
+    ///
+    /// Fails closed: a boundary past the end of `args` means a builder is
+    /// mis-declared, so treat every argument as caller-supplied rather than
+    /// silently redacting nothing.
     fn caller_args(&self) -> &[OsString] {
-        self.args.get(self.caller_args_from..).unwrap_or(&[])
+        self.args
+            .get(self.caller_args_from..)
+            .unwrap_or(self.args.as_slice())
     }
 }
 
@@ -80,11 +87,17 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     /// rejected rather than buffered. Raise that limit for methods with large
     /// results, such as `listunspent` or `getblock <hash> 2`.
     ///
-    /// A method that exits zero, writes nothing to stdout, and writes to stderr
-    /// is reported as [`NigiriError::RpcFailed`], because that is how the node
-    /// CLIs surface some errors. A host whose `nigiri` wrapper emits unrelated
-    /// stderr noise will therefore see spurious failures from void RPCs; keep
-    /// the wrapper's stderr clean.
+    /// A method that exits zero, writes nothing to stdout, and writes non-whitespace
+    /// content to stderr is reported as [`NigiriError::RpcFailed`], because that is
+    /// how the node CLIs surface some errors. Whitespace-only stderr does not fail a
+    /// void result. A host whose `nigiri` wrapper emits unrelated stderr noise will
+    /// still see spurious failures from void RPCs; keep the wrapper's stderr clean.
+    ///
+    /// Caller arguments are redacted from retained stderr after ANSI escapes are
+    /// removed, including when the CLI echoes only a leading fragment of a long
+    /// value. Redaction is still textual: a CLI that re-encodes an argument, or
+    /// echoes only its tail, can surface that form. Do not treat it as a hard
+    /// guarantee for secret material.
     ///
     /// # State changes
     ///
@@ -159,12 +172,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         let output = match capture {
             Ok(Ok(CaptureOutcome::Complete(output))) => output,
             Ok(Ok(CaptureOutcome::StdoutLimit)) => {
-                kill_and_reap(&mut child)
-                    .await
-                    .map_err(|source| NigiriError::ProcessSpawn {
-                        operation: operation.clone(),
-                        source,
-                    })?;
+                let _ = kill_and_reap(&mut child).await;
                 return Err(NigiriError::InvalidResponse {
                     operation,
                     detail: format!(
@@ -173,34 +181,20 @@ impl<N: NigiriNetwork> NigiriClient<N> {
                 });
             }
             Ok(Ok(CaptureOutcome::StderrLimit { stderr })) => {
-                let status = kill_and_reap(&mut child).await.map_err(|source| {
-                    NigiriError::ProcessSpawn {
-                        operation: operation.clone(),
-                        source,
-                    }
-                })?;
+                let status = kill_and_reap(&mut child).await.ok();
                 return Err(NigiriError::RpcFailed {
                     method: operation,
-                    exit_code: status.code(),
+                    exit_code: status.and_then(|status| status.code()),
                     stderr: bounded_redacted(&stderr, caller_args, limit),
                 });
             }
             Ok(Err(source)) => {
-                kill_and_reap(&mut child).await.map_err(|kill_source| {
-                    NigiriError::ProcessSpawn {
-                        operation: operation.clone(),
-                        source: kill_source,
-                    }
-                })?;
+                let _ = kill_and_reap(&mut child).await;
                 return Err(NigiriError::ProcessSpawn { operation, source });
             }
             Err(_) => {
-                kill_and_reap(&mut child)
-                    .await
-                    .map_err(|source| NigiriError::ProcessSpawn {
-                        operation: operation.clone(),
-                        source,
-                    })?;
+                // A cleanup failure must not mask why the call actually failed.
+                let _ = kill_and_reap(&mut child).await;
                 return Err(NigiriError::Timeout {
                     operation,
                     duration: self.config.timeout,
@@ -443,11 +437,18 @@ where
 
 fn bounded_redacted(stderr: &[u8], args: &[OsString], limit: usize) -> String {
     let was_truncated = stderr.len() > limit;
-    let mut redaction_deltas = vec![0_i32; stderr.len() + 1];
+
+    // Normalize before matching, never after. A CLI that colorizes part of an
+    // echoed argument would otherwise defeat the byte comparison, and stripping
+    // the escapes afterwards would reassemble the value in cleartext.
+    let normalized = strip_ansi(&String::from_utf8_lossy(stderr));
+    let source = normalized.as_bytes();
+
+    let mut redaction_deltas = vec![0_i32; source.len() + 1];
     for argument in args.iter().filter_map(|argument| argument.to_str()) {
         if !argument.is_empty() {
             mark_argument_occurrences(
-                stderr,
+                source,
                 argument.as_bytes(),
                 was_truncated,
                 &mut redaction_deltas,
@@ -455,11 +456,11 @@ fn bounded_redacted(stderr: &[u8], args: &[OsString], limit: usize) -> String {
         }
     }
 
-    let mut retained = Vec::new();
+    let mut retained = Vec::with_capacity(source.len().min(limit));
     let mut active_redactions = 0_i32;
     let mut inside_redaction = false;
     let mut retention_truncated = false;
-    for (index, &byte) in stderr.iter().enumerate() {
+    for (index, &byte) in source.iter().enumerate() {
         active_redactions += redaction_deltas[index];
         if active_redactions > 0 {
             if !inside_redaction {
@@ -472,7 +473,7 @@ fn bounded_redacted(stderr: &[u8], args: &[OsString], limit: usize) -> String {
         }
     }
 
-    let mut text = strip_ansi(&String::from_utf8_lossy(&retained));
+    let mut text = String::from_utf8_lossy(&retained).into_owned();
     truncate_utf8(&mut text, limit);
     if was_truncated || retention_truncated {
         text.push_str("…[truncated]");
@@ -480,23 +481,35 @@ fn bounded_redacted(stderr: &[u8], args: &[OsString], limit: usize) -> String {
     text
 }
 
+/// Bytes of a caller argument used to anchor a search for it in retained stderr.
+///
+/// A node CLI may echo only a fragment of a long value (`Invalid descriptor
+/// "wpkh(cQr...")`), so redaction anchors on a short prefix and then extends over
+/// however much of the argument actually appears. Sixteen bytes is long enough
+/// that colliding with ordinary diagnostic text is not a practical concern, and
+/// short enough that the search table stays a fixed 128 bytes regardless of how
+/// large the retention limit is.
+const ARGUMENT_PROBE_BYTES: usize = 16;
+
 fn mark_argument_occurrences(
     input: &[u8],
     argument: &[u8],
     input_truncated: bool,
     deltas: &mut [i32],
 ) {
-    let pattern = &argument[..argument.len().min(input.len())];
-    if pattern.is_empty() {
+    let probe_len = argument.len().min(ARGUMENT_PROBE_BYTES).min(input.len());
+    let probe = &argument[..probe_len];
+    if probe.is_empty() {
         return;
     }
-    let mut prefix_lengths = vec![0_usize; pattern.len()];
+
+    let mut prefix_lengths = vec![0_usize; probe.len()];
     let mut matched = 0;
-    for index in 1..pattern.len() {
-        while matched > 0 && pattern[index] != pattern[matched] {
+    for index in 1..probe.len() {
+        while matched > 0 && probe[index] != probe[matched] {
             matched = prefix_lengths[matched - 1];
         }
-        if pattern[index] == pattern[matched] {
+        if probe[index] == probe[matched] {
             matched += 1;
             prefix_lengths[index] = matched;
         }
@@ -504,24 +517,38 @@ fn mark_argument_occurrences(
 
     matched = 0;
     for (index, &byte) in input.iter().enumerate() {
-        while matched > 0 && byte != pattern[matched] {
+        while matched > 0 && byte != probe[matched] {
             matched = prefix_lengths[matched - 1];
         }
-        if byte == pattern[matched] {
+        if byte == probe[matched] {
             matched += 1;
         }
-        if matched == pattern.len() {
-            let end = index + 1;
-            if argument.len() == pattern.len() || (input_truncated && end == input.len()) {
-                mark_redaction(deltas, end - pattern.len(), end);
-            }
+        if matched == probe.len() {
+            let start = index + 1 - probe.len();
+            let span = matching_prefix_len(&input[start..], argument);
+            mark_redaction(deltas, start, start + span);
             matched = prefix_lengths[matched - 1];
         }
     }
 
+    // The stream may have been cut mid-probe, leaving only a partial anchor at
+    // the very end with no complete match to extend from.
     if input_truncated && matched > 0 {
         mark_redaction(deltas, input.len() - matched, input.len());
     }
+}
+
+/// Length of the common prefix of `echoed` and `argument`.
+///
+/// Always at least the probe length when called after a confirmed probe hit, so
+/// the redaction span covers exactly as much of the argument as was echoed.
+fn matching_prefix_len(echoed: &[u8], argument: &[u8]) -> usize {
+    let bound = echoed.len().min(argument.len());
+    let mut length = 0;
+    while length < bound && echoed[length] == argument[length] {
+        length += 1;
+    }
+    length
 }
 
 fn mark_redaction(deltas: &mut [i32], start: usize, end: usize) {
@@ -985,6 +1012,150 @@ mod tests {
         assert_eq!(
             response.message,
             "the operator log said error code: -8 last week"
+        );
+    }
+
+    #[test]
+    fn ansi_escapes_inside_a_caller_argument_do_not_defeat_redaction() {
+        // A CLI that colorizes part of an echoed argument must not slip it past
+        // the byte match and then get it reassembled in cleartext.
+        let secret = "caller-secret-descriptor";
+        let stderr = b"error: rejected caller-\x1b[31msecret\x1b[0m-descriptor now";
+
+        let redacted = super::bounded_redacted(
+            stderr,
+            &[OsString::from(secret)],
+            DEFAULT_MAX_RPC_RESPONSE_BYTES,
+        );
+
+        assert!(
+            !redacted.contains(secret),
+            "colorized caller argument leaked: {redacted}"
+        );
+        assert!(
+            redacted.contains("[redacted]"),
+            "expected a redaction marker: {redacted}"
+        );
+    }
+
+    #[test]
+    fn a_partially_echoed_caller_argument_is_redacted_to_the_echoed_length() {
+        // A CLI that elides a long value must not surface the fragment it kept.
+        let secret = format!("cSecretDescriptorWIF{}", "x".repeat(300));
+        let echoed = &secret[..60];
+        let stderr = format!("error code: -5\nerror message:\nInvalid descriptor \"{echoed}...\"");
+
+        let redacted = super::bounded_redacted(
+            stderr.as_bytes(),
+            &[OsString::from(secret.clone())],
+            DEFAULT_MAX_RPC_RESPONSE_BYTES,
+        );
+
+        assert!(
+            !redacted.contains("cSecretDescriptorWIF"),
+            "the echoed fragment leaked: {redacted}"
+        );
+        assert!(
+            redacted.contains("[redacted]"),
+            "expected a redaction marker: {redacted}"
+        );
+        // Surrounding diagnostic text must survive, or the error is useless.
+        assert!(
+            redacted.contains("error code: -5"),
+            "context lost: {redacted}"
+        );
+        assert!(
+            redacted.contains("Invalid descriptor"),
+            "context lost: {redacted}"
+        );
+    }
+
+    #[test]
+    fn a_short_caller_argument_still_requires_a_full_match() {
+        // Arguments shorter than the probe keep exact-match behavior, so a block
+        // count of "3" does not redact every 3 in the diagnostic.
+        let redacted = super::bounded_redacted(
+            b"error: height 3 is above the tip at 31",
+            &[OsString::from("3")],
+            DEFAULT_MAX_RPC_RESPONSE_BYTES,
+        );
+
+        assert!(
+            !redacted.contains('3'),
+            "expected every literal 3 redacted for an exact-match argument: {redacted}"
+        );
+        assert!(
+            redacted.contains("above the tip"),
+            "context lost: {redacted}"
+        );
+    }
+
+    #[test]
+    fn ansi_sequences_with_non_alphabetic_final_bytes_are_stripped() {
+        assert_eq!(super::strip_ansi("a\u{1b}[3~b\u{1b}[38;5;9mc"), "abc");
+        // `u` is itself a valid CSI final byte, so a sequence is only unterminated
+        // when the input ends mid-parameters.
+        assert_eq!(super::strip_ansi("keep\u{1b}[38;5"), "keep");
+        assert_eq!(super::strip_ansi("keep\u{1b}[uafter"), "keepafter");
+    }
+
+    #[test]
+    fn multibyte_stderr_cut_by_the_limit_stays_valid_utf8() {
+        let redacted = super::bounded_redacted("é".repeat(50).as_bytes(), &[], 5);
+
+        assert!(
+            redacted.ends_with("…[truncated]"),
+            "expected a truncation marker: {redacted}"
+        );
+        // The assertion that matters: no panic, and the result is valid UTF-8 by
+        // construction. Nothing past the boundary survives as a partial scalar.
+        assert!(
+            redacted.starts_with("é"),
+            "unexpected retention: {redacted}"
+        );
+    }
+
+    #[test]
+    fn a_mis_declared_caller_boundary_redacts_everything_rather_than_nothing() {
+        let invocation = super::RpcInvocation {
+            executable: PathBuf::from("nigiri"),
+            args: vec![OsString::from("rpc"), OsString::from("getblockcount")],
+            caller_args_from: 99,
+        };
+
+        assert_eq!(invocation.caller_args(), invocation.args.as_slice());
+    }
+
+    #[tokio::test]
+    async fn stderr_warnings_do_not_fail_a_successful_result() {
+        let client = fake_client::<Bitcoin>(Duration::from_secs(2));
+
+        let height: u64 = client
+            .rpc("stdout_with_stderr_warning", std::iter::empty::<&str>())
+            .await
+            .unwrap_or_else(|error| panic!("stderr warning misread as a failure: {error}"));
+
+        assert_eq!(height, 42);
+    }
+
+    #[tokio::test]
+    async fn caller_arguments_are_never_shell_expanded() {
+        let client = fake_client::<Bitcoin>(Duration::from_secs(2));
+        let marker =
+            std::env::temp_dir().join(format!("nigiri-rs-shell-marker-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let injected = format!("$(touch {})", marker.display());
+
+        let error = client
+            .rpc::<(), _, _>("fail", [injected.as_str()])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, NigiriError::RpcFailed { .. }));
+        assert!(
+            !marker.exists(),
+            "a caller argument was shell expanded, writing {}",
+            marker.display()
         );
     }
 

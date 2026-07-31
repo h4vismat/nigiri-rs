@@ -23,12 +23,13 @@ pub struct NigiriConfig {
     /// methods whose results are large (`listunspent`, `listtransactions`,
     /// `getblock <hash> 2`). Defaults to [`DEFAULT_MAX_RPC_RESPONSE_BYTES`].
     ///
-    /// Raise it deliberately. Formatting a failed RPC's stderr costs several
-    /// times this value in transient allocation (a redaction map sized to the
-    /// retained bytes, plus a lossy UTF-8 copy), so a limit in the gigabyte
-    /// range turns an RPC failure into an out-of-memory abort. Values in the
-    /// low megabytes cover every Bitcoin Core and Elements response in a
-    /// regtest environment.
+    /// Raise it deliberately, and keep it in the low megabytes. Formatting a
+    /// failed RPC's stderr costs a multiple of this value in transient allocation:
+    /// a 4-byte-per-byte redaction map plus a lossy UTF-8 copy that can expand
+    /// threefold, so peak usage is several times this value and a limit in the
+    /// gigabyte range turns a single RPC failure into an out-of-memory abort. Low
+    /// megabytes cover every Bitcoin Core and Elements response in a regtest
+    /// environment.
     ///
     /// ```
     /// use nigiri_rs::{Bitcoin, DEFAULT_MAX_RPC_RESPONSE_BYTES, NigiriClient, NigiriConfig};

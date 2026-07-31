@@ -27,10 +27,12 @@ case "$method" in
         printf 'not-a-block-hash\n'
         ;;
     rpc_error)
-        printf 'RPC response:\nerror code: -8\nerror message:\ninvalid caller value %s\n' "$4"
+        shift "$shift_count"
+        printf 'RPC response:\nerror code: -8\nerror message:\ninvalid caller value %s\n' "$1"
         ;;
     stderr_zero)
-        printf 'rpc rejected caller value %s\n' "$4" >&2
+        shift "$shift_count"
+        printf 'rpc rejected caller value %s\n' "$1" >&2
         ;;
     generatetoaddress)
         printf '["5555555555555555555555555555555555555555555555555555555555555555","6666666666666666666666666666666666666666666666666666666666666666"]\n'
@@ -85,6 +87,10 @@ case "$method" in
         ;;
     unicode_json)
         printf '\033[32m%s\033[0m\n' '{"message":"ação 日本語 🚀"}'
+        ;;
+    stdout_with_stderr_warning)
+        printf 'warning: wallet is unencrypted\n' >&2
+        printf '42\n'
         ;;
     invalid_utf8_stdout)
         printf 'prefix\377\376suffix\n'

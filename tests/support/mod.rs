@@ -56,7 +56,12 @@ pub async fn host_rpc(
     let stdout = strip_ansi(std::str::from_utf8(&output.stdout)?)
         .trim()
         .to_owned();
-    if !output.status.success() || stdout.is_empty() || stdout.contains("error code:") {
+    // Anchored to a line start, matching the crate: response content that merely
+    // contains the phrase is not an error.
+    let reported_error = stdout
+        .lines()
+        .any(|line| line.trim_start().starts_with("error code:"));
+    if !output.status.success() || stdout.is_empty() || reported_error {
         return Err(format!("host Nigiri RPC {method} failed").into());
     }
     Ok(stdout)
@@ -97,19 +102,22 @@ pub async fn signed_wallet_transaction(
         .to_owned())
 }
 
+// Mirrors the crate's implementation. Iterates chars, not bytes: a byte-wise
+// version rebuilt with char::from would turn every multibyte scalar into
+// Latin-1 mojibake, corrupting non-ASCII node output.
 fn strip_ansi(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
-    let mut bytes = input.bytes().peekable();
-    while let Some(byte) = bytes.next() {
-        if byte == 0x1b && bytes.peek() == Some(&b'[') {
-            let _ = bytes.next();
-            for control in bytes.by_ref() {
-                if control.is_ascii_alphabetic() {
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' && characters.peek() == Some(&'[') {
+            let _ = characters.next();
+            for control in characters.by_ref() {
+                if ('@'..='~').contains(&control) {
                     break;
                 }
             }
         } else {
-            output.push(char::from(byte));
+            output.push(character);
         }
     }
     output
