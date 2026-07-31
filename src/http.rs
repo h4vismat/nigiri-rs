@@ -14,7 +14,7 @@ pub(crate) async fn send_bounded<N: NigiriNetwork>(
         .send()
         .await
         .map_err(|source| NigiriError::HttpTransport {
-            operation,
+            operation: operation.into(),
             source: source.without_url(),
         })?;
     read_bounded(operation, response, sensitive).await
@@ -32,7 +32,7 @@ async fn read_bounded(
         .chunk()
         .await
         .map_err(|source| NigiriError::HttpTransport {
-            operation,
+            operation: operation.into(),
             source: source.without_url(),
         })?
     {
@@ -45,14 +45,14 @@ async fn read_bounded(
 
     if !status.is_success() {
         return Err(NigiriError::HttpStatus {
-            operation,
+            operation: operation.into(),
             status,
             body: bounded_error_text(&body, exceeded, sensitive),
         });
     }
     if exceeded {
         return Err(NigiriError::InvalidResponse {
-            operation,
+            operation: operation.into(),
             detail: "response body exceeded the configured safety limit".to_owned(),
         });
     }
@@ -75,7 +75,7 @@ pub(crate) fn parse_txid<N: NigiriNetwork>(
     body: &[u8],
 ) -> Result<N::Txid, NigiriError> {
     let text = std::str::from_utf8(body).map_err(|_| NigiriError::InvalidResponse {
-        operation,
+        operation: operation.into(),
         detail: "expected a UTF-8 transaction identifier".to_owned(),
     })?;
     N::parse_txid(operation, text)
@@ -90,7 +90,7 @@ pub(crate) fn endpoint(
     let mut path = url
         .path_segments_mut()
         .map_err(|_| NigiriError::InvalidResponse {
-            operation,
+            operation: operation.into(),
             detail: "configured endpoint cannot accept path segments".to_owned(),
         })?;
     path.pop_if_empty();

@@ -21,6 +21,27 @@
 //! # }
 //! ```
 //!
+//! # Advanced node RPC
+//!
+//! [`NigiriClient::rpc`] invokes an arbitrary node RPC with separately passed
+//! CLI-style arguments and deserializes the result into a caller-selected type.
+//!
+//! ```no_run
+//! use nigiri_rs::{Bitcoin, NigiriClient};
+//!
+//! # async fn example() -> Result<(), nigiri_rs::NigiriError> {
+//! let client = NigiriClient::<Bitcoin>::new();
+//! let height: u64 = client
+//!     .rpc("getblockcount", std::iter::empty::<&str>())
+//!     .await?;
+//! assert!(height > 0);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Arbitrary RPC methods may mutate wallet or chain state. The host application
+//! remains responsible for synchronization and restoration.
+//!
 //! Liquid-only methods are absent from the Bitcoin client at compile time:
 //!
 //! ```compile_fail
@@ -53,8 +74,11 @@ mod network;
 mod rpc;
 mod types;
 
+#[cfg(feature = "bitcoin-rpc-types")]
+pub use corepc_types as bitcoin_rpc_types;
+
 pub use client::NigiriClient;
-pub use config::NigiriConfig;
+pub use config::{DEFAULT_MAX_RPC_RESPONSE_BYTES, MAX_RPC_RESPONSE_BYTES_LIMIT, NigiriConfig};
 pub use error::NigiriError;
 pub use network::{Bitcoin, Liquid, NigiriNetwork};
 pub use types::{

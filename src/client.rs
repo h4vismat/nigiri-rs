@@ -51,7 +51,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
             .timeout(config.timeout)
             .build()
             .map_err(|source| NigiriError::HttpTransport {
-                operation: "build HTTP client",
+                operation: "build HTTP client".into(),
                 source,
             })?;
         Ok(Self {
@@ -75,7 +75,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
             }
             if started.elapsed() >= self.config.timeout {
                 return Err(NigiriError::Timeout {
-                    operation: "wait for readiness",
+                    operation: "wait for readiness".into(),
                     duration: self.config.timeout,
                 });
             }
@@ -211,7 +211,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
             }
             if started.elapsed() >= timeout {
                 return Err(NigiriError::Timeout {
-                    operation: "wait for confirmation",
+                    operation: "wait for confirmation".into(),
                     duration: timeout,
                 });
             }
@@ -222,7 +222,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
 
 fn invalid(operation: &'static str, expected: &'static str) -> NigiriError {
     NigiriError::InvalidResponse {
-        operation,
+        operation: operation.into(),
         detail: format!("expected {expected}"),
     }
 }

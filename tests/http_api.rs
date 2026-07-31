@@ -1,7 +1,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use bitcoin::Amount;
-use nigiri_rs::{Bitcoin, Liquid, NigiriClient, NigiriConfig, NigiriError};
+use nigiri_rs::{
+    Bitcoin, DEFAULT_MAX_RPC_RESPONSE_BYTES, Liquid, NigiriClient, NigiriConfig, NigiriError,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use url::Url;
@@ -55,6 +57,7 @@ fn config(base: Url) -> NigiriConfig {
         esplora_url: base,
         executable: PathBuf::from("nigiri"),
         timeout: Duration::from_secs(2),
+        max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
     }
 }
 
@@ -81,10 +84,8 @@ async fn malformed_height_is_an_invalid_response_without_the_body() {
     let error = client.block_height().await.unwrap_err();
     assert!(matches!(
         error,
-        NigiriError::InvalidResponse {
-            operation: "block height",
-            ..
-        }
+        NigiriError::InvalidResponse { ref operation, .. }
+            if operation.as_ref() == "block height"
     ));
     assert!(!error.to_string().contains(secret));
 }

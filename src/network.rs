@@ -241,7 +241,7 @@ pub(crate) mod private {
 
     fn invalid(operation: &'static str, expected: &'static str) -> NigiriError {
         NigiriError::InvalidResponse {
-            operation,
+            operation: operation.into(),
             detail: format!("expected {expected}"),
         }
     }

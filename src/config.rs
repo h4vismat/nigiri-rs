@@ -6,6 +6,18 @@ use crate::NigiriError;
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default retention ceiling for a single Nigiri CLI stream.
+pub const DEFAULT_MAX_RPC_RESPONSE_BYTES: usize = 64 * 1024;
+
+/// Largest accepted value for [`NigiriConfig::max_rpc_response_bytes`].
+///
+/// Formatting a failed RPC costs a multiple of the retention ceiling in transient
+/// allocation, so an unbounded value read from a config file or environment
+/// variable could turn one RPC failure into an out-of-memory abort. 16 MiB is far
+/// above any Bitcoin Core or Elements regtest response and keeps the worst case
+/// survivable.
+pub const MAX_RPC_RESPONSE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
+
 /// Complete immutable configuration for a Nigiri client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NigiriConfig {
@@ -13,6 +25,35 @@ pub struct NigiriConfig {
     pub esplora_url: Url,
     pub executable: PathBuf,
     pub timeout: Duration,
+    /// Maximum bytes retained from a single Nigiri CLI stdout or stderr stream.
+    ///
+    /// Anything past this limit is rejected and the child is killed rather than
+    /// buffered, so raise it when calling [`crate::NigiriClient::rpc`] with
+    /// methods whose results are large (`listunspent`, `listtransactions`,
+    /// `getblock <hash> 2`). Defaults to [`DEFAULT_MAX_RPC_RESPONSE_BYTES`].
+    ///
+    /// Raise it deliberately. Formatting a failed RPC's stderr costs a multiple of
+    /// this value in transient allocation: a 4-byte-per-byte redaction map plus a
+    /// lossy UTF-8 copy that can expand threefold. Values above
+    /// [`MAX_RPC_RESPONSE_BYTES_LIMIT`] are rejected for that reason. Low megabytes
+    /// cover every Bitcoin Core and Elements response in a regtest environment.
+    ///
+    /// ```
+    /// use nigiri_rs::{Bitcoin, DEFAULT_MAX_RPC_RESPONSE_BYTES, NigiriClient, NigiriConfig};
+    ///
+    /// # fn main() -> Result<(), nigiri_rs::NigiriError> {
+    /// let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+    ///     chopsticks_url: "http://localhost:3000".parse().unwrap(),
+    ///     esplora_url: "http://localhost:30000".parse().unwrap(),
+    ///     executable: "nigiri".into(),
+    ///     timeout: std::time::Duration::from_secs(30),
+    ///     max_rpc_response_bytes: 4 * DEFAULT_MAX_RPC_RESPONSE_BYTES,
+    /// })?;
+    /// # let _ = client;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub max_rpc_response_bytes: usize,
 }
 
 impl NigiriConfig {
@@ -30,6 +71,7 @@ impl NigiriConfig {
             esplora_url: Url::parse(esplora_url).expect("static Nigiri URL is valid"),
             executable: PathBuf::from("nigiri"),
             timeout: DEFAULT_TIMEOUT,
+            max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
         }
     }
 
@@ -42,6 +84,16 @@ impl NigiriConfig {
         }
         if self.timeout.is_zero() {
             return Err(invalid_configuration("timeout must be greater than zero"));
+        }
+        if self.max_rpc_response_bytes == 0 {
+            return Err(invalid_configuration(
+                "max_rpc_response_bytes must be greater than zero",
+            ));
+        }
+        if self.max_rpc_response_bytes > MAX_RPC_RESPONSE_BYTES_LIMIT {
+            return Err(invalid_configuration(
+                "max_rpc_response_bytes must not exceed MAX_RPC_RESPONSE_BYTES_LIMIT",
+            ));
         }
         Ok(self)
     }
@@ -66,9 +118,8 @@ fn normalize_url(url: &mut Url) -> Result<(), NigiriError> {
 }
 
 fn invalid_configuration(detail: &'static str) -> NigiriError {
-    NigiriError::InvalidResponse {
-        operation: "configuration",
-        detail: detail.to_owned(),
+    NigiriError::InvalidRequest {
+        detail: detail.into(),
     }
 }
 
@@ -76,7 +127,7 @@ fn invalid_configuration(detail: &'static str) -> NigiriError {
 mod tests {
     use std::{path::PathBuf, time::Duration};
 
-    use super::{DEFAULT_TIMEOUT, NigiriConfig};
+    use super::{DEFAULT_MAX_RPC_RESPONSE_BYTES, DEFAULT_TIMEOUT, NigiriConfig};
 
     #[test]
     fn verified_network_defaults_include_both_service_endpoints() {
@@ -98,6 +149,7 @@ mod tests {
             esplora_url: "http://fixture.invalid/esplora".parse().unwrap(),
             executable: PathBuf::from("/opt/nigiri"),
             timeout: Duration::from_secs(9),
+            max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
         }
         .validate_and_normalize()
         .unwrap();
