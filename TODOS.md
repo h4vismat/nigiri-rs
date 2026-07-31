@@ -45,19 +45,17 @@ unprotected. Fix: `Command::process_group(0)` on Unix and signal the group. Need
 method that backgrounds a grandchild so the gap is testable. Documented as a known limitation
 in README.md and MIGRATION.md as of 0.3.0.
 
-### Bound `max_rpc_response_bytes` from above
+### Cap the error excerpt independently of the response limit
 
-**Priority:** P2
+**Priority:** P3
 
-`validate_and_normalize` only rejects zero. The field is the sole ceiling on process-output
-buffering, and formatting one failed RPC allocates several times its value (a 4-byte-per-byte
-redaction map plus a lossy UTF-8 copy that can expand threefold). A value read from a config
-file or environment variable in the gigabyte range turns a single RPC failure into an abort.
-The doc comment warns; nothing enforces.
+`bounded_redacted` is handed the full `max_rpc_response_bytes` even though its only consumer
+is a human-readable `NigiriError::RpcFailed { stderr }` message. Passing
+`limit.min(ERROR_EXCERPT_BYTES)` (8-16 KiB) at the three call sites would cap the redaction
+pass and its allocation regardless of how high a caller raises the response limit. A CLI
+diagnostic never needs more than a few KiB.
 
-Related: the error excerpt does not need the same bound as the response. Passing
-`limit.min(ERROR_EXCERPT_BYTES)` (8-16 KiB) into `bounded_redacted` would cap the redaction
-pass regardless of how high a caller raises the response limit.
+The absolute upper bound shipped in 0.3.0; this is the remaining half.
 
 ### Share one redaction implementation between the CLI and HTTP paths
 
@@ -68,17 +66,6 @@ cannot redact a secret split by the truncation cut and does not normalize ANSI b
 `src/rpc.rs::bounded_redacted` does both. Two redaction routines with materially different
 guarantees is a trap: a reader cannot tell which applies where. Extract one (bytes in, bounded
 redacted string out) and call it from both.
-
-### Replace fixed sleeps in the child-kill tests with polling
-
-**Priority:** P3
-
-`stream_limit_breaches_kill_the_child_before_follow_up_side_effects` and
-`timeout_kills_the_child_before_it_can_write_its_marker` both prove the kill via a single
-`sleep(1_200ms)` against the fixture's `sleep 1` — about 200 ms of margin. On a loaded machine
-a surviving child writes its marker after the assertion has run, so a broken `kill_and_reap`
-yields a silent pass. Poll for the marker over a generous budget and assert it never appears,
-or assert on the reaped status instead of a filesystem side effect.
 
 ### Consider making the Esplora HTTP body limit configurable too
 
@@ -108,32 +95,39 @@ Surfaced by the 0.3.0 specialist review:
   only significance is straddling `DEFAULT_MAX_RPC_RESPONSE_BYTES`. Nothing names the relation,
   so changing the default breaks the tests with no indication which side is wrong.
 - `strip_ansi` exists in both `src/rpc.rs` and `tests/support/mod.rs`. The copies were
-  reconciled in 0.3.0, but nothing stops them diverging again.
-
-### Record why the new host RPC tests skip `HostChainLock`
-
-**Priority:** P4
-
-`bitcoin_public_rpc_deserializes_native_and_core_v30_types` and
-`liquid_public_rpc_deserializes_native_elements_types` are the only host tests that do not
-acquire the lock. README calls this deliberate for read-only tests, but they sit beside the
-reorg tests that invalidate the tip, so an unlocked read can observe a mid-reorg chain unless
-every invocation remembers `--test-threads=1`. Either take the lock (cheap) or comment the
-omission at each call site.
-
-## API surface
-
-### Use a distinct error variant for pre-spawn input rejection
-
-**Priority:** P4
-
-`validate_rpc_method` reports an invalid caller-supplied method name as
-`NigiriError::InvalidResponse` with a synthetic `"RPC method validation"` operation label. No
-process was ever spawned, so nothing produced an invalid response, and callers can only
-distinguish the case by string-matching that pseudo-label. The same sentinel-label pattern is
-used for configuration errors. A dedicated `InvalidRequest { detail }` variant would say what
-actually happened.
+  reconciled in 0.3.0 and the test copy carries a comment saying why, but nothing enforces it.
 
 ## Completed
 
-_(nothing yet)_
+### Bound `max_rpc_response_bytes` from above
+
+**Completed:** v0.3.0
+
+`validate_and_normalize` rejected only zero, leaving the sole ceiling on process-output
+buffering unbounded above. Added `MAX_RPC_RESPONSE_BYTES_LIMIT` (16 MiB) and a rejection with
+a boundary test. The remaining error-excerpt half is tracked separately as P3.
+
+### Use a distinct error variant for pre-spawn input rejection
+
+**Completed:** v0.3.0
+
+Added `NigiriError::InvalidRequest { detail }`. Configuration validation and RPC method-name
+validation no longer masquerade as `InvalidResponse` with a synthetic `"configuration"` or
+`"RPC method validation"` operation label, so callers stop string-matching a pseudo-operation
+to distinguish caller error from node failure. Breaking; batched with the `Cow` error-label
+change in the same release.
+
+### Replace fixed sleeps in the child-kill tests with polling
+
+**Completed:** v0.3.0
+
+Both marker tests now poll for up to 5 seconds via a shared `marker_stays_absent` helper and
+fail the moment the marker appears, instead of a single `sleep(1_200ms)` racing the fixture's
+`sleep 1` with ~200 ms of margin.
+
+### Record why the new host RPC tests skip `HostChainLock`
+
+**Completed:** v0.3.0
+
+Both call sites now state that the omission is deliberate and why it is safe: the tests only
+read, and their assertions hold even against a tip observed mid-reorg.

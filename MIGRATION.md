@@ -41,6 +41,34 @@ matches!(error, NigiriError::InvalidResponse { ref operation, .. } if operation.
 
 Crate-owned labels stay borrowed, so this allocates nothing for the curated methods.
 
+### `NigiriError::InvalidRequest` replaces two synthetic labels
+
+Input rejected before any Nigiri process is spawned now has its own variant instead of
+masquerading as an unusable response. Two cases moved:
+
+| Was | Now |
+| --- | --- |
+| `InvalidResponse { operation: "configuration", detail }` | `InvalidRequest { detail }` |
+| `InvalidResponse { operation: "RPC method validation", detail }` | `InvalidRequest { detail }` |
+
+Nothing produced a response in either case, and callers previously had to string-match a
+pseudo-operation to tell them apart from a genuine node failure:
+
+```rust
+// Before
+matches!(error, NigiriError::InvalidResponse { ref operation, .. } if operation.as_ref() == "configuration")
+// After
+matches!(error, NigiriError::InvalidRequest { .. })
+```
+
+### `max_rpc_response_bytes` is bounded from above
+
+Values above `MAX_RPC_RESPONSE_BYTES_LIMIT` (16 MiB) are now rejected by
+`NigiriClient::with_config`. Formatting a failed RPC costs a multiple of the retention
+ceiling, so an unbounded value read from a config file or environment variable could turn one
+RPC failure into an out-of-memory abort. 16 MiB is far above any Bitcoin Core or Elements
+regtest response.
+
 ### Process boundary hardening
 
 The CLI executor drains stdout and stderr concurrently under the configured timeout, so a

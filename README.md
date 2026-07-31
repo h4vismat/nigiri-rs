@@ -97,7 +97,7 @@ The caller selects the response type. Existing curated methods remain preferable
 
 ### Response size limit
 
-A single stdout or stderr stream is retained up to `NigiriConfig::max_rpc_response_bytes`, which defaults to `DEFAULT_MAX_RPC_RESPONSE_BYTES` (64 KiB). Anything past the limit is rejected and the child is killed rather than buffered. Raise it for methods with large results:
+A single stdout or stderr stream is retained up to `NigiriConfig::max_rpc_response_bytes`, which defaults to `DEFAULT_MAX_RPC_RESPONSE_BYTES` (64 KiB) and is capped at `MAX_RPC_RESPONSE_BYTES_LIMIT` (16 MiB). Anything past the configured limit is rejected and the child is killed rather than buffered. Raise it for methods with large results:
 
 ```rust,no_run
 use nigiri_rs::{Bitcoin, DEFAULT_MAX_RPC_RESPONSE_BYTES, NigiriClient, NigiriConfig};
