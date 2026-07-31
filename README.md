@@ -93,7 +93,29 @@ let hundredth_hash: bitcoin::BlockHash = client.rpc("getblockhash", ["100"]).awa
 # }
 ```
 
-The caller selects the response type. Existing curated methods remain preferable when available because they guarantee method-specific native contracts. Advanced callers may deliberately select `String` or `serde_json::Value`.
+The caller selects the response type. Existing curated methods remain preferable when available because they guarantee method-specific native contracts. Advanced callers may deliberately select `String` or `serde_json::Value`. The method name may be computed at runtime; it is validated against an ASCII letter, digit, and underscore charset before any process is spawned.
+
+### Response size limit
+
+A single stdout or stderr stream is retained up to `NigiriConfig::max_rpc_response_bytes`, which defaults to `DEFAULT_MAX_RPC_RESPONSE_BYTES` (64 KiB). Anything past the limit is rejected and the child is killed rather than buffered. Raise it for methods with large results:
+
+```rust,no_run
+use nigiri_rs::{Bitcoin, DEFAULT_MAX_RPC_RESPONSE_BYTES, NigiriClient, NigiriConfig};
+
+# fn example() -> Result<(), nigiri_rs::NigiriError> {
+let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+    chopsticks_url: "http://localhost:3000".parse().unwrap(),
+    esplora_url: "http://localhost:30000".parse().unwrap(),
+    executable: "nigiri".into(),
+    timeout: std::time::Duration::from_secs(30),
+    max_rpc_response_bytes: 4 * DEFAULT_MAX_RPC_RESPONSE_BYTES,
+})?;
+# let _ = client;
+# Ok(())
+# }
+```
+
+A method that exits zero, writes nothing to stdout, and writes to stderr is reported as `NigiriError::RpcFailed`, because that is how the node CLIs surface some errors. Keep the host `nigiri` wrapper's stderr free of unrelated noise or void RPCs will report spurious failures.
 
 Arbitrary RPC methods may mutate node wallets or active chain state. Tests using mutating RPCs must coordinate host access and restore valid state. This API does not start, stop, delete, or otherwise manage Nigiri.
 
