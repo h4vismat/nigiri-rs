@@ -4,7 +4,15 @@ use std::time::Duration;
 
 use bitcoin::Amount;
 use nigiri_rs::{Liquid, NigiriClient};
+use serde::Deserialize;
 use support::{BoxError, HostChainLock, signed_wallet_transaction};
+
+#[derive(Debug, Deserialize)]
+struct LiquidBlockchainInfo {
+    chain: String,
+    blocks: u64,
+    bestblockhash: elements::BlockHash,
+}
 
 #[tokio::test]
 #[ignore = "requires host Nigiri"]
@@ -80,5 +88,28 @@ async fn liquid_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
     mutation?;
     cleanup?;
     assert_eq!(client.best_block_hash().await?, test_tip);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires host Nigiri"]
+async fn liquid_public_rpc_deserializes_native_elements_types() -> Result<(), BoxError> {
+    let client = NigiriClient::<Liquid>::new();
+    client.wait_ready().await?;
+
+    let height: u64 = client
+        .rpc("getblockcount", std::iter::empty::<&str>())
+        .await?;
+    let _: elements::BlockHash = client
+        .rpc("getbestblockhash", std::iter::empty::<&str>())
+        .await?;
+    let info: LiquidBlockchainInfo = client
+        .rpc("getblockchaininfo", std::iter::empty::<&str>())
+        .await?;
+
+    assert_eq!(info.chain, "liquidregtest");
+    assert!(height > 0);
+    assert!(info.blocks > 0);
+    assert_eq!(info.bestblockhash.to_string().len(), 64);
     Ok(())
 }
