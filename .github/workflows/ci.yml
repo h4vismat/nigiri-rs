@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # Lets the host suites be run on demand against a branch without waiting for a
+  # merge to master.
+  workflow_dispatch:
+
+# A newer push to the same ref makes an in-flight run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on warnings everywhere, not just in the clippy job.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: Format and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      # --all-features so the bitcoin-rpc-types surface is linted too.
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test (${{ matrix.toolchain }}, ${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.85 is the rust-version floor declared in Cargo.toml. stable catches
+        # regressions from newer compilers.
+        toolchain: ["1.85", stable]
+        # Default features alone never compile tests/rpc_types_feature.rs or the
+        # gated test in tests/rpc_api.rs, so both columns are required to know the
+        # optional feature still works.
+        features: [default, all]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal
+          rustup default ${{ matrix.toolchain }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.toolchain }}-${{ matrix.features }}
+
+      - name: Set feature flag
+        id: flags
+        run: |
+          if [ "${{ matrix.features }}" = "all" ]; then
+            echo "cargo_features=--all-features" >> "$GITHUB_OUTPUT"
+          else
+            echo "cargo_features=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: cargo build
+        run: cargo build --all-targets ${{ steps.flags.outputs.cargo_features }}
+
+      # Host suites are #[ignore] and need a running Nigiri, so they stay out of
+      # this job. The host-tests job below covers them.
+      - name: cargo test
+        run: cargo test --all-targets ${{ steps.flags.outputs.cargo_features }}
+
+      - name: cargo test --doc
+        run: cargo test --doc ${{ steps.flags.outputs.cargo_features }}
+
+  packaging:
+    name: Package for crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: packaging
+
+      # Catches missing files, bad metadata, and anything excluded from the
+      # published tarball that the crate actually needs to build.
+      - name: cargo package
+        run: cargo package --all-features
+
+  host-tests:
+    name: Host suites against live Nigiri
+    runs-on: ubuntu-latest
+    # Only on master and on demand: booting Nigiri pulls several container images
+    # and the mutating suites need exclusive access to one chain.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: host-tests
+
+      - name: Install Nigiri
+        run: |
+          curl https://getnigiri.vulpem.com | bash
+          echo "$HOME/.nigiri" >> "$GITHUB_PATH"
+
+      - name: Start Nigiri with Liquid
+        run: nigiri start --liquid
+
+      - name: Wait for Esplora endpoints
+        run: |
+          for port in 30000 30001; do
+            for _ in $(seq 1 60); do
+              if curl -fsS "http://localhost:$port/blocks/tip/height" >/dev/null 2>&1; then
+                echo "port $port ready"
+                break
+              fi
+              sleep 5
+            done
+            curl -fsS "http://localhost:$port/blocks/tip/height" >/dev/null
+          done
+
+      # --test-threads=1 is mandatory: the mutating suites reorg a shared chain.
+      - name: Bitcoin host suite
+        run: cargo test --test host_bitcoin --all-features -- --ignored --test-threads=1
+
+      - name: Liquid host suite
+        run: cargo test --test host_liquid --all-features -- --ignored --test-threads=1
+
+      - name: Stop Nigiri
+        if: always()
+        run: nigiri stop --delete
