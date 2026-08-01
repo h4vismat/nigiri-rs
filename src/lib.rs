@@ -71,6 +71,7 @@ mod error;
 mod http;
 mod liquid;
 mod network;
+mod node_rpc;
 mod rpc;
 mod types;
 
