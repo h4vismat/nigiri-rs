@@ -1,2 +1,6 @@
 /target
 .DS_Store
+
+# Local design notes and implementation plans. Kept out of the repository
+# deliberately: they are working documents, not published documentation.
+/docs/
