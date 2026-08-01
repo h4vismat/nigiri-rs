@@ -62,6 +62,9 @@ async fn liquid_complete_shared_and_asset_contract() -> Result<(), BoxError> {
         .faucet_asset(&destination.to_string(), Amount::ONE_BTC, &minted.asset)
         .await?;
     client
+        .generate_to_address(1, &destination.to_string())
+        .await?;
+    client
         .wait_for_confirmation(&asset_faucet_txid, Duration::from_secs(30))
         .await?;
     Ok(())
