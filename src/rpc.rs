@@ -708,6 +708,7 @@ mod tests {
             executable: fixture,
             timeout,
             max_rpc_response_bytes,
+            ..Default::default()
         })
         .unwrap()
     }
@@ -848,6 +849,7 @@ mod tests {
             executable: PathBuf::from("/definitely/missing/nigiri/binary"),
             timeout: Duration::from_secs(1),
             max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            ..Default::default()
         })
         .unwrap();
 
@@ -1010,6 +1012,7 @@ mod tests {
             executable: PathBuf::from("nigiri"),
             timeout: Duration::from_secs(1),
             max_rpc_response_bytes: 0,
+            ..Default::default()
         })
         .unwrap_err();
 
@@ -1032,6 +1035,7 @@ mod tests {
             executable: PathBuf::from("nigiri"),
             timeout: Duration::from_secs(1),
             max_rpc_response_bytes: crate::MAX_RPC_RESPONSE_BYTES_LIMIT + 1,
+            ..Default::default()
         })
         .unwrap_err();
 
@@ -1050,6 +1054,7 @@ mod tests {
             executable: PathBuf::from("nigiri"),
             timeout: Duration::from_secs(1),
             max_rpc_response_bytes: crate::MAX_RPC_RESPONSE_BYTES_LIMIT,
+            ..Default::default()
         })
         .expect("the documented maximum must be accepted");
     }
@@ -1368,6 +1373,7 @@ mod tests {
             executable: PathBuf::from("/definitely/missing/nigiri"),
             timeout: Duration::from_secs(1),
             max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            ..Default::default()
         };
         config.executable.push("binary");
         let client = NigiriClient::<Liquid>::with_config(config).unwrap();
@@ -1392,6 +1398,7 @@ mod tests {
             executable: PathBuf::from("/definitely/missing/nigiri/binary"),
             timeout: Duration::from_secs(1),
             max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            ..Default::default()
         })
         .unwrap();
 
