@@ -24,17 +24,19 @@
 //! # Advanced node RPC
 //!
 //! [`NigiriClient::rpc`] invokes an arbitrary node RPC with JSON-serialized
-//! parameters and deserializes the result into a caller-selected type.
+//! parameters and deserializes the result into a caller-selected type. Use `()`
+//! for no parameters and tuples for positional JSON parameters; JSON strings are
+//! not coerced into the number or boolean types expected by a node method.
 //!
 //! ```no_run
 //! use nigiri_rs::{Bitcoin, NigiriClient};
 //!
 //! # async fn example() -> Result<(), nigiri_rs::NigiriError> {
 //! let client = NigiriClient::<Bitcoin>::new();
-//! let height: u64 = client
-//!     .rpc("getblockcount", ())
-//!     .await?;
+//! let height: u64 = client.rpc("getblockcount", ()).await?;
+//! let hundredth_hash: bitcoin::BlockHash = client.rpc("getblockhash", (100_u64,)).await?;
 //! assert!(height > 0);
+//! let _ = hundredth_hash;
 //! # Ok(())
 //! # }
 //! ```

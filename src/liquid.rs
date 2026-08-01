@@ -58,6 +58,10 @@ fn exact_btc_amount(amount: Amount) -> String {
 impl NigiriClient<Liquid> {
     /// Mints a Liquid asset and sends it to `address` over the Elements node RPC.
     ///
+    /// The asset ID is derived from the JSON contract submitted to `issueasset`,
+    /// so identical inputs intentionally produce a different asset ID than
+    /// Nigiri's `mint` command.
+    ///
     /// This operation is not atomic: if `issueasset` succeeds but `sendtoaddress`
     /// fails, the asset remains issued. Inspect the node state before retrying.
     pub async fn mint(

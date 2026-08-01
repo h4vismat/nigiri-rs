@@ -6,40 +6,45 @@ use crate::NigiriError;
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default retention ceiling for a single transport response body or CLI stream.
+/// Default retention ceiling for a single transport response body.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Largest accepted value for [`NigiriConfig::max_response_bytes`].
 ///
-/// Formatting a failed RPC costs a multiple of the retention ceiling in transient
-/// allocation, so an unbounded value read from a config file or environment
-/// variable could turn one RPC failure into an out-of-memory abort. 16 MiB is far
-/// above any Bitcoin Core or Elements regtest response and keeps the worst case
-/// survivable.
+/// An unbounded value read from a config file or environment variable could turn
+/// one response into an out-of-memory abort. 16 MiB is far above any Bitcoin Core
+/// or Elements regtest response and keeps the worst case survivable.
 pub const MAX_RESPONSE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 
 /// Complete immutable configuration for a Nigiri client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NigiriConfig {
+    /// Chopsticks HTTP endpoint.
     pub chopsticks_url: Url,
+    /// Esplora HTTP endpoint.
     pub esplora_url: Url,
+    /// Node JSON-RPC endpoint. Bitcoin defaults to port 18443; Liquid to 18884.
     pub node_rpc_url: Url,
+    /// Node JSON-RPC username. The default is Nigiri's public regtest user `admin1`.
     pub node_rpc_user: String,
+    /// Node JSON-RPC password. The default is Nigiri's public regtest password `123`.
+    ///
+    /// These values are deliberately visible in derived [`Debug`] output because
+    /// Nigiri publishes them as fixed regtest defaults; they are not production secrets.
     pub node_rpc_password: String,
+    /// Legacy Nigiri executable path retained for configuration compatibility until Phase 3.
     pub executable: PathBuf,
+    /// Maximum duration of one HTTP request and response operation.
     pub timeout: Duration,
-    /// Maximum bytes retained from a single transport response body or CLI stream.
+    /// Maximum bytes retained from one node RPC, Chopsticks, or Esplora response body.
     ///
-    /// Anything past this limit is rejected and the child is killed rather than
-    /// buffered, so raise it when calling [`crate::NigiriClient::rpc`] with
-    /// methods whose results are large (`listunspent`, `listtransactions`,
-    /// `getblock <hash> 2`). Defaults to [`DEFAULT_MAX_RESPONSE_BYTES`].
+    /// Anything past this limit is rejected rather than buffered, so raise it
+    /// deliberately for methods whose results are large (`listunspent`,
+    /// `listtransactions`, `getblock <hash> 2`). Defaults to
+    /// [`DEFAULT_MAX_RESPONSE_BYTES`].
     ///
-    /// Raise it deliberately. Formatting a failed RPC's stderr costs a multiple of
-    /// this value in transient allocation: a 4-byte-per-byte redaction map plus a
-    /// lossy UTF-8 copy that can expand threefold. Values above
-    /// [`MAX_RESPONSE_BYTES_LIMIT`] are rejected for that reason. Low megabytes
-    /// cover every Bitcoin Core and Elements response in a regtest environment.
+    /// Values above [`MAX_RESPONSE_BYTES_LIMIT`] are rejected. Low megabytes cover
+    /// every Bitcoin Core and Elements response in a regtest environment.
     ///
     /// ```
     /// use nigiri_rs::{Bitcoin, DEFAULT_MAX_RESPONSE_BYTES, NigiriClient, NigiriConfig};

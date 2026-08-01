@@ -4,7 +4,7 @@ use bitcoin::address::NetworkUnchecked;
 use elements::secp256k1_zkp::{Generator, PedersenCommitment};
 use serde::{Deserialize, Deserializer};
 
-/// Typed issuance input returned by Nigiri mint.
+/// Typed issuance input returned by a successful Liquid [`MintResponse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssuanceTxIn {
     pub txid: elements::Txid,
@@ -12,6 +12,9 @@ pub struct IssuanceTxIn {
 }
 
 /// Result of minting a Liquid asset.
+///
+/// A successful response always includes the issuance input that created the
+/// asset; [`MintResponse::issuance_txin`] is therefore not optional.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MintResponse {
     pub asset: elements::AssetId,
