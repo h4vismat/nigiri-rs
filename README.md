@@ -69,6 +69,8 @@ There is deliberately no default generic parameter. `NigiriClient::new()` withou
 
 The default node credentials are the public Nigiri regtest credentials: user `admin1`, password `123`. They are intentionally visible in `NigiriConfig`'s derived `Debug` output; they are not production secrets.
 
+HTTP Basic authentication does not encrypt credentials. The built-in HTTP node URLs are loopback-only regtest defaults; use HTTPS or an isolated trusted network when configuring a remote Nigiri host.
+
 ## Advanced typed RPC
 
 Both network clients expose `rpc<R, P>()` for node methods not covered by the curated API. Parameters are serialized as real JSON, so select a Rust shape that matches the node method's JSON parameter schema:
@@ -221,6 +223,8 @@ let client = NigiriClient::<Bitcoin>::with_config(config)?;
 ```
 
 Construction accepts only HTTP(S) base URLs, normalizes their trailing slash, rejects query/fragment components, and requires a nonzero timeout and response limit. `NigiriConfig::default()` provides the Bitcoin endpoint and public regtest node credentials; `NigiriClient::<Liquid>::new()` selects the Liquid defaults. Cloning a client clones only immutable configuration and the shared HTTP transport; it never implies ownership of an external process.
+
+`NigiriConfig::default()` is Bitcoin-specific. For a custom `NigiriClient<Liquid>`, override the Chopsticks, Esplora, and node JSON-RPC URLs rather than relying on struct update syntax alone.
 
 ## Typed network differences
 

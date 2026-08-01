@@ -245,7 +245,14 @@ mod tests {
         let task = tokio::spawn(async move {
             let mut requests = Vec::with_capacity(responses.len());
             for (status, body) in responses {
-                let (mut stream, _) = listener.accept().await.unwrap();
+                let request_number = requests.len() + 1;
+                let (mut stream, _) =
+                    tokio::time::timeout(Duration::from_secs(3), listener.accept())
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("timed out waiting for JSON-RPC request {request_number}")
+                        })
+                        .unwrap();
                 let mut request = Vec::new();
                 let mut buffer = [0_u8; 4096];
                 loop {
@@ -448,6 +455,38 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["method"], "issueasset");
         assert_eq!(requests[1]["method"], "sendtoaddress");
+    }
+
+    #[tokio::test]
+    async fn mint_returns_the_issue_error_without_attempting_a_send() {
+        let (url, requests) = sequential_server(vec![(
+            "500 Internal Server Error",
+            json!({
+                "result": null,
+                "error": {"code": -8, "message": "Invalid asset amount"},
+                "id": "nigiri-rs",
+            })
+            .to_string(),
+        )])
+        .await;
+        let client = rpc_client(url);
+
+        let error = client
+            .mint("ert1qdestination", 1_000, "NigiriRsTest", "NRT")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            NigiriError::RpcFailed {
+                code: -8,
+                ref message,
+                ..
+            } if message == "Invalid asset amount"
+        ));
+        let requests = requests.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["method"], "issueasset");
     }
 
     #[test]

@@ -17,8 +17,11 @@ pub struct IssuanceTxIn {
 /// asset; [`MintResponse::issuance_txin`] is therefore not optional.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MintResponse {
+    /// Identifier of the issued asset.
     pub asset: elements::AssetId,
+    /// Transaction that transfers the issued asset to the requested address.
     pub txid: elements::Txid,
+    /// Input of the separate transaction that issued the asset.
     pub issuance_txin: IssuanceTxIn,
 }
 

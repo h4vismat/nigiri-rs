@@ -334,6 +334,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_envelope_success_body_becomes_invalid_response() {
+        let (url, _) = one_shot_server("200 OK", "not JSON".to_owned()).await;
+        let client = client(url, 1024);
+
+        let error = super::call::<_, _, ()>(&client, "getblockcount", ())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, NigiriError::InvalidResponse { .. }));
+        assert!(!error.to_string().contains("not JSON"));
+    }
+
+    #[tokio::test]
     async fn oversized_response_body_becomes_invalid_response() {
         let (url, _) = one_shot_server("200 OK", "x".repeat(65)).await;
         let client = client(url, 64);

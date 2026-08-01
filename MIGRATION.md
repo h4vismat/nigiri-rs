@@ -28,7 +28,7 @@ The response-size field and constants were renamed because the same limit now ap
 | `DEFAULT_MAX_RPC_RESPONSE_BYTES` | `DEFAULT_MAX_RESPONSE_BYTES` |
 | `MAX_RPC_RESPONSE_BYTES_LIMIT` | `MAX_RESPONSE_BYTES_LIMIT` |
 
-`NigiriConfig` also has `node_rpc_url`, `node_rpc_user`, and `node_rpc_password`. `NigiriConfig::default()` supplies Bitcoin's Nigiri endpoints, including `http://localhost:18443/` with the public regtest credentials `admin1` / `123`; `NigiriClient::<Liquid>::new()` supplies Liquid's `http://localhost:18884/` endpoint. Prefer update syntax so future public fields do not break your literal:
+`NigiriConfig` also has `node_rpc_url`, `node_rpc_user`, and `node_rpc_password`. `NigiriConfig::default()` supplies Bitcoin's Nigiri endpoints, including `http://localhost:18443/` with the public regtest credentials `admin1` / `123`; `NigiriClient::<Liquid>::new()` supplies Liquid's `http://localhost:18884/` endpoint. For Bitcoin custom configuration, prefer update syntax so future public fields do not break your literal:
 
 ```rust
 use nigiri_rs::{DEFAULT_MAX_RESPONSE_BYTES, NigiriConfig};
@@ -38,6 +38,8 @@ let config = NigiriConfig {
     ..Default::default()
 };
 ```
+
+`NigiriConfig::default()` is Bitcoin-specific. A custom `NigiriClient<Liquid>` must override all three service URLs, including `node_rpc_url`; struct update syntax by itself would retain Bitcoin's ports.
 
 `timeout` now bounds the HTTP request and response operation against an already-running service. A timeout does not prove that a mutating request did not reach the node.
 
@@ -64,6 +66,8 @@ let input: Option<nigiri_rs::IssuanceTxIn> = minted.issuance_txin;
 // After
 let input: nigiri_rs::IssuanceTxIn = minted.issuance_txin;
 ```
+
+`MintResponse::txid` identifies the transfer produced by `sendtoaddress`. The issuance transaction is `MintResponse::issuance_txin.txid`.
 
 Liquid `mint` now derives its asset identifier from the contract submitted to Elements' `issueasset`, then sends the asset with `sendtoaddress`. Identical mint inputs intentionally produce a different asset identifier from `nigiri mint`. The two calls are non-atomic: if issuance succeeds and the send fails, inspect the node before retrying because another attempt can issue another asset.
 

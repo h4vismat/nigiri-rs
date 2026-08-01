@@ -121,6 +121,10 @@ impl NigiriConfig {
 }
 
 impl Default for NigiriConfig {
+    /// Returns the Bitcoin service defaults.
+    ///
+    /// A custom [`crate::NigiriClient<crate::Liquid>`] must override all three
+    /// service URLs, including [`NigiriConfig::node_rpc_url`].
     fn default() -> Self {
         Self::bitcoin()
     }
