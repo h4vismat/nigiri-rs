@@ -16,7 +16,7 @@ pub struct IssuanceTxIn {
 pub struct MintResponse {
     pub asset: elements::AssetId,
     pub txid: elements::Txid,
-    pub issuance_txin: Option<IssuanceTxIn>,
+    pub issuance_txin: IssuanceTxIn,
 }
 
 /// Confirmation data shared by Bitcoin and Liquid Esplora responses.

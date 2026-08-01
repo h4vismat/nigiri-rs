@@ -57,6 +57,7 @@ async fn liquid_complete_shared_and_asset_contract() -> Result<(), BoxError> {
     let minted = client
         .mint(&destination.to_string(), 1_000, "NigiriRsTest", "NRT")
         .await?;
+    assert_eq!(minted.issuance_txin.txid.to_string().len(), 64);
     let asset_faucet_txid = client
         .faucet_asset(&destination.to_string(), Amount::ONE_BTC, &minted.asset)
         .await?;
