@@ -2,10 +2,8 @@ use reqwest::RequestBuilder;
 
 use crate::{NigiriError, NigiriNetwork};
 
-pub(crate) const MAX_BODY_BYTES: usize = 64 * 1024;
-
 pub(crate) async fn send_bounded<N: NigiriNetwork>(
-    _client: &crate::NigiriClient<N>,
+    client: &crate::NigiriClient<N>,
     operation: &'static str,
     request: RequestBuilder,
     sensitive: &[&str],
@@ -17,13 +15,20 @@ pub(crate) async fn send_bounded<N: NigiriNetwork>(
             operation: operation.into(),
             source: source.without_url(),
         })?;
-    read_bounded(operation, response, sensitive).await
+    read_bounded(
+        operation,
+        response,
+        sensitive,
+        client.config.max_response_bytes,
+    )
+    .await
 }
 
 async fn read_bounded(
     operation: &'static str,
     mut response: reqwest::Response,
     sensitive: &[&str],
+    limit: usize,
 ) -> Result<Vec<u8>, NigiriError> {
     let status = response.status();
     let mut body = Vec::new();
@@ -36,7 +41,7 @@ async fn read_bounded(
             source: source.without_url(),
         })?
     {
-        let remaining = MAX_BODY_BYTES.saturating_sub(body.len());
+        let remaining = limit.saturating_sub(body.len());
         body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
         if chunk.len() > remaining {
             exceeded = true;

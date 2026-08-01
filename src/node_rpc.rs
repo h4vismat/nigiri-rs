@@ -106,10 +106,7 @@ async fn read_bounded<N: NigiriNetwork>(
         .await
         .map_err(|source| transport_error(client, method, source))?
     {
-        let remaining = client
-            .config
-            .max_rpc_response_bytes
-            .saturating_sub(body.len());
+        let remaining = client.config.max_response_bytes.saturating_sub(body.len());
         body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
         if chunk.len() > remaining {
             exceeded = true;
@@ -203,11 +200,11 @@ mod tests {
         (Url::parse(&format!("http://{address}/")).unwrap(), task)
     }
 
-    fn client(node_rpc_url: Url, max_rpc_response_bytes: usize) -> NigiriClient<Bitcoin> {
+    fn client(node_rpc_url: Url, max_response_bytes: usize) -> NigiriClient<Bitcoin> {
         NigiriClient::with_config(NigiriConfig {
             node_rpc_url,
             timeout: Duration::from_secs(2),
-            max_rpc_response_bytes,
+            max_response_bytes,
             ..Default::default()
         })
         .unwrap()
@@ -340,7 +337,7 @@ mod tests {
             node_rpc_user: "rpc-user".to_owned(),
             node_rpc_password: "rpc-pass".to_owned(),
             timeout: Duration::from_secs(2),
-            max_rpc_response_bytes: 1024,
+            max_response_bytes: 1024,
             ..Default::default()
         })
         .unwrap();

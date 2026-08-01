@@ -147,7 +147,7 @@ mod tests {
     use url::Url;
 
     use super::{build_faucet_asset_invocation, build_mint_invocation, parse_mint_response};
-    use crate::{DEFAULT_MAX_RPC_RESPONSE_BYTES, Liquid, NigiriClient, NigiriConfig, NigiriError};
+    use crate::{DEFAULT_MAX_RESPONSE_BYTES, Liquid, NigiriClient, NigiriConfig, NigiriError};
 
     fn fake_client() -> NigiriClient<Liquid> {
         let executable =
@@ -157,7 +157,7 @@ mod tests {
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             executable,
             timeout: Duration::from_secs(2),
-            max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             ..Default::default()
         })
         .unwrap()

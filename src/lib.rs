@@ -79,7 +79,7 @@ mod types;
 pub use corepc_types as bitcoin_rpc_types;
 
 pub use client::NigiriClient;
-pub use config::{DEFAULT_MAX_RPC_RESPONSE_BYTES, MAX_RPC_RESPONSE_BYTES_LIMIT, NigiriConfig};
+pub use config::{DEFAULT_MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES_LIMIT, NigiriConfig};
 pub use error::NigiriError;
 pub use network::{Bitcoin, Liquid, NigiriNetwork};
 pub use types::{

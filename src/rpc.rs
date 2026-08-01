@@ -83,7 +83,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     /// `R`. Caller arguments and successful response content are omitted from
     /// deserialization errors.
     ///
-    /// Responses larger than [`NigiriConfig::max_rpc_response_bytes`] are
+    /// Responses larger than [`NigiriConfig::max_response_bytes`] are
     /// rejected rather than buffered. Raise that limit for methods with large
     /// results, such as `listunspent` or `getblock <hash> 2`.
     ///
@@ -104,7 +104,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     /// RPC methods may mutate node wallets or active chain state. The caller owns
     /// synchronization and restoration for mutating host tests.
     ///
-    /// [`NigiriConfig::max_rpc_response_bytes`]: crate::NigiriConfig::max_rpc_response_bytes
+    /// [`NigiriConfig::max_response_bytes`]: crate::NigiriConfig::max_response_bytes
     pub async fn rpc<R, I, S>(&self, method: &str, args: I) -> Result<R, NigiriError>
     where
         R: DeserializeOwned,
@@ -141,7 +141,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         invocation: RpcInvocation,
     ) -> Result<String, NigiriError> {
         let operation = operation.into();
-        let limit = self.config.max_rpc_response_bytes;
+        let limit = self.config.max_response_bytes;
         let mut command = Command::new(&invocation.executable);
         command
             .args(&invocation.args)
@@ -176,7 +176,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
                 return Err(NigiriError::InvalidResponse {
                     operation,
                     detail: format!(
-                        "RPC stdout exceeded the configured {limit} byte limit; raise NigiriConfig::max_rpc_response_bytes"
+                        "RPC stdout exceeded the configured {limit} byte limit; raise NigiriConfig::max_response_bytes"
                     ),
                 });
             }
@@ -598,7 +598,7 @@ mod tests {
     use url::Url;
 
     use crate::{
-        Bitcoin, DEFAULT_MAX_RPC_RESPONSE_BYTES, Liquid, NigiriClient, NigiriConfig, NigiriError,
+        Bitcoin, DEFAULT_MAX_RESPONSE_BYTES, Liquid, NigiriClient, NigiriConfig, NigiriError,
     };
 
     #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -693,12 +693,12 @@ mod tests {
     }
 
     fn fake_client<N: crate::NigiriNetwork>(timeout: Duration) -> NigiriClient<N> {
-        fake_client_with_limit(timeout, DEFAULT_MAX_RPC_RESPONSE_BYTES)
+        fake_client_with_limit(timeout, DEFAULT_MAX_RESPONSE_BYTES)
     }
 
     fn fake_client_with_limit<N: crate::NigiriNetwork>(
         timeout: Duration,
-        max_rpc_response_bytes: usize,
+        max_response_bytes: usize,
     ) -> NigiriClient<N> {
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-nigiri.sh");
@@ -707,7 +707,7 @@ mod tests {
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             executable: fixture,
             timeout,
-            max_rpc_response_bytes,
+            max_response_bytes,
             ..Default::default()
         })
         .unwrap()
@@ -848,7 +848,7 @@ mod tests {
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             executable: PathBuf::from("/definitely/missing/nigiri/binary"),
             timeout: Duration::from_secs(1),
-            max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             ..Default::default()
         })
         .unwrap();
@@ -916,7 +916,7 @@ mod tests {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
         let secret = format!(
             "caller-secret-prefix-{}",
-            "s".repeat(crate::DEFAULT_MAX_RPC_RESPONSE_BYTES + 2 * super::PIPE_READ_CHUNK_BYTES)
+            "s".repeat(crate::DEFAULT_MAX_RESPONSE_BYTES + 2 * super::PIPE_READ_CHUNK_BYTES)
         );
 
         let error = client
@@ -980,7 +980,7 @@ mod tests {
             panic!("expected the default limit to reject the response");
         };
         assert!(
-            detail.contains("max_rpc_response_bytes"),
+            detail.contains("max_response_bytes"),
             "the limit error should name the knob that raises it: {detail}"
         );
 
@@ -1011,7 +1011,7 @@ mod tests {
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             executable: PathBuf::from("nigiri"),
             timeout: Duration::from_secs(1),
-            max_rpc_response_bytes: 0,
+            max_response_bytes: 0,
             ..Default::default()
         })
         .unwrap_err();
@@ -1034,7 +1034,7 @@ mod tests {
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             executable: PathBuf::from("nigiri"),
             timeout: Duration::from_secs(1),
-            max_rpc_response_bytes: crate::MAX_RPC_RESPONSE_BYTES_LIMIT + 1,
+            max_response_bytes: crate::MAX_RESPONSE_BYTES_LIMIT + 1,
             ..Default::default()
         })
         .unwrap_err();
@@ -1043,7 +1043,7 @@ mod tests {
             panic!("expected an invalid request, got {error}");
         };
         assert!(
-            detail.contains("MAX_RPC_RESPONSE_BYTES_LIMIT"),
+            detail.contains("MAX_RESPONSE_BYTES_LIMIT"),
             "unhelpful detail: {detail}"
         );
 
@@ -1053,7 +1053,7 @@ mod tests {
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             executable: PathBuf::from("nigiri"),
             timeout: Duration::from_secs(1),
-            max_rpc_response_bytes: crate::MAX_RPC_RESPONSE_BYTES_LIMIT,
+            max_response_bytes: crate::MAX_RESPONSE_BYTES_LIMIT,
             ..Default::default()
         })
         .expect("the documented maximum must be accepted");
@@ -1084,7 +1084,7 @@ mod tests {
         let redacted = super::bounded_redacted(
             stderr,
             &[OsString::from(secret)],
-            DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            DEFAULT_MAX_RESPONSE_BYTES,
         );
 
         assert!(
@@ -1107,7 +1107,7 @@ mod tests {
         let redacted = super::bounded_redacted(
             stderr.as_bytes(),
             &[OsString::from(secret.clone())],
-            DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            DEFAULT_MAX_RESPONSE_BYTES,
         );
 
         assert!(
@@ -1136,7 +1136,7 @@ mod tests {
         let redacted = super::bounded_redacted(
             b"error: height 3 is above the tip at 31",
             &[OsString::from("3")],
-            DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            DEFAULT_MAX_RESPONSE_BYTES,
         );
 
         assert!(
@@ -1290,7 +1290,7 @@ mod tests {
             panic!("expected bounded RPC failure");
         };
         assert!(stderr.ends_with("…[truncated]"));
-        assert!(stderr.len() <= crate::DEFAULT_MAX_RPC_RESPONSE_BYTES + "…[truncated]".len());
+        assert!(stderr.len() <= crate::DEFAULT_MAX_RESPONSE_BYTES + "…[truncated]".len());
     }
 
     #[tokio::test]
@@ -1372,7 +1372,7 @@ mod tests {
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             executable: PathBuf::from("/definitely/missing/nigiri"),
             timeout: Duration::from_secs(1),
-            max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             ..Default::default()
         };
         config.executable.push("binary");
@@ -1397,7 +1397,7 @@ mod tests {
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             executable: PathBuf::from("/definitely/missing/nigiri/binary"),
             timeout: Duration::from_secs(1),
-            max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             ..Default::default()
         })
         .unwrap();
