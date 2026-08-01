@@ -386,8 +386,16 @@ async fn kill_and_reap(child: &mut Child) -> Result<ExitStatus, IoError> {
     }
 }
 
+/// Longest accepted RPC method name.
+///
+/// A runtime-determined method name is carried into [`NigiriError`] and therefore
+/// into caller logs, so it needs a length bound as well as a charset. The longest
+/// name in Bitcoin Core or Elements is well under half of this.
+const MAX_RPC_METHOD_BYTES: usize = 64;
+
 fn validate_rpc_method(method: &str) -> Result<(), NigiriError> {
     if !method.is_empty()
+        && method.len() <= MAX_RPC_METHOD_BYTES
         && method
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -396,7 +404,10 @@ fn validate_rpc_method(method: &str) -> Result<(), NigiriError> {
     }
 
     Err(NigiriError::InvalidRequest {
-        detail: "RPC method must contain only ASCII letters, digits, and underscores".into(),
+        detail: format!(
+            "RPC method must be 1 to {MAX_RPC_METHOD_BYTES} bytes of ASCII letters, digits, and underscores"
+        )
+        .into(),
     })
 }
 
@@ -672,6 +683,13 @@ mod tests {
         for invalid in ["", "get-block", "get block", "get\nblock"] {
             assert!(super::validate_rpc_method(invalid).is_err());
         }
+
+        // A runtime method name reaches NigiriError and therefore caller logs, so
+        // the charset alone is not enough of a bound.
+        let at_limit = "a".repeat(super::MAX_RPC_METHOD_BYTES);
+        assert!(super::validate_rpc_method(&at_limit).is_ok());
+        let over_limit = "a".repeat(super::MAX_RPC_METHOD_BYTES + 1);
+        assert!(super::validate_rpc_method(&over_limit).is_err());
     }
 
     /// Budget for confirming a killed child never performed its side effect.
