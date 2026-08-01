@@ -57,8 +57,12 @@ async fn liquid_complete_shared_and_asset_contract() -> Result<(), BoxError> {
     let minted = client
         .mint(&destination.to_string(), 1_000, "NigiriRsTest", "NRT")
         .await?;
+    assert_eq!(minted.issuance_txin.txid.to_string().len(), 64);
     let asset_faucet_txid = client
         .faucet_asset(&destination.to_string(), Amount::ONE_BTC, &minted.asset)
+        .await?;
+    client
+        .generate_to_address(1, &destination.to_string())
         .await?;
     client
         .wait_for_confirmation(&asset_faucet_txid, Duration::from_secs(30))
@@ -101,15 +105,9 @@ async fn liquid_public_rpc_deserializes_native_elements_types() -> Result<(), Bo
     let client = NigiriClient::<Liquid>::new();
     client.wait_ready().await?;
 
-    let height: u64 = client
-        .rpc("getblockcount", std::iter::empty::<&str>())
-        .await?;
-    let _: elements::BlockHash = client
-        .rpc("getbestblockhash", std::iter::empty::<&str>())
-        .await?;
-    let info: LiquidBlockchainInfo = client
-        .rpc("getblockchaininfo", std::iter::empty::<&str>())
-        .await?;
+    let height: u64 = client.rpc("getblockcount", ()).await?;
+    let _: elements::BlockHash = client.rpc("getbestblockhash", ()).await?;
+    let info: LiquidBlockchainInfo = client.rpc("getblockchaininfo", ()).await?;
 
     assert_eq!(info.chain, "liquidregtest");
     assert!(height > 0);

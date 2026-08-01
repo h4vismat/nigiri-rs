@@ -6,43 +6,48 @@ use crate::NigiriError;
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default retention ceiling for a single Nigiri CLI stream.
-pub const DEFAULT_MAX_RPC_RESPONSE_BYTES: usize = 64 * 1024;
+/// Default retention ceiling for a single transport response body.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
-/// Largest accepted value for [`NigiriConfig::max_rpc_response_bytes`].
+/// Largest accepted value for [`NigiriConfig::max_response_bytes`].
 ///
-/// Formatting a failed RPC costs a multiple of the retention ceiling in transient
-/// allocation, so an unbounded value read from a config file or environment
-/// variable could turn one RPC failure into an out-of-memory abort. 16 MiB is far
-/// above any Bitcoin Core or Elements regtest response and keeps the worst case
-/// survivable.
-pub const MAX_RPC_RESPONSE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
+/// An unbounded value read from a config file or environment variable could turn
+/// one response into an out-of-memory abort. 16 MiB is far above any Bitcoin Core
+/// or Elements regtest response and keeps the worst case survivable.
+pub const MAX_RESPONSE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 
 /// Complete immutable configuration for a Nigiri client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NigiriConfig {
+    /// Chopsticks HTTP endpoint.
     pub chopsticks_url: Url,
+    /// Esplora HTTP endpoint.
     pub esplora_url: Url,
+    /// Node JSON-RPC endpoint. Bitcoin defaults to port 18443; Liquid to 18884.
     pub node_rpc_url: Url,
+    /// Node JSON-RPC username. The default is Nigiri's public regtest user `admin1`.
     pub node_rpc_user: String,
+    /// Node JSON-RPC password. The default is Nigiri's public regtest password `123`.
+    ///
+    /// These values are deliberately visible in derived [`Debug`] output because
+    /// Nigiri publishes them as fixed regtest defaults; they are not production secrets.
     pub node_rpc_password: String,
+    /// Legacy Nigiri executable path retained for configuration compatibility until Phase 3.
     pub executable: PathBuf,
+    /// Maximum duration of one HTTP request and response operation.
     pub timeout: Duration,
-    /// Maximum bytes retained from a single Nigiri CLI stdout or stderr stream.
+    /// Maximum bytes retained from one node RPC, Chopsticks, or Esplora response body.
     ///
-    /// Anything past this limit is rejected and the child is killed rather than
-    /// buffered, so raise it when calling [`crate::NigiriClient::rpc`] with
-    /// methods whose results are large (`listunspent`, `listtransactions`,
-    /// `getblock <hash> 2`). Defaults to [`DEFAULT_MAX_RPC_RESPONSE_BYTES`].
+    /// Anything past this limit is rejected rather than buffered, so raise it
+    /// deliberately for methods whose results are large (`listunspent`,
+    /// `listtransactions`, `getblock <hash> 2`). Defaults to
+    /// [`DEFAULT_MAX_RESPONSE_BYTES`].
     ///
-    /// Raise it deliberately. Formatting a failed RPC's stderr costs a multiple of
-    /// this value in transient allocation: a 4-byte-per-byte redaction map plus a
-    /// lossy UTF-8 copy that can expand threefold. Values above
-    /// [`MAX_RPC_RESPONSE_BYTES_LIMIT`] are rejected for that reason. Low megabytes
-    /// cover every Bitcoin Core and Elements response in a regtest environment.
+    /// Values above [`MAX_RESPONSE_BYTES_LIMIT`] are rejected. Low megabytes cover
+    /// every Bitcoin Core and Elements response in a regtest environment.
     ///
     /// ```
-    /// use nigiri_rs::{Bitcoin, DEFAULT_MAX_RPC_RESPONSE_BYTES, NigiriClient, NigiriConfig};
+    /// use nigiri_rs::{Bitcoin, DEFAULT_MAX_RESPONSE_BYTES, NigiriClient, NigiriConfig};
     ///
     /// # fn main() -> Result<(), nigiri_rs::NigiriError> {
     /// let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
@@ -50,14 +55,14 @@ pub struct NigiriConfig {
     ///     esplora_url: "http://localhost:30000".parse().unwrap(),
     ///     executable: "nigiri".into(),
     ///     timeout: std::time::Duration::from_secs(30),
-    ///     max_rpc_response_bytes: 4 * DEFAULT_MAX_RPC_RESPONSE_BYTES,
+    ///     max_response_bytes: 4 * DEFAULT_MAX_RESPONSE_BYTES,
     ///     ..Default::default()
     /// })?;
     /// # let _ = client;
     /// # Ok(())
     /// # }
     /// ```
-    pub max_rpc_response_bytes: usize,
+    pub max_response_bytes: usize,
 }
 
 impl NigiriConfig {
@@ -86,7 +91,7 @@ impl NigiriConfig {
             node_rpc_password: "123".to_owned(),
             executable: PathBuf::from("nigiri"),
             timeout: DEFAULT_TIMEOUT,
-            max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         }
     }
 
@@ -101,14 +106,14 @@ impl NigiriConfig {
         if self.timeout.is_zero() {
             return Err(invalid_configuration("timeout must be greater than zero"));
         }
-        if self.max_rpc_response_bytes == 0 {
+        if self.max_response_bytes == 0 {
             return Err(invalid_configuration(
-                "max_rpc_response_bytes must be greater than zero",
+                "max_response_bytes must be greater than zero",
             ));
         }
-        if self.max_rpc_response_bytes > MAX_RPC_RESPONSE_BYTES_LIMIT {
+        if self.max_response_bytes > MAX_RESPONSE_BYTES_LIMIT {
             return Err(invalid_configuration(
-                "max_rpc_response_bytes must not exceed MAX_RPC_RESPONSE_BYTES_LIMIT",
+                "max_response_bytes must not exceed MAX_RESPONSE_BYTES_LIMIT",
             ));
         }
         Ok(self)
@@ -116,6 +121,10 @@ impl NigiriConfig {
 }
 
 impl Default for NigiriConfig {
+    /// Returns the Bitcoin service defaults.
+    ///
+    /// A custom [`crate::NigiriClient<crate::Liquid>`] must override all three
+    /// service URLs, including [`NigiriConfig::node_rpc_url`].
     fn default() -> Self {
         Self::bitcoin()
     }
@@ -149,7 +158,7 @@ fn invalid_configuration(detail: &'static str) -> NigiriError {
 mod tests {
     use std::{path::PathBuf, time::Duration};
 
-    use super::{DEFAULT_MAX_RPC_RESPONSE_BYTES, DEFAULT_TIMEOUT, NigiriConfig};
+    use super::{DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT, NigiriConfig};
 
     #[test]
     fn verified_network_defaults_include_both_service_endpoints() {
@@ -182,7 +191,7 @@ mod tests {
             esplora_url: "http://fixture.invalid/esplora".parse().unwrap(),
             executable: PathBuf::from("/opt/nigiri"),
             timeout: Duration::from_secs(9),
-            max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             ..Default::default()
         }
         .validate_and_normalize()

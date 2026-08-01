@@ -1,8 +1,8 @@
-use std::{borrow::Cow, io, time::Duration};
+use std::{borrow::Cow, time::Duration};
 
 use reqwest::StatusCode;
 
-/// Closed error model for Nigiri HTTP and CLI operations.
+/// Closed error model for Nigiri HTTP and node JSON-RPC operations.
 ///
 /// Operation and method labels are [`Cow<'static, str>`] so that a
 /// runtime-determined RPC method name passed to [`crate::NigiriClient::rpc`] is
@@ -21,26 +21,24 @@ pub enum NigiriError {
         status: StatusCode,
         body: String,
     },
-    #[error("failed to execute Nigiri during {operation}")]
-    ProcessSpawn {
-        operation: Cow<'static, str>,
-        #[source]
-        source: io::Error,
-    },
-    #[error("Nigiri RPC {method} failed with exit code {exit_code:?}: {stderr}")]
+    /// The node returned a JSON-RPC error envelope.
+    #[error("Nigiri RPC {method} failed with code {code}: {message}")]
     RpcFailed {
+        /// Request method reported by the node.
         method: Cow<'static, str>,
-        exit_code: Option<i32>,
-        stderr: String,
+        /// Numeric JSON-RPC error code returned by the node.
+        code: i32,
+        /// JSON-RPC error message returned by the node.
+        message: String,
     },
     #[error("{operation} timed out after {duration:?}")]
     Timeout {
         operation: Cow<'static, str>,
         duration: Duration,
     },
-    /// Caller input was rejected before any Nigiri process was spawned.
+    /// Caller input was rejected before any request was sent.
     ///
-    /// Distinct from [`NigiriError::InvalidResponse`], which means Nigiri ran and
+    /// Distinct from [`NigiriError::InvalidResponse`], which means a service
     /// returned something unusable. Covers configuration validation and RPC method
     /// name validation.
     #[error("invalid request: {detail}")]

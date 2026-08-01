@@ -2,8 +2,8 @@ use std::{path::PathBuf, time::Duration};
 
 use bitcoin::address::NetworkChecked;
 use nigiri_rs::{
-    Bitcoin, BitcoinAddressInfo, BitcoinTxInfo, BitcoinUtxo, DEFAULT_MAX_RPC_RESPONSE_BYTES,
-    Liquid, LiquidAddressInfo, LiquidTxInfo, LiquidUtxo, NigiriClient, NigiriConfig, NigiriError,
+    Bitcoin, BitcoinAddressInfo, BitcoinTxInfo, BitcoinUtxo, DEFAULT_MAX_RESPONSE_BYTES, Liquid,
+    LiquidAddressInfo, LiquidTxInfo, LiquidUtxo, NigiriClient, NigiriConfig, NigiriError,
     NigiriNetwork,
 };
 use url::Url;
@@ -53,7 +53,7 @@ fn custom_configuration_is_normalized_once() {
         esplora_url: Url::parse("http://127.0.0.1:4200/api").unwrap(),
         executable: PathBuf::from("/opt/nigiri"),
         timeout: Duration::from_secs(7),
-        max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+        max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         ..Default::default()
     };
 
@@ -69,7 +69,7 @@ fn invalid_configuration_is_rejected() {
         esplora_url: Url::parse("http://127.0.0.1:4200").unwrap(),
         executable: PathBuf::from("nigiri"),
         timeout: Duration::from_secs(7),
-        max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+        max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         ..Default::default()
     };
 

@@ -67,15 +67,6 @@ cannot redact a secret split by the truncation cut and does not normalize ANSI b
 guarantees is a trap: a reader cannot tell which applies where. Extract one (bytes in, bounded
 redacted string out) and call it from both.
 
-### Consider making the Esplora HTTP body limit configurable too
-
-**Priority:** P4
-
-`src/http.rs` keeps its own fixed `MAX_BODY_BYTES = 64 * 1024` for Esplora responses, while
-the CLI path is now configurable via `NigiriConfig::max_rpc_response_bytes`. The field name
-scopes the promise correctly, so this is not a bug, but a caller raising one limit may expect
-the other to follow.
-
 ## Test suite hygiene
 
 ### Deduplicate test scaffolding
@@ -98,6 +89,13 @@ Surfaced by the 0.3.0 specialist review:
   reconciled in 0.3.0 and the test copy carries a comment saying why, but nothing enforces it.
 
 ## Completed
+
+### Apply one configurable response limit to every transport
+
+**Completed:** v0.4.0
+
+Renamed the public setting to `max_response_bytes` and now apply it to node JSON-RPC,
+Chopsticks, and Esplora response bodies. The fixed Esplora-only `MAX_BODY_BYTES` limit is gone.
 
 ### Bound `max_rpc_response_bytes` from above
 

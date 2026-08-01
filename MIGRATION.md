@@ -1,105 +1,77 @@
 # Migrating nigiri-rs
 
-## From 0.2.x to 0.3.0
+## From 0.3.x to 0.4.0
 
-Version 0.3.0 adds a public, type-directed `NigiriClient::rpc<R>()` escape hatch for Bitcoin and Liquid. This deliberately reverses the 0.2 policy that arbitrary RPC was unavailable.
+Version 0.4.0 moves all public node operations to direct JSON-RPC against an already-running Nigiri node. The host still owns lifecycle, synchronization, and recovery; the library has no CLI fallback for public calls.
 
-Existing curated methods remain supported and source-compatible. Use them when their stronger native return contracts cover the required operation.
+### Raw RPC parameters are JSON values
 
-Enable `bitcoin-rpc-types` to use the optional `corepc-types` re-export. Nigiri v0.5.16 runs Bitcoin Core v30.0, so its verified response module is `nigiri_rs::bitcoin_rpc_types::v30`.
-
-RPC arguments are separate CLI-style strings. The method never accepts one combined command string and never invokes a shell. The method name may be computed at runtime. Arbitrary methods can mutate wallet and chain state; lifecycle and test synchronization remain host-owned.
-
-### `NigiriConfig` gained a required field
-
-`NigiriConfig` now carries `max_rpc_response_bytes`, so struct-literal construction must supply it. Existing code that built the config by literal needs one added line:
+`NigiriClient::rpc` is now `rpc<R, P>` where `P: serde::Serialize`. The response remains selected by `R`, but parameters are sent as JSON rather than CLI strings. Use `()` for no parameters, tuples for positional parameters, arrays for JSON arrays, and serializable records where the RPC accepts named parameters.
 
 ```rust
-use nigiri_rs::{DEFAULT_MAX_RPC_RESPONSE_BYTES, NigiriConfig};
+// Before: a CLI string that the wrapper could coerce.
+let hash: bitcoin::BlockHash = client.rpc("getblockhash", ["100"]).await?;
+
+// After: a JSON number in a positional parameter array.
+let hash: bitcoin::BlockHash = client.rpc("getblockhash", (100_u64,)).await?;
+```
+
+In particular, `"100"` is a JSON string, not a number. `()` is encoded as the empty array `[]`, not JSON `null`.
+
+### Configuration names and defaults changed
+
+The response-size field and constants were renamed because the same limit now applies to node JSON-RPC, Chopsticks, and Esplora response bodies:
+
+| 0.3.x | 0.4.0 |
+| --- | --- |
+| `max_rpc_response_bytes` | `max_response_bytes` |
+| `DEFAULT_MAX_RPC_RESPONSE_BYTES` | `DEFAULT_MAX_RESPONSE_BYTES` |
+| `MAX_RPC_RESPONSE_BYTES_LIMIT` | `MAX_RESPONSE_BYTES_LIMIT` |
+
+`NigiriConfig` also has `node_rpc_url`, `node_rpc_user`, and `node_rpc_password`. `NigiriConfig::default()` supplies Bitcoin's Nigiri endpoints, including `http://localhost:18443/` with the public regtest credentials `admin1` / `123`; `NigiriClient::<Liquid>::new()` supplies Liquid's `http://localhost:18884/` endpoint. For Bitcoin custom configuration, prefer update syntax so future public fields do not break your literal:
+
+```rust
+use nigiri_rs::{DEFAULT_MAX_RESPONSE_BYTES, NigiriConfig};
 
 let config = NigiriConfig {
-    chopsticks_url: "http://localhost:3000".parse()?,
-    esplora_url: "http://localhost:30000".parse()?,
-    executable: "nigiri".into(),
-    timeout: std::time::Duration::from_secs(30),
-    max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+    max_response_bytes: 4 * DEFAULT_MAX_RESPONSE_BYTES,
+    ..Default::default()
 };
 ```
 
-`NigiriClient::new()` is unaffected. Raise the value above the 64 KiB default when calling `rpc()` with methods whose results are large, such as `listunspent`, `listtransactions`, or `getblock <hash> 2`; anything past the limit is rejected rather than buffered.
+`NigiriConfig::default()` is Bitcoin-specific. A custom `NigiriClient<Liquid>` must override all three service URLs, including `node_rpc_url`; struct update syntax by itself would retain Bitcoin's ports.
 
-### `NigiriError` labels are now `Cow<'static, str>`
+`timeout` now bounds the HTTP request and response operation against an already-running service. A timeout does not prove that a mutating request did not reach the node.
 
-`operation` and `method` on every `NigiriError` variant changed from `&'static str` to `Cow<'static, str>` so that a runtime-determined RPC method name is reported accurately. Struct patterns matching a label against a literal need a guard:
+### Error and mint result patterns changed
 
-```rust
-// Before
-matches!(error, NigiriError::InvalidResponse { operation: "configuration", .. })
-// After
-matches!(error, NigiriError::InvalidResponse { ref operation, .. } if operation.as_ref() == "configuration")
-```
-
-Crate-owned labels stay borrowed, so this allocates nothing for the curated methods.
-
-### `NigiriError::InvalidRequest` replaces two synthetic labels
-
-Input rejected before any Nigiri process is spawned now has its own variant instead of
-masquerading as an unusable response. Two cases moved:
-
-| Was | Now |
-| --- | --- |
-| `InvalidResponse { operation: "configuration", detail }` | `InvalidRequest { detail }` |
-| `InvalidResponse { operation: "RPC method validation", detail }` | `InvalidRequest { detail }` |
-
-Nothing produced a response in either case, and callers previously had to string-match a
-pseudo-operation to tell them apart from a genuine node failure:
+JSON-RPC node errors preserve the node code and message. Update destructuring patterns accordingly:
 
 ```rust
 // Before
-matches!(error, NigiriError::InvalidResponse { ref operation, .. } if operation.as_ref() == "configuration")
+let NigiriError::RpcFailed { exit_code, stderr, .. } = error else { return };
+
 // After
-matches!(error, NigiriError::InvalidRequest { .. })
+let NigiriError::RpcFailed { code, message, .. } = error else { return };
 ```
 
-### `max_rpc_response_bytes` is bounded from above
+`NigiriError::ProcessSpawn` is removed. Transport errors are reported as HTTP transport, HTTP status, timeout, invalid response, invalid request, or JSON-RPC failure errors instead.
 
-Values above `MAX_RPC_RESPONSE_BYTES_LIMIT` (16 MiB) are now rejected by
-`NigiriClient::with_config`. Formatting a failed RPC costs a multiple of the retention
-ceiling, so an unbounded value read from a config file or environment variable could turn one
-RPC failure into an out-of-memory abort. 16 MiB is far above any Bitcoin Core or Elements
-regtest response.
+`MintResponse::issuance_txin` is now guaranteed when `mint` succeeds:
 
-### Process boundary hardening
+```rust
+// Before
+let input: Option<nigiri_rs::IssuanceTxIn> = minted.issuance_txin;
 
-The CLI executor drains stdout and stderr concurrently under the configured timeout, so a
-child that fills one pipe can no longer deadlock the read. Breaching the retention limit or
-the timeout kills and reaps the spawned child, subject to the process-group limit noted
-below. Retained stderr is bounded, has ANSI escape sequences stripped, and preserves UTF-8
-through lossy decoding.
+// After
+let input: nigiri_rs::IssuanceTxIn = minted.issuance_txin;
+```
 
-Caller arguments are redacted from retained stderr on every code path. Each invocation
-builder declares where its caller-supplied values begin, so the non-RPC subcommands
-(`mint`, `faucet_asset`) redact their address, quantity, and asset arguments the same way
-`rpc()` redacts its own. Redaction anchors on a 16-byte prefix and extends over however
-much of the argument the CLI actually echoed, so an elided value (`Invalid descriptor
-"wpkh(cQr..."`) is covered too. It remains textual matching: a CLI that re-encodes an
-argument, or echoes only its tail, can still surface that form.
+`MintResponse::txid` identifies the transfer produced by `sendtoaddress`. The issuance transaction is `MintResponse::issuance_txin.txid`.
 
-Killing a timed-out or over-limit child signals the direct child only. Real `nigiri` is a
-shell wrapper around `docker`, so a `docker exec` it already started continues to
-completion. A mutating RPC that times out may therefore still commit on the node; the host
-owns recovery.
+Liquid `mint` now derives its asset identifier from the contract submitted to Elements' `issueasset`, then sends the asset with `sendtoaddress`. Identical mint inputs intentionally produce a different asset identifier from `nigiri mint`. The two calls are non-atomic: if issuance succeeds and the send fails, inspect the node before retrying because another attempt can issue another asset.
 
-### RPC failure detection changed
-
-An `error code:` marker is now recognized only at the start of a line. A successful response
-whose content happens to contain that phrase mid-line is no longer misreported as a failure.
-Stderr containing only whitespace no longer fails a void result.
-
-A method that exits zero, writes nothing to stdout, and writes real content to stderr is
-still reported as `NigiriError::RpcFailed`, because that is how the node CLIs surface some
-errors. Keep the host `nigiri` wrapper's stderr free of unrelated noise, or void RPCs will
-report spurious failures.
+Existing curated methods remain available; prefer them where their native contracts cover the operation. Enable `bitcoin-rpc-types` to use the optional `corepc-types` re-export. Nigiri v0.5.16 runs Bitcoin Core v30.0, so its verified response module is `nigiri_rs::bitcoin_rpc_types::v30`.
 
 ## From 0.1.x to 0.2.0
 

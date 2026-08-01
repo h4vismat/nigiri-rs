@@ -23,18 +23,20 @@
 //!
 //! # Advanced node RPC
 //!
-//! [`NigiriClient::rpc`] invokes an arbitrary node RPC with separately passed
-//! CLI-style arguments and deserializes the result into a caller-selected type.
+//! [`NigiriClient::rpc`] invokes an arbitrary node RPC with JSON-serialized
+//! parameters and deserializes the result into a caller-selected type. Use `()`
+//! for no parameters and tuples for positional JSON parameters; JSON strings are
+//! not coerced into the number or boolean types expected by a node method.
 //!
 //! ```no_run
 //! use nigiri_rs::{Bitcoin, NigiriClient};
 //!
 //! # async fn example() -> Result<(), nigiri_rs::NigiriError> {
 //! let client = NigiriClient::<Bitcoin>::new();
-//! let height: u64 = client
-//!     .rpc("getblockcount", std::iter::empty::<&str>())
-//!     .await?;
+//! let height: u64 = client.rpc("getblockcount", ()).await?;
+//! let hundredth_hash: bitcoin::BlockHash = client.rpc("getblockhash", (100_u64,)).await?;
 //! assert!(height > 0);
+//! let _ = hundredth_hash;
 //! # Ok(())
 //! # }
 //! ```
@@ -79,7 +81,7 @@ mod types;
 pub use corepc_types as bitcoin_rpc_types;
 
 pub use client::NigiriClient;
-pub use config::{DEFAULT_MAX_RPC_RESPONSE_BYTES, MAX_RPC_RESPONSE_BYTES_LIMIT, NigiriConfig};
+pub use config::{DEFAULT_MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES_LIMIT, NigiriConfig};
 pub use error::NigiriError;
 pub use network::{Bitcoin, Liquid, NigiriNetwork};
 pub use types::{

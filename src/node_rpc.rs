@@ -1,6 +1,3 @@
-// Phase 2 wires this transport into the public RPC methods and removes this allow.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{NigiriClient, NigiriError, NigiriNetwork};
@@ -82,11 +79,10 @@ where
     };
 
     if let Some(error) = response.error {
-        // Temporary Phase 1 mapping. Phase 2 reshapes RpcFailed around code/message.
         return Err(NigiriError::RpcFailed {
             method: method.to_owned().into(),
-            exit_code: Some(error.code),
-            stderr: error.message,
+            code: error.code,
+            message: error.message,
         });
     }
 
@@ -106,10 +102,7 @@ async fn read_bounded<N: NigiriNetwork>(
         .await
         .map_err(|source| transport_error(client, method, source))?
     {
-        let remaining = client
-            .config
-            .max_rpc_response_bytes
-            .saturating_sub(body.len());
+        let remaining = client.config.max_response_bytes.saturating_sub(body.len());
         body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
         if chunk.len() > remaining {
             exceeded = true;
@@ -203,11 +196,21 @@ mod tests {
         (Url::parse(&format!("http://{address}/")).unwrap(), task)
     }
 
-    fn client(node_rpc_url: Url, max_rpc_response_bytes: usize) -> NigiriClient<Bitcoin> {
+    async fn holding_server() -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        (Url::parse(&format!("http://{address}/")).unwrap(), task)
+    }
+
+    fn client(node_rpc_url: Url, max_response_bytes: usize) -> NigiriClient<Bitcoin> {
         NigiriClient::with_config(NigiriConfig {
             node_rpc_url,
             timeout: Duration::from_secs(2),
-            max_rpc_response_bytes,
+            max_response_bytes,
             ..Default::default()
         })
         .unwrap()
@@ -282,10 +285,36 @@ mod tests {
             error,
             NigiriError::RpcFailed {
                 ref method,
-                exit_code: Some(-8),
-                ref stderr,
-            } if method.as_ref() == "getblockhash" && stderr == "Block height out of range"
+                code: -8,
+                ref message,
+            } if method.as_ref() == "getblockhash" && message == "Block height out of range"
         ));
+    }
+
+    #[tokio::test]
+    async fn request_timeout_preserves_operation_and_configured_duration() {
+        let (url, server) = holding_server().await;
+        let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+            node_rpc_url: url,
+            timeout: Duration::from_millis(25),
+            max_response_bytes: 1024,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let error = super::call::<_, _, u64>(&client, "getblockcount", ())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            NigiriError::Timeout {
+                ref operation,
+                duration,
+            } if operation.as_ref() == "getblockcount"
+                && duration == Duration::from_millis(25)
+        ));
+        server.abort();
     }
 
     #[tokio::test]
@@ -302,6 +331,19 @@ mod tests {
             NigiriError::HttpStatus { status, ref body, .. }
                 if status.as_u16() == 502 && body == "gateway down"
         ));
+    }
+
+    #[tokio::test]
+    async fn non_envelope_success_body_becomes_invalid_response() {
+        let (url, _) = one_shot_server("200 OK", "not JSON".to_owned()).await;
+        let client = client(url, 1024);
+
+        let error = super::call::<_, _, ()>(&client, "getblockcount", ())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, NigiriError::InvalidResponse { .. }));
+        assert!(!error.to_string().contains("not JSON"));
     }
 
     #[tokio::test]
@@ -340,7 +382,7 @@ mod tests {
             node_rpc_user: "rpc-user".to_owned(),
             node_rpc_password: "rpc-pass".to_owned(),
             timeout: Duration::from_secs(2),
-            max_rpc_response_bytes: 1024,
+            max_response_bytes: 1024,
             ..Default::default()
         })
         .unwrap();

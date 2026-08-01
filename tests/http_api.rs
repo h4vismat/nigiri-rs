@@ -2,7 +2,7 @@ use std::{path::PathBuf, time::Duration};
 
 use bitcoin::Amount;
 use nigiri_rs::{
-    Bitcoin, DEFAULT_MAX_RPC_RESPONSE_BYTES, Liquid, NigiriClient, NigiriConfig, NigiriError,
+    Bitcoin, DEFAULT_MAX_RESPONSE_BYTES, Liquid, NigiriClient, NigiriConfig, NigiriError,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -57,9 +57,26 @@ fn config(base: Url) -> NigiriConfig {
         esplora_url: base,
         executable: PathBuf::from("nigiri"),
         timeout: Duration::from_secs(2),
-        max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+        max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn configured_response_limit_rejects_oversized_esplora_success() {
+    let (base, _) = one_shot_server("200 OK", "123456789".to_owned()).await;
+    let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+        chopsticks_url: base.clone(),
+        esplora_url: base,
+        max_response_bytes: 8,
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert!(matches!(
+        client.block_height().await.unwrap_err(),
+        NigiriError::InvalidResponse { .. }
+    ));
 }
 
 #[tokio::test]
