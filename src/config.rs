@@ -23,6 +23,9 @@ pub const MAX_RPC_RESPONSE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 pub struct NigiriConfig {
     pub chopsticks_url: Url,
     pub esplora_url: Url,
+    pub node_rpc_url: Url,
+    pub node_rpc_user: String,
+    pub node_rpc_password: String,
     pub executable: PathBuf,
     pub timeout: Duration,
     /// Maximum bytes retained from a single Nigiri CLI stdout or stderr stream.
@@ -48,6 +51,7 @@ pub struct NigiriConfig {
     ///     executable: "nigiri".into(),
     ///     timeout: std::time::Duration::from_secs(30),
     ///     max_rpc_response_bytes: 4 * DEFAULT_MAX_RPC_RESPONSE_BYTES,
+    ///     ..Default::default()
     /// })?;
     /// # let _ = client;
     /// # Ok(())
@@ -58,17 +62,28 @@ pub struct NigiriConfig {
 
 impl NigiriConfig {
     pub(crate) fn bitcoin() -> Self {
-        Self::defaults("http://localhost:3000", "http://localhost:30000")
+        Self::defaults(
+            "http://localhost:3000",
+            "http://localhost:30000",
+            "http://localhost:18443/",
+        )
     }
 
     pub(crate) fn liquid() -> Self {
-        Self::defaults("http://localhost:3001", "http://localhost:30001")
+        Self::defaults(
+            "http://localhost:3001",
+            "http://localhost:30001",
+            "http://localhost:18884/",
+        )
     }
 
-    fn defaults(chopsticks_url: &str, esplora_url: &str) -> Self {
+    fn defaults(chopsticks_url: &str, esplora_url: &str, node_rpc_url: &str) -> Self {
         Self {
             chopsticks_url: Url::parse(chopsticks_url).expect("static Nigiri URL is valid"),
             esplora_url: Url::parse(esplora_url).expect("static Nigiri URL is valid"),
+            node_rpc_url: Url::parse(node_rpc_url).expect("static Nigiri URL is valid"),
+            node_rpc_user: "admin1".to_owned(),
+            node_rpc_password: "123".to_owned(),
             executable: PathBuf::from("nigiri"),
             timeout: DEFAULT_TIMEOUT,
             max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
@@ -78,6 +93,7 @@ impl NigiriConfig {
     pub(crate) fn validate_and_normalize(mut self) -> Result<Self, NigiriError> {
         normalize_url(&mut self.chopsticks_url)?;
         normalize_url(&mut self.esplora_url)?;
+        normalize_url(&mut self.node_rpc_url)?;
 
         if self.executable.as_os_str().is_empty() {
             return Err(invalid_configuration("executable path must not be empty"));
@@ -96,6 +112,12 @@ impl NigiriConfig {
             ));
         }
         Ok(self)
+    }
+}
+
+impl Default for NigiriConfig {
+    fn default() -> Self {
+        Self::bitcoin()
     }
 }
 
@@ -138,8 +160,19 @@ mod tests {
         assert_eq!(bitcoin.esplora_url.as_str(), "http://localhost:30000/");
         assert_eq!(liquid.chopsticks_url.as_str(), "http://localhost:3001/");
         assert_eq!(liquid.esplora_url.as_str(), "http://localhost:30001/");
+        assert_eq!(bitcoin.node_rpc_url.as_str(), "http://localhost:18443/");
+        assert_eq!(liquid.node_rpc_url.as_str(), "http://localhost:18884/");
+        assert_eq!(bitcoin.node_rpc_user, "admin1");
+        assert_eq!(liquid.node_rpc_user, "admin1");
+        assert_eq!(bitcoin.node_rpc_password, "123");
+        assert_eq!(liquid.node_rpc_password, "123");
         assert_eq!(bitcoin.executable, PathBuf::from("nigiri"));
         assert_eq!(liquid.timeout, DEFAULT_TIMEOUT);
+    }
+
+    #[test]
+    fn default_configuration_uses_bitcoin_defaults() {
+        assert_eq!(NigiriConfig::default(), NigiriConfig::bitcoin());
     }
 
     #[test]
@@ -150,6 +183,7 @@ mod tests {
             executable: PathBuf::from("/opt/nigiri"),
             timeout: Duration::from_secs(9),
             max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+            ..Default::default()
         }
         .validate_and_normalize()
         .unwrap();
@@ -164,5 +198,27 @@ mod tests {
         );
         assert_eq!(config.executable, PathBuf::from("/opt/nigiri"));
         assert_eq!(config.timeout, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn custom_node_rpc_url_is_normalized() {
+        let config = NigiriConfig {
+            node_rpc_url: "https://fixture.invalid/rpc".parse().unwrap(),
+            ..Default::default()
+        }
+        .validate_and_normalize()
+        .unwrap();
+
+        assert_eq!(config.node_rpc_url.as_str(), "https://fixture.invalid/rpc/");
+    }
+
+    #[test]
+    fn non_http_node_rpc_url_is_rejected() {
+        let config = NigiriConfig {
+            node_rpc_url: "ftp://fixture.invalid/rpc".parse().unwrap(),
+            ..Default::default()
+        };
+
+        assert!(config.validate_and_normalize().is_err());
     }
 }

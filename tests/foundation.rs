@@ -54,6 +54,7 @@ fn custom_configuration_is_normalized_once() {
         executable: PathBuf::from("/opt/nigiri"),
         timeout: Duration::from_secs(7),
         max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+        ..Default::default()
     };
 
     let client = NigiriClient::<Bitcoin>::with_config(config).unwrap();
@@ -69,6 +70,7 @@ fn invalid_configuration_is_rejected() {
         executable: PathBuf::from("nigiri"),
         timeout: Duration::from_secs(7),
         max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+        ..Default::default()
     };
 
     let error = NigiriClient::<Liquid>::with_config(config).unwrap_err();

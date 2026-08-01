@@ -16,6 +16,7 @@ fn fake_client<N: nigiri_rs::NigiriNetwork>() -> NigiriClient<N> {
         executable,
         timeout: Duration::from_secs(2),
         max_rpc_response_bytes: DEFAULT_MAX_RPC_RESPONSE_BYTES,
+        ..Default::default()
     })
     .unwrap()
 }
