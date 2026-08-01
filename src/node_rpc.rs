@@ -79,11 +79,10 @@ where
     };
 
     if let Some(error) = response.error {
-        // Temporary Phase 1 mapping. Phase 2 reshapes RpcFailed around code/message.
         return Err(NigiriError::RpcFailed {
             method: method.to_owned().into(),
-            exit_code: Some(error.code),
-            stderr: error.message,
+            code: error.code,
+            message: error.message,
         });
     }
 
@@ -197,6 +196,16 @@ mod tests {
         (Url::parse(&format!("http://{address}/")).unwrap(), task)
     }
 
+    async fn holding_server() -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        (Url::parse(&format!("http://{address}/")).unwrap(), task)
+    }
+
     fn client(node_rpc_url: Url, max_response_bytes: usize) -> NigiriClient<Bitcoin> {
         NigiriClient::with_config(NigiriConfig {
             node_rpc_url,
@@ -276,10 +285,36 @@ mod tests {
             error,
             NigiriError::RpcFailed {
                 ref method,
-                exit_code: Some(-8),
-                ref stderr,
-            } if method.as_ref() == "getblockhash" && stderr == "Block height out of range"
+                code: -8,
+                ref message,
+            } if method.as_ref() == "getblockhash" && message == "Block height out of range"
         ));
+    }
+
+    #[tokio::test]
+    async fn request_timeout_preserves_operation_and_configured_duration() {
+        let (url, server) = holding_server().await;
+        let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+            node_rpc_url: url,
+            timeout: Duration::from_millis(25),
+            max_response_bytes: 1024,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let error = super::call::<_, _, u64>(&client, "getblockcount", ())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            NigiriError::Timeout {
+                ref operation,
+                duration,
+            } if operation.as_ref() == "getblockcount"
+                && duration == Duration::from_millis(25)
+        ));
+        server.abort();
     }
 
     #[tokio::test]

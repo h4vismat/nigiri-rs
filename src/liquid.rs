@@ -435,10 +435,10 @@ mod tests {
         assert!(matches!(
             error,
             NigiriError::RpcFailed {
-                exit_code: Some(-6),
-                ref stderr,
+                code: -6,
+                ref message,
                 ..
-            } if stderr == "Insufficient funds"
+            } if message == "Insufficient funds"
         ));
         let requests = requests.await.unwrap();
         assert_eq!(requests.len(), 2);

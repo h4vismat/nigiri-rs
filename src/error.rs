@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io, time::Duration};
+use std::{borrow::Cow, time::Duration};
 
 use reqwest::StatusCode;
 
@@ -21,17 +21,11 @@ pub enum NigiriError {
         status: StatusCode,
         body: String,
     },
-    #[error("failed to execute Nigiri during {operation}")]
-    ProcessSpawn {
-        operation: Cow<'static, str>,
-        #[source]
-        source: io::Error,
-    },
-    #[error("Nigiri RPC {method} failed with exit code {exit_code:?}: {stderr}")]
+    #[error("Nigiri RPC {method} failed with code {code}: {message}")]
     RpcFailed {
         method: Cow<'static, str>,
-        exit_code: Option<i32>,
-        stderr: String,
+        code: i32,
+        message: String,
     },
     #[error("{operation} timed out after {duration:?}")]
     Timeout {

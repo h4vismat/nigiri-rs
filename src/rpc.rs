@@ -19,6 +19,27 @@ const PIPE_READ_CHUNK_BYTES: usize = 8 * 1024;
 /// stdout while Nigiri's wrapper still exits zero.
 const RPC_ERROR_MARKER: &str = "error code:";
 
+// Phase 3 deletes the dormant CLI transport and these compatibility adapters.
+// They deliberately do not define supported production error semantics.
+fn legacy_io_error(operation: Cow<'static, str>) -> NigiriError {
+    NigiriError::InvalidResponse {
+        operation,
+        detail: "legacy CLI execution failed".to_owned(),
+    }
+}
+
+fn legacy_rpc_failed(
+    method: Cow<'static, str>,
+    exit_code: Option<i32>,
+    stderr: String,
+) -> NigiriError {
+    NigiriError::RpcFailed {
+        method,
+        code: exit_code.unwrap_or(-1),
+        message: stderr,
+    }
+}
+
 // Phase 3 removes the dormant CLI transport after its remaining callers migrate.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,10 +160,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
             .kill_on_drop(true);
         let mut child = command
             .spawn()
-            .map_err(|source| NigiriError::ProcessSpawn {
-                operation: operation.clone(),
-                source,
-            })?;
+            .map_err(|_| legacy_io_error(operation.clone()))?;
         let stdout = child
             .stdout
             .take()
@@ -170,15 +188,15 @@ impl<N: NigiriNetwork> NigiriClient<N> {
             }
             Ok(Ok(CaptureOutcome::StderrLimit { stderr })) => {
                 let status = kill_and_reap(&mut child).await.ok();
-                return Err(NigiriError::RpcFailed {
-                    method: operation,
-                    exit_code: status.and_then(|status| status.code()),
-                    stderr: bounded_redacted(&stderr, caller_args, limit),
-                });
+                return Err(legacy_rpc_failed(
+                    operation,
+                    status.and_then(|status| status.code()),
+                    bounded_redacted(&stderr, caller_args, limit),
+                ));
             }
-            Ok(Err(source)) => {
+            Ok(Err(_)) => {
                 let _ = kill_and_reap(&mut child).await;
-                return Err(NigiriError::ProcessSpawn { operation, source });
+                return Err(legacy_io_error(operation));
             }
             Err(_) => {
                 // A cleanup failure must not mask why the call actually failed.
@@ -191,18 +209,18 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         };
 
         if !output.status.success() {
-            return Err(NigiriError::RpcFailed {
-                method: operation,
-                exit_code: output.status.code(),
-                stderr: bounded_redacted(&output.stderr, caller_args, limit),
-            });
+            return Err(legacy_rpc_failed(
+                operation,
+                output.status.code(),
+                bounded_redacted(&output.stderr, caller_args, limit),
+            ));
         }
         if output.stdout.is_empty() && !is_ascii_blank(&output.stderr) {
-            return Err(NigiriError::RpcFailed {
-                method: operation,
-                exit_code: output.status.code(),
-                stderr: bounded_redacted(&output.stderr, caller_args, limit),
-            });
+            return Err(legacy_rpc_failed(
+                operation,
+                output.status.code(),
+                bounded_redacted(&output.stderr, caller_args, limit),
+            ));
         }
         let stdout =
             std::str::from_utf8(&output.stdout).map_err(|_| NigiriError::InvalidResponse {
@@ -211,11 +229,11 @@ impl<N: NigiriNetwork> NigiriClient<N> {
             })?;
         let stdout = strip_ansi(stdout).trim().to_owned();
         if has_rpc_error_marker(&stdout) {
-            return Err(NigiriError::RpcFailed {
-                method: operation,
-                exit_code: output.status.code(),
-                stderr: bounded_redacted(stdout.as_bytes(), caller_args, limit),
-            });
+            return Err(legacy_rpc_failed(
+                operation,
+                output.status.code(),
+                bounded_redacted(stdout.as_bytes(), caller_args, limit),
+            ));
         }
         Ok(stdout)
     }
@@ -882,15 +900,15 @@ mod tests {
 
         let NigiriError::RpcFailed {
             method,
-            exit_code,
-            stderr,
+            code,
+            message,
         } = error
         else {
             panic!("expected RPC failure");
         };
         assert_eq!(method, "fail");
-        assert_eq!(exit_code, Some(17));
-        assert!(!stderr.contains(secret));
+        assert_eq!(code, 17);
+        assert!(!message.contains(secret));
     }
 
     #[tokio::test]
@@ -905,16 +923,16 @@ mod tests {
 
         let NigiriError::RpcFailed {
             method,
-            exit_code,
-            stderr,
+            code,
+            message,
         } = error
         else {
             panic!("expected RPC failure");
         };
         assert_eq!(method, "rpc_error");
-        assert_eq!(exit_code, Some(0));
-        assert!(stderr.contains("error code: -8"));
-        assert!(!stderr.contains(secret));
+        assert_eq!(code, 0);
+        assert!(message.contains("error code: -8"));
+        assert!(!message.contains(secret));
     }
 
     #[tokio::test]
@@ -929,15 +947,15 @@ mod tests {
 
         let NigiriError::RpcFailed {
             method,
-            exit_code,
-            stderr,
+            code,
+            message,
         } = error
         else {
             panic!("expected RPC failure");
         };
         assert_eq!(method, "stderr_zero");
-        assert_eq!(exit_code, Some(0));
-        assert!(!stderr.contains(secret));
+        assert_eq!(code, 0);
+        assert!(!message.contains(secret));
     }
 
     #[tokio::test]
@@ -1048,12 +1066,12 @@ mod tests {
             .legacy_cli_rpc::<(), _, _>("long_stderr_secret", [secret.as_str()])
             .await
             .unwrap_err();
-        let NigiriError::RpcFailed { stderr, .. } = error else {
+        let NigiriError::RpcFailed { message, .. } = error else {
             panic!("expected RPC failure");
         };
-        assert!(!stderr.contains("caller-secret-prefix"));
-        assert!(stderr.contains("[redacted]"));
-        assert!(stderr.ends_with("…[truncated]"));
+        assert!(!message.contains("caller-secret-prefix"));
+        assert!(message.contains("[redacted]"));
+        assert!(message.ends_with("…[truncated]"));
     }
 
     #[tokio::test]
@@ -1082,14 +1100,11 @@ mod tests {
             .await
             .unwrap_err();
 
-        let NigiriError::RpcFailed {
-            exit_code, stderr, ..
-        } = error
-        else {
+        let NigiriError::RpcFailed { code, message, .. } = error else {
             panic!("expected RPC failure");
         };
-        assert_eq!(exit_code, Some(21));
-        assert_eq!(stderr.len(), 60_000);
+        assert_eq!(code, 21);
+        assert_eq!(message.len(), 60_000);
     }
 
     #[tokio::test]
@@ -1411,11 +1426,11 @@ mod tests {
             .legacy_cli_rpc::<(), _, _>("oversized_stderr", std::iter::empty::<&str>())
             .await
             .unwrap_err();
-        let NigiriError::RpcFailed { stderr, .. } = stderr_error else {
+        let NigiriError::RpcFailed { message, .. } = stderr_error else {
             panic!("expected bounded RPC failure");
         };
-        assert!(stderr.ends_with("…[truncated]"));
-        assert!(stderr.len() <= crate::DEFAULT_MAX_RESPONSE_BYTES + "…[truncated]".len());
+        assert!(message.ends_with("…[truncated]"));
+        assert!(message.len() <= crate::DEFAULT_MAX_RESPONSE_BYTES + "…[truncated]".len());
     }
 
     #[tokio::test]
@@ -1524,8 +1539,9 @@ mod tests {
 
         assert!(matches!(
             error,
-            NigiriError::ProcessSpawn { ref operation, .. }
+            NigiriError::InvalidResponse { ref operation, ref detail }
                 if operation.as_ref() == "getbestblockhash"
+                    && detail == "legacy CLI execution failed"
         ));
     }
 }
