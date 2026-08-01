@@ -222,20 +222,13 @@ impl<N: NigiriNetwork> NigiriClient<N> {
 
     /// Creates a new native regtest address through the network node wallet.
     pub async fn new_address(&self) -> Result<N::Address, NigiriError> {
-        const OPERATION: &str = "new address";
-        let stdout = self
-            .rpc_stdout("getnewaddress", std::iter::empty::<&str>())
-            .await?;
-        N::parse_address(OPERATION, &stdout)
+        let value: String = crate::node_rpc::call(self, "getnewaddress", ()).await?;
+        N::parse_address("new address", &value)
     }
 
     /// Returns the native active-chain tip hash.
     pub async fn best_block_hash(&self) -> Result<N::BlockHash, NigiriError> {
-        const OPERATION: &str = "best block hash";
-        let stdout = self
-            .rpc_stdout("getbestblockhash", std::iter::empty::<&str>())
-            .await?;
-        N::parse_block_hash(OPERATION, &stdout)
+        crate::node_rpc::call(self, "getbestblockhash", ()).await
     }
 
     /// Mines a nonzero number of blocks to an address.
@@ -244,26 +237,12 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         blocks: u64,
         address: &str,
     ) -> Result<Vec<N::BlockHash>, NigiriError> {
-        const OPERATION: &str = "generate to address";
         if blocks == 0 {
-            return Err(NigiriError::InvalidResponse {
-                operation: OPERATION.into(),
-                detail: "block count must be greater than zero".to_owned(),
+            return Err(NigiriError::InvalidRequest {
+                detail: "block count must be greater than zero".into(),
             });
         }
-        let blocks = blocks.to_string();
-        let stdout = self
-            .rpc_stdout("generatetoaddress", [blocks.as_str(), address])
-            .await?;
-        let hashes: Vec<String> =
-            serde_json::from_str(&stdout).map_err(|_| NigiriError::InvalidResponse {
-                operation: OPERATION.into(),
-                detail: "expected an array of block hashes".to_owned(),
-            })?;
-        hashes
-            .iter()
-            .map(|hash| N::parse_block_hash(OPERATION, hash))
-            .collect()
+        crate::node_rpc::call(self, "generatetoaddress", (blocks, address)).await
     }
 
     /// Invalidates a native block hash.
@@ -277,16 +256,7 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     }
 
     async fn rpc_unit(&self, method: &'static str, hash: &N::BlockHash) -> Result<(), NigiriError> {
-        let hash = hash.to_string();
-        let stdout = self.rpc_stdout(method, [hash.as_str()]).await?;
-        if stdout.is_empty() || stdout == "null" {
-            Ok(())
-        } else {
-            Err(NigiriError::InvalidResponse {
-                operation: method.into(),
-                detail: "expected an empty RPC result".to_owned(),
-            })
-        }
+        crate::node_rpc::call(self, method, (hash.to_string(),)).await
     }
 }
 
@@ -588,6 +558,8 @@ mod tests {
     };
 
     use serde::{Deserialize, de::DeserializeOwned};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use url::Url;
 
     use crate::{
@@ -717,6 +689,150 @@ mod tests {
             ..Default::default()
         })
         .unwrap()
+    }
+
+    async fn one_shot_server(body: String) -> (Url, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4);
+                if let Some(header_end) = header_end {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|value| value.parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (Url::parse(&format!("http://{address}/")).unwrap(), task)
+    }
+
+    fn rpc_client<N: crate::NigiriNetwork>(node_rpc_url: Url) -> NigiriClient<N> {
+        NigiriClient::with_config(NigiriConfig {
+            node_rpc_url,
+            timeout: Duration::from_secs(2),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn rpc_result(result: &str) -> String {
+        format!(r#"{{"result":{result},"error":null,"id":"nigiri-rs"}}"#)
+    }
+
+    const BITCOIN_ADDRESS: &str = "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn";
+    const LIQUID_ADDRESS: &str = "ert1qwhh2n5qypypm0eufahm2pvj8raj9zq5c27cysu";
+    const BLOCK_HASH: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+
+    #[tokio::test]
+    async fn curated_new_address_uses_json_rpc_for_both_networks() {
+        let (bitcoin_url, bitcoin_request) =
+            one_shot_server(rpc_result(&format!(r#""{BITCOIN_ADDRESS}""#))).await;
+        let bitcoin = rpc_client::<Bitcoin>(bitcoin_url);
+
+        assert_eq!(
+            bitcoin.new_address().await.unwrap().to_string(),
+            BITCOIN_ADDRESS
+        );
+        let bitcoin_request = bitcoin_request.await.unwrap();
+        assert!(bitcoin_request.contains(r#""method":"getnewaddress""#));
+        assert!(bitcoin_request.contains(r#""params":[]"#));
+
+        let (liquid_url, liquid_request) =
+            one_shot_server(rpc_result(&format!(r#""{LIQUID_ADDRESS}""#))).await;
+        let liquid = rpc_client::<Liquid>(liquid_url);
+
+        assert_eq!(
+            liquid.new_address().await.unwrap().to_string(),
+            LIQUID_ADDRESS
+        );
+        let liquid_request = liquid_request.await.unwrap();
+        assert!(liquid_request.contains(r#""method":"getnewaddress""#));
+        assert!(liquid_request.contains(r#""params":[]"#));
+    }
+
+    #[tokio::test]
+    async fn curated_best_block_hash_uses_json_rpc() {
+        let (url, request) = one_shot_server(rpc_result(&format!(r#""{BLOCK_HASH}""#))).await;
+        let client = rpc_client::<Liquid>(url);
+
+        assert_eq!(
+            client.best_block_hash().await.unwrap().to_string(),
+            BLOCK_HASH
+        );
+        let request = request.await.unwrap();
+        assert!(request.contains(r#""method":"getbestblockhash""#));
+        assert!(request.contains(r#""params":[]"#));
+    }
+
+    #[tokio::test]
+    async fn curated_generate_to_address_uses_numeric_json_params() {
+        let (url, request) = one_shot_server(rpc_result(&format!(r#"["{BLOCK_HASH}"]"#))).await;
+        let client = rpc_client::<Bitcoin>(url);
+
+        let hashes = client
+            .generate_to_address(2, BITCOIN_ADDRESS)
+            .await
+            .unwrap();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].to_string(), BLOCK_HASH);
+        let request = request.await.unwrap();
+        assert!(request.contains(r#""method":"generatetoaddress""#));
+        assert!(request.contains(&format!(r#""params":[2,"{BITCOIN_ADDRESS}"]"#)));
+        assert!(!request.contains(r#""params":["2""#));
+    }
+
+    #[tokio::test]
+    async fn curated_invalidate_block_uses_json_rpc() {
+        let (url, request) = one_shot_server(rpc_result("null")).await;
+        let client = rpc_client::<Bitcoin>(url);
+        let hash = BLOCK_HASH.parse().unwrap();
+
+        client.invalidate_block(&hash).await.unwrap();
+
+        let request = request.await.unwrap();
+        assert!(request.contains(r#""method":"invalidateblock""#));
+        assert!(request.contains(&format!(r#""params":["{BLOCK_HASH}"]"#)));
+    }
+
+    #[tokio::test]
+    async fn curated_reconsider_block_uses_json_rpc() {
+        let (url, request) = one_shot_server(rpc_result("null")).await;
+        let client = rpc_client::<Liquid>(url);
+        let hash = BLOCK_HASH.parse().unwrap();
+
+        client.reconsider_block(&hash).await.unwrap();
+
+        let request = request.await.unwrap();
+        assert!(request.contains(r#""method":"reconsiderblock""#));
+        assert!(request.contains(&format!(r#""params":["{BLOCK_HASH}"]"#)));
     }
 
     #[test]
@@ -1323,32 +1439,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_stdout_becomes_invalid_response_in_the_public_parser() {
+    async fn malformed_cli_stdout_becomes_invalid_response_in_the_legacy_parser() {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
 
-        let error = client.best_block_hash().await.unwrap_err();
+        let error = client
+            .legacy_cli_rpc::<bitcoin::BlockHash, _, _>(
+                "getbestblockhash",
+                std::iter::empty::<&str>(),
+            )
+            .await
+            .unwrap_err();
 
         assert!(matches!(
             error,
             NigiriError::InvalidResponse { ref operation, .. }
-                if operation.as_ref() == "best block hash"
+                if operation.as_ref() == "getbestblockhash"
         ));
-    }
-
-    #[tokio::test]
-    async fn generated_hashes_are_parsed_as_native_bitcoin_hashes() {
-        let client = fake_client::<Bitcoin>(Duration::from_secs(2));
-
-        let hashes = client
-            .generate_to_address(2, "bcrt1qfixture")
-            .await
-            .unwrap();
-
-        assert_eq!(hashes.len(), 2);
-        assert_eq!(
-            hashes[0].to_string(),
-            "5555555555555555555555555555555555555555555555555555555555555555"
-        );
     }
 
     #[tokio::test]
@@ -1376,15 +1482,15 @@ mod tests {
 
     #[tokio::test]
     async fn zero_block_generation_is_rejected_before_process_spawn() {
-        let mut config = NigiriConfig {
+        let config = NigiriConfig {
             chopsticks_url: Url::parse("http://127.0.0.1:1").unwrap(),
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
-            executable: PathBuf::from("/definitely/missing/nigiri"),
+            node_rpc_url: Url::parse("http://127.0.0.1:1").unwrap(),
+            executable: PathBuf::from("/definitely/missing/nigiri/binary"),
             timeout: Duration::from_secs(1),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             ..Default::default()
         };
-        config.executable.push("binary");
         let client = NigiriClient::<Liquid>::with_config(config).unwrap();
 
         let error = client
@@ -1394,8 +1500,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            NigiriError::InvalidResponse { ref operation, .. }
-                if operation.as_ref() == "generate to address"
+            NigiriError::InvalidRequest { ref detail }
+                if detail == "block count must be greater than zero"
         ));
     }
 
@@ -1411,7 +1517,10 @@ mod tests {
         })
         .unwrap();
 
-        let error = client.best_block_hash().await.unwrap_err();
+        let error = client
+            .rpc_stdout("getbestblockhash", std::iter::empty::<&str>())
+            .await
+            .unwrap_err();
 
         assert!(matches!(
             error,

@@ -20,7 +20,7 @@ pub enum Liquid {}
 /// A sealed Nigiri network and its native protocol response types.
 pub trait NigiriNetwork: private::Sealed {
     type Txid: Display;
-    type BlockHash: Display;
+    type BlockHash: Display + DeserializeOwned;
     type Address;
     type Utxo;
     type TxInfo;
