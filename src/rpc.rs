@@ -5,7 +5,7 @@ use std::{
     process::{ExitStatus, Stdio},
 };
 
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncReadExt, Error as IoError},
     process::{Child, ChildStderr, ChildStdout, Command},
@@ -19,6 +19,8 @@ const PIPE_READ_CHUNK_BYTES: usize = 8 * 1024;
 /// stdout while Nigiri's wrapper still exits zero.
 const RPC_ERROR_MARKER: &str = "error code:";
 
+// Phase 3 removes the dormant CLI transport after its remaining callers migrate.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RpcInvocation {
     pub(crate) executable: PathBuf,
@@ -45,6 +47,8 @@ impl RpcInvocation {
     }
 }
 
+// Phase 3 removes the dormant CLI transport after its remaining callers migrate.
+#[allow(dead_code)]
 pub(crate) fn build_rpc_invocation<N, I, S>(
     executable: PathBuf,
     method: &str,
@@ -70,34 +74,20 @@ where
 }
 
 impl<N: NigiriNetwork> NigiriClient<N> {
-    /// Invokes a node RPC through Nigiri and deserializes its response.
+    /// Invokes a node RPC over JSON-RPC and deserializes its response.
     ///
-    /// Arguments use the same separate CLI-style strings accepted by
-    /// `nigiri rpc`; this method never invokes a shell. The method name may be
-    /// computed at runtime and is validated before any process is spawned.
+    /// Parameters are serialized as a JSON-RPC parameter value. The method name
+    /// may be computed at runtime and is validated before any transport request.
     ///
     /// # Errors
     ///
     /// Returns [`NigiriError`] when the method name is invalid, Nigiri cannot be
-    /// executed, the process fails or times out, or the response does not match
-    /// `R`. Caller arguments and successful response content are omitted from
-    /// deserialization errors.
+    /// reached, the request times out, or the response does not match `R`.
+    /// Successful response content is omitted from deserialization errors.
     ///
-    /// Responses larger than [`NigiriConfig::max_response_bytes`] are
-    /// rejected rather than buffered. Raise that limit for methods with large
-    /// results, such as `listunspent` or `getblock <hash> 2`.
-    ///
-    /// A method that exits zero, writes nothing to stdout, and writes non-whitespace
-    /// content to stderr is reported as [`NigiriError::RpcFailed`], because that is
-    /// how the node CLIs surface some errors. Whitespace-only stderr does not fail a
-    /// void result. A host whose `nigiri` wrapper emits unrelated stderr noise will
-    /// still see spurious failures from void RPCs; keep the wrapper's stderr clean.
-    ///
-    /// Caller arguments are redacted from retained stderr after ANSI escapes are
-    /// removed, including when the CLI echoes only a leading fragment of a long
-    /// value. Redaction is still textual: a CLI that re-encodes an argument, or
-    /// echoes only its tail, can surface that form. Do not treat it as a hard
-    /// guarantee for secret material.
+    /// Responses larger than [`NigiriConfig::max_response_bytes`] are rejected
+    /// rather than buffered. Raise that limit for methods with large results,
+    /// such as `listunspent` or `getblock <hash> 2`.
     ///
     /// # State changes
     ///
@@ -105,21 +95,17 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     /// synchronization and restoration for mutating host tests.
     ///
     /// [`NigiriConfig::max_response_bytes`]: crate::NigiriConfig::max_response_bytes
-    pub async fn rpc<R, I, S>(&self, method: &str, args: I) -> Result<R, NigiriError>
+    pub async fn rpc<R, P>(&self, method: &str, params: P) -> Result<R, NigiriError>
     where
         R: DeserializeOwned,
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
+        P: Serialize,
     {
         validate_rpc_method(method)?;
-        let args: Vec<OsString> = args
-            .into_iter()
-            .map(|argument| OsString::from(argument.as_ref()))
-            .collect();
-        let stdout = self.rpc_stdout(method.to_owned(), args).await?;
-        parse_rpc_response(method, &stdout)
+        crate::node_rpc::call(self, method, params).await
     }
 
+    // Phase 3 removes the dormant CLI transport after its remaining callers migrate.
+    #[allow(dead_code)]
     pub(crate) async fn rpc_stdout<I, S>(
         &self,
         method: impl Into<Cow<'static, str>>,
@@ -135,6 +121,8 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         self.execute_invocation(method, invocation).await
     }
 
+    // Phase 3 removes the dormant CLI transport after its remaining callers migrate.
+    #[allow(dead_code)]
     pub(crate) async fn execute_invocation(
         &self,
         operation: impl Into<Cow<'static, str>>,
@@ -412,6 +400,7 @@ fn has_rpc_error_marker(stdout: &str) -> bool {
         .any(|line| line.trim_start().starts_with(RPC_ERROR_MARKER))
 }
 
+#[cfg(test)]
 fn parse_rpc_response<R>(operation: &str, stdout: &str) -> Result<R, NigiriError>
 where
     R: DeserializeOwned,
@@ -592,9 +581,13 @@ fn strip_ansi(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::PathBuf, time::Duration};
+    use std::{
+        ffi::{OsStr, OsString},
+        path::PathBuf,
+        time::Duration,
+    };
 
-    use serde::Deserialize;
+    use serde::{Deserialize, de::DeserializeOwned};
     use url::Url;
 
     use crate::{
@@ -610,6 +603,19 @@ mod tests {
     #[derive(Debug, Deserialize, PartialEq, Eq)]
     struct UnicodeFixture {
         message: String,
+    }
+
+    impl<N: crate::NigiriNetwork> NigiriClient<N> {
+        async fn legacy_cli_rpc<R, I, S>(&self, method: &str, args: I) -> Result<R, NigiriError>
+        where
+            R: DeserializeOwned,
+            I: IntoIterator<Item = S>,
+            S: AsRef<OsStr>,
+        {
+            super::validate_rpc_method(method)?;
+            let stdout = self.rpc_stdout(method.to_owned(), args).await?;
+            super::parse_rpc_response(method, &stdout)
+        }
     }
 
     #[test]
@@ -753,7 +759,10 @@ mod tests {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
         let secret = "caller-secret-descriptor";
 
-        let error = client.rpc::<(), _, _>("fail", [secret]).await.unwrap_err();
+        let error = client
+            .legacy_cli_rpc::<(), _, _>("fail", [secret])
+            .await
+            .unwrap_err();
 
         let NigiriError::RpcFailed {
             method,
@@ -774,7 +783,7 @@ mod tests {
         let secret = "caller-secret-descriptor";
 
         let error = client
-            .rpc::<(), _, _>("rpc_error", [secret])
+            .legacy_cli_rpc::<(), _, _>("rpc_error", [secret])
             .await
             .unwrap_err();
 
@@ -798,7 +807,7 @@ mod tests {
         let secret = "caller-secret-descriptor";
 
         let error = client
-            .rpc::<(), _, _>("stderr_zero", [secret])
+            .legacy_cli_rpc::<(), _, _>("stderr_zero", [secret])
             .await
             .unwrap_err();
 
@@ -816,17 +825,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_rpc_deserializes_bitcoin_and_liquid_results() {
+    async fn legacy_cli_rpc_deserializes_bitcoin_and_liquid_results() {
         let bitcoin = fake_client::<Bitcoin>(Duration::from_secs(2));
         let height: u64 = bitcoin
-            .rpc("json_number", std::iter::empty::<&str>())
+            .legacy_cli_rpc("json_number", std::iter::empty::<&str>())
             .await
             .unwrap();
         assert_eq!(height, 42);
 
         let liquid = fake_client::<Liquid>(Duration::from_secs(2));
         let txid: elements::Txid = liquid
-            .rpc("unquoted_id", std::iter::empty::<&str>())
+            .legacy_cli_rpc("unquoted_id", std::iter::empty::<&str>())
             .await
             .unwrap();
         assert_eq!(
@@ -835,14 +844,14 @@ mod tests {
         );
 
         let result: () = liquid
-            .rpc("void_result", std::iter::empty::<&str>())
+            .legacy_cli_rpc("void_result", std::iter::empty::<&str>())
             .await
             .unwrap();
         assert_eq!(result, ());
     }
 
     #[tokio::test]
-    async fn public_rpc_rejects_invalid_method_before_process_spawn() {
+    async fn legacy_cli_rpc_rejects_invalid_method_before_process_spawn() {
         let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
             chopsticks_url: Url::parse("http://127.0.0.1:1").unwrap(),
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
@@ -854,7 +863,7 @@ mod tests {
         .unwrap();
 
         let error = client
-            .rpc::<(), _, _>("invalid-method", std::iter::empty::<&str>())
+            .legacy_cli_rpc::<(), _, _>("invalid-method", std::iter::empty::<&str>())
             .await
             .unwrap_err();
         // The variant itself now says the input was rejected before any spawn,
@@ -869,11 +878,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_rpc_does_not_copy_invalid_response_into_error() {
+    async fn legacy_cli_rpc_does_not_copy_invalid_response_into_error() {
         let client = fake_client::<Liquid>(Duration::from_secs(2));
         let caller_secret = "caller-secret-descriptor";
         let error = client
-            .rpc::<Vec<u64>, _, _>("invalid_response", [caller_secret])
+            .legacy_cli_rpc::<Vec<u64>, _, _>("invalid_response", [caller_secret])
             .await
             .unwrap_err();
         let rendered = error.to_string();
@@ -895,7 +904,7 @@ mod tests {
             let marker_text = marker.to_string_lossy().into_owned();
 
             let error = client
-                .rpc::<(), _, _>(method, [marker_text.as_str()])
+                .legacy_cli_rpc::<(), _, _>(method, [marker_text.as_str()])
                 .await
                 .unwrap_err();
             if expected_stderr_failure {
@@ -920,7 +929,7 @@ mod tests {
         );
 
         let error = client
-            .rpc::<(), _, _>("long_stderr_secret", [secret.as_str()])
+            .legacy_cli_rpc::<(), _, _>("long_stderr_secret", [secret.as_str()])
             .await
             .unwrap_err();
         let NigiriError::RpcFailed { stderr, .. } = error else {
@@ -932,11 +941,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_rpc_preserves_unicode_while_stripping_ansi() {
+    async fn legacy_cli_rpc_preserves_unicode_while_stripping_ansi() {
         let client = fake_client::<Liquid>(Duration::from_secs(2));
 
         let response: UnicodeFixture = client
-            .rpc("unicode_json", std::iter::empty::<&str>())
+            .legacy_cli_rpc("unicode_json", std::iter::empty::<&str>())
             .await
             .unwrap();
 
@@ -953,7 +962,7 @@ mod tests {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
 
         let error = client
-            .rpc::<(), _, _>("bounded_both_streams", std::iter::empty::<&str>())
+            .legacy_cli_rpc::<(), _, _>("bounded_both_streams", std::iter::empty::<&str>())
             .await
             .unwrap_err();
 
@@ -973,7 +982,7 @@ mod tests {
 
         let default_limit = fake_client::<Bitcoin>(Duration::from_secs(2));
         let rejected = default_limit
-            .rpc::<String, _, _>("oversized_stdout", std::iter::empty::<&str>())
+            .legacy_cli_rpc::<String, _, _>("oversized_stdout", std::iter::empty::<&str>())
             .await
             .unwrap_err();
         let NigiriError::InvalidResponse { detail, .. } = &rejected else {
@@ -986,7 +995,7 @@ mod tests {
 
         let raised_limit = fake_client_with_limit::<Bitcoin>(Duration::from_secs(2), 128 * 1024);
         let response: String = raised_limit
-            .rpc("oversized_stdout", std::iter::empty::<&str>())
+            .legacy_cli_rpc("oversized_stdout", std::iter::empty::<&str>())
             .await
             .unwrap();
         assert_eq!(response.len(), OVERSIZED_BYTES);
@@ -997,7 +1006,7 @@ mod tests {
         let client = fake_client_with_limit::<Bitcoin>(Duration::from_secs(2), 8);
 
         let error = client
-            .rpc::<String, _, _>("unquoted_id", std::iter::empty::<&str>())
+            .legacy_cli_rpc::<String, _, _>("unquoted_id", std::iter::empty::<&str>())
             .await
             .unwrap_err();
 
@@ -1064,7 +1073,7 @@ mod tests {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
 
         let response: UnicodeFixture = client
-            .rpc("inline_error_phrase", std::iter::empty::<&str>())
+            .legacy_cli_rpc("inline_error_phrase", std::iter::empty::<&str>())
             .await
             .unwrap_or_else(|error| panic!("mid-line error phrase misread as a failure: {error}"));
 
@@ -1190,7 +1199,7 @@ mod tests {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
 
         let height: u64 = client
-            .rpc("stdout_with_stderr_warning", std::iter::empty::<&str>())
+            .legacy_cli_rpc("stdout_with_stderr_warning", std::iter::empty::<&str>())
             .await
             .unwrap_or_else(|error| panic!("stderr warning misread as a failure: {error}"));
 
@@ -1206,7 +1215,7 @@ mod tests {
         let injected = format!("$(touch {})", marker.display());
 
         let error = client
-            .rpc::<(), _, _>("fail", [injected.as_str()])
+            .legacy_cli_rpc::<(), _, _>("fail", [injected.as_str()])
             .await
             .unwrap_err();
 
@@ -1223,7 +1232,7 @@ mod tests {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
 
         let error = client
-            .rpc::<String, _, _>("invalid_utf8_stdout", std::iter::empty::<&str>())
+            .legacy_cli_rpc::<String, _, _>("invalid_utf8_stdout", std::iter::empty::<&str>())
             .await
             .unwrap_err();
 
@@ -1243,7 +1252,7 @@ mod tests {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
 
         let result: () = client
-            .rpc("blank_stderr_void", std::iter::empty::<&str>())
+            .legacy_cli_rpc("blank_stderr_void", std::iter::empty::<&str>())
             .await
             .unwrap_or_else(|error| panic!("blank stderr misread as a failure: {error}"));
 
@@ -1256,14 +1265,14 @@ mod tests {
         let method = String::from("json_") + "number";
 
         let height: u64 = client
-            .rpc(&method, std::iter::empty::<&str>())
+            .legacy_cli_rpc(&method, std::iter::empty::<&str>())
             .await
             .unwrap();
         assert_eq!(height, 42);
 
         let failing = format!("{}{}", "fa", "il");
         let NigiriError::RpcFailed { method, .. } = client
-            .rpc::<(), _, _>(&failing, ["secret"])
+            .legacy_cli_rpc::<(), _, _>(&failing, ["secret"])
             .await
             .unwrap_err()
         else {
@@ -1273,17 +1282,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_rpc_preserves_bounded_process_output_contracts() {
+    async fn legacy_cli_rpc_preserves_bounded_process_output_contracts() {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
 
         let stdout_error = client
-            .rpc::<String, _, _>("oversized_stdout", std::iter::empty::<&str>())
+            .legacy_cli_rpc::<String, _, _>("oversized_stdout", std::iter::empty::<&str>())
             .await
             .unwrap_err();
         assert!(matches!(stdout_error, NigiriError::InvalidResponse { .. }));
 
         let stderr_error = client
-            .rpc::<(), _, _>("oversized_stderr", std::iter::empty::<&str>())
+            .legacy_cli_rpc::<(), _, _>("oversized_stderr", std::iter::empty::<&str>())
             .await
             .unwrap_err();
         let NigiriError::RpcFailed { stderr, .. } = stderr_error else {
@@ -1294,11 +1303,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_rpc_deserializes_string_and_json_value_results() {
+    async fn legacy_cli_rpc_deserializes_string_and_json_value_results() {
         let client = fake_client::<Bitcoin>(Duration::from_secs(2));
 
         let id: String = client
-            .rpc("unquoted_id", std::iter::empty::<&str>())
+            .legacy_cli_rpc("unquoted_id", std::iter::empty::<&str>())
             .await
             .unwrap();
         assert_eq!(
@@ -1307,7 +1316,7 @@ mod tests {
         );
 
         let response: serde_json::Value = client
-            .rpc("json_number", std::iter::empty::<&str>())
+            .legacy_cli_rpc("json_number", std::iter::empty::<&str>())
             .await
             .unwrap();
         assert_eq!(response, serde_json::json!(42));

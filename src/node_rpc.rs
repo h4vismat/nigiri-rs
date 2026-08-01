@@ -1,6 +1,3 @@
-// Phase 2 wires this transport into the public RPC methods and removes this allow.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{NigiriClient, NigiriError, NigiriNetwork};

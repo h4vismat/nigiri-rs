@@ -23,8 +23,8 @@
 //!
 //! # Advanced node RPC
 //!
-//! [`NigiriClient::rpc`] invokes an arbitrary node RPC with separately passed
-//! CLI-style arguments and deserializes the result into a caller-selected type.
+//! [`NigiriClient::rpc`] invokes an arbitrary node RPC with JSON-serialized
+//! parameters and deserializes the result into a caller-selected type.
 //!
 //! ```no_run
 //! use nigiri_rs::{Bitcoin, NigiriClient};
@@ -32,7 +32,7 @@
 //! # async fn example() -> Result<(), nigiri_rs::NigiriError> {
 //! let client = NigiriClient::<Bitcoin>::new();
 //! let height: u64 = client
-//!     .rpc("getblockcount", std::iter::empty::<&str>())
+//!     .rpc("getblockcount", ())
 //!     .await?;
 //! assert!(height > 0);
 //! # Ok(())

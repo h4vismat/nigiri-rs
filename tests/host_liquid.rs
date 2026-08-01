@@ -101,15 +101,9 @@ async fn liquid_public_rpc_deserializes_native_elements_types() -> Result<(), Bo
     let client = NigiriClient::<Liquid>::new();
     client.wait_ready().await?;
 
-    let height: u64 = client
-        .rpc("getblockcount", std::iter::empty::<&str>())
-        .await?;
-    let _: elements::BlockHash = client
-        .rpc("getbestblockhash", std::iter::empty::<&str>())
-        .await?;
-    let info: LiquidBlockchainInfo = client
-        .rpc("getblockchaininfo", std::iter::empty::<&str>())
-        .await?;
+    let height: u64 = client.rpc("getblockcount", ()).await?;
+    let _: elements::BlockHash = client.rpc("getbestblockhash", ()).await?;
+    let info: LiquidBlockchainInfo = client.rpc("getblockchaininfo", ()).await?;
 
     assert_eq!(info.chain, "liquidregtest");
     assert!(height > 0);

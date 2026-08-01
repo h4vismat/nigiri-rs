@@ -78,20 +78,15 @@ async fn bitcoin_public_rpc_deserializes_native_and_core_v30_types() -> Result<(
     let client = NigiriClient::<Bitcoin>::new();
     client.wait_ready().await?;
 
-    let height: u64 = client
-        .rpc("getblockcount", std::iter::empty::<&str>())
-        .await?;
+    let height: u64 = client.rpc("getblockcount", ()).await?;
     assert!(height > 0);
 
-    let _: bitcoin::BlockHash = client
-        .rpc("getbestblockhash", std::iter::empty::<&str>())
-        .await?;
+    let _: bitcoin::BlockHash = client.rpc("getbestblockhash", ()).await?;
 
     #[cfg(feature = "bitcoin-rpc-types")]
     {
-        let info: nigiri_rs::bitcoin_rpc_types::v30::GetBlockchainInfo = client
-            .rpc("getblockchaininfo", std::iter::empty::<&str>())
-            .await?;
+        let info: nigiri_rs::bitcoin_rpc_types::v30::GetBlockchainInfo =
+            client.rpc("getblockchaininfo", ()).await?;
         assert_eq!(info.chain, "regtest");
         assert!(!info.best_block_hash.is_empty());
     }
