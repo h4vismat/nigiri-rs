@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use bitcoin::address::NetworkChecked;
 use nigiri_rs::{
@@ -51,7 +51,6 @@ fn custom_configuration_is_normalized_once() {
     let config = NigiriConfig {
         chopsticks_url: Url::parse("http://127.0.0.1:4100/api").unwrap(),
         esplora_url: Url::parse("http://127.0.0.1:4200/api").unwrap(),
-        executable: PathBuf::from("/opt/nigiri"),
         timeout: Duration::from_secs(7),
         max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         ..Default::default()
@@ -67,7 +66,6 @@ fn invalid_configuration_is_rejected() {
     let config = NigiriConfig {
         chopsticks_url: Url::parse("ftp://127.0.0.1/faucet").unwrap(),
         esplora_url: Url::parse("http://127.0.0.1:4200").unwrap(),
-        executable: PathBuf::from("nigiri"),
         timeout: Duration::from_secs(7),
         max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         ..Default::default()
@@ -76,7 +74,7 @@ fn invalid_configuration_is_rejected() {
     let error = NigiriClient::<Liquid>::with_config(config).unwrap_err();
     assert!(
         matches!(error, NigiriError::InvalidRequest { .. }),
-        "expected a pre-spawn rejection, got {error}"
+        "expected a pre-transport rejection, got {error}"
     );
 }
 

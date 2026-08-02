@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use bitcoin::Amount;
 use nigiri_rs::{
@@ -55,7 +55,6 @@ fn config(base: Url) -> NigiriConfig {
     NigiriConfig {
         chopsticks_url: base.clone(),
         esplora_url: base,
-        executable: PathBuf::from("nigiri"),
         timeout: Duration::from_secs(2),
         max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         ..Default::default()

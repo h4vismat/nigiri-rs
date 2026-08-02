@@ -1,59 +1,8 @@
-use std::{ffi::OsString, path::PathBuf, str::FromStr};
+use std::str::FromStr;
 
 use bitcoin::{Amount, Denomination};
 
-use crate::{IssuanceTxIn, Liquid, MintResponse, NigiriClient, NigiriError, rpc::RpcInvocation};
-
-// Phase 3 removes this dormant CLI builder with the rest of the CLI transport.
-#[allow(dead_code)]
-fn build_faucet_asset_invocation(
-    executable: PathBuf,
-    address: &str,
-    amount: Amount,
-    asset: &elements::AssetId,
-) -> RpcInvocation {
-    RpcInvocation {
-        executable,
-        args: vec![
-            OsString::from("faucet"),
-            OsString::from("--liquid"),
-            OsString::from(address),
-            OsString::from(exact_btc_amount(amount)),
-            OsString::from(asset.to_string()),
-        ],
-        // `nigiri faucet --liquid <address> <amount> <asset>`: the address is
-        // the first caller value, not part of a method prefix.
-        caller_args_from: 2,
-    }
-}
-
-// Phase 3 removes this dormant CLI builder with the rest of the CLI transport.
-#[allow(dead_code)]
-fn build_mint_invocation(
-    executable: PathBuf,
-    address: &str,
-    quantity: u64,
-    name: &str,
-    ticker: &str,
-) -> RpcInvocation {
-    RpcInvocation {
-        executable,
-        args: vec![
-            OsString::from("mint"),
-            OsString::from(address),
-            OsString::from(quantity.to_string()),
-            OsString::from(name),
-            OsString::from(ticker),
-        ],
-        // `nigiri mint <address> <quantity> <name> <ticker>`: every argument
-        // after the subcommand came from the caller.
-        caller_args_from: 1,
-    }
-}
-
-fn exact_btc_amount(amount: Amount) -> String {
-    amount.to_string_in(Denomination::Bitcoin)
-}
+use crate::{IssuanceTxIn, Liquid, MintResponse, NigiriClient, NigiriError};
 
 impl NigiriClient<Liquid> {
     /// Mints a Liquid asset and sends it to `address` over the Elements node RPC.
@@ -160,65 +109,9 @@ fn asset_contract(name: &str, ticker: &str) -> String {
     .to_string()
 }
 
-// Phase 3 removes this dormant CLI parser with the rest of the CLI transport.
-#[allow(dead_code)]
-fn parse_mint_response(stdout: &str) -> Result<MintResponse, NigiriError> {
-    let asset = parse_label(stdout, "asset:", "mint asset identifier")?;
-    let txid = parse_label(stdout, "txId:", "mint transaction identifier")?;
-    let issuance_txid = optional_label(stdout, "  txid:")?;
-    let issuance_vin = optional_label(stdout, "  vin:")?;
-    let issuance_txin = match (issuance_txid, issuance_vin) {
-        (Some(txid), Some(vin)) => IssuanceTxIn { txid, vin },
-        (None, None) => return Err(invalid("mint", "complete issuance input")),
-        _ => return Err(invalid("mint", "complete issuance input")),
-    };
-    Ok(MintResponse {
-        asset,
-        txid,
-        issuance_txin,
-    })
-}
-
-fn parse_label<T>(
-    stdout: &str,
-    label: &'static str,
-    expected: &'static str,
-) -> Result<T, NigiriError>
-where
-    T: FromStr,
-{
-    let value = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix(label))
-        .map(str::trim)
-        .ok_or_else(|| invalid(label.trim_end_matches(':'), expected))?;
-    value
-        .parse()
-        .map_err(|_| invalid(label.trim_end_matches(':'), expected))
-}
-
-fn optional_label<T>(stdout: &str, label: &'static str) -> Result<Option<T>, NigiriError>
-where
-    T: FromStr,
-{
-    stdout
-        .lines()
-        .find_map(|line| line.strip_prefix(label))
-        .map(str::trim)
-        .map(|value| value.parse().map_err(|_| invalid("mint", "issuance input")))
-        .transpose()
-}
-
-fn invalid(operation: &'static str, expected: &'static str) -> NigiriError {
-    NigiriError::InvalidResponse {
-        operation: operation.into(),
-        detail: format!("expected {expected}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::PathBuf, time::Duration};
+    use std::time::Duration;
 
     use bitcoin::Amount;
     use serde_json::{Value, json};
@@ -228,9 +121,7 @@ mod tests {
     };
     use url::Url;
 
-    use super::{
-        asset_contract, build_faucet_asset_invocation, build_mint_invocation, parse_mint_response,
-    };
+    use super::asset_contract;
     use crate::{IssuanceTxIn, Liquid, NigiriClient, NigiriConfig, NigiriError};
 
     const ASSET: &str = "5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225";
@@ -487,92 +378,5 @@ mod tests {
         let requests = requests.await.unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["method"], "issueasset");
-    }
-
-    #[test]
-    fn cli_subcommand_invocations_mark_every_caller_value_as_redactable() {
-        let asset: elements::AssetId =
-            "5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225"
-                .parse()
-                .unwrap();
-
-        let mint = build_mint_invocation(
-            PathBuf::from("nigiri"),
-            "ert1qdestination",
-            7,
-            "AssetName",
-            "TIK",
-        );
-        assert_eq!(
-            mint.args[mint.caller_args_from..],
-            [
-                OsString::from("ert1qdestination"),
-                OsString::from("7"),
-                OsString::from("AssetName"),
-                OsString::from("TIK"),
-            ]
-        );
-
-        let faucet = build_faucet_asset_invocation(
-            PathBuf::from("nigiri"),
-            "ert1qdestination",
-            Amount::from_sat(1),
-            &asset,
-        );
-        assert_eq!(
-            faucet.args[faucet.caller_args_from..],
-            [
-                OsString::from("ert1qdestination"),
-                OsString::from("0.00000001"),
-                OsString::from(asset.to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn asset_faucet_uses_liquid_flag_and_exact_decimal_amount() {
-        let asset: elements::AssetId =
-            "5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225"
-                .parse()
-                .unwrap();
-
-        let invocation = build_faucet_asset_invocation(
-            PathBuf::from("nigiri"),
-            "ert1qdestination",
-            Amount::from_sat(1),
-            &asset,
-        );
-
-        assert_eq!(
-            invocation.args,
-            [
-                OsString::from("faucet"),
-                OsString::from("--liquid"),
-                OsString::from("ert1qdestination"),
-                OsString::from("0.00000001"),
-                OsString::from(asset.to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn mint_parser_returns_native_asset_and_transaction_identifiers() {
-        let output = r#"asset: 5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225
-txId: 7777777777777777777777777777777777777777777777777777777777777777
-  txid: 8888888888888888888888888888888888888888888888888888888888888888
-  vin: 2
-"#;
-
-        let parsed = parse_mint_response(output).unwrap();
-
-        assert_eq!(
-            parsed.asset.to_string(),
-            "5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225"
-        );
-        assert_eq!(
-            parsed.txid.to_string(),
-            "7777777777777777777777777777777777777777777777777777777777777777"
-        );
-        assert_eq!(parsed.issuance_txin.vin, 2);
     }
 }
