@@ -36,7 +36,7 @@ and separately gated host suites.
 
 ### Apply one configurable response limit to every transport
 
-**Completed:** v0.4.0
+**Completed:** v0.3.0
 
 Renamed the public setting to `max_response_bytes` and now apply it to node JSON-RPC,
 Chopsticks, and Esplora response bodies. The fixed Esplora-only `MAX_BODY_BYTES` limit is gone.

@@ -2,7 +2,7 @@
 
 `nigiri-rs` is a typed asynchronous client for Bitcoin and Liquid services in an already-running [Nigiri](https://github.com/vulpemventures/nigiri) regtest environment.
 
-Version 0.4.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
+Version 0.3.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
 
 Version 0.2.0 was the breaking release that introduced network marker types selecting native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
 
@@ -137,7 +137,7 @@ Arbitrary RPC methods may mutate node wallets or active chain state. Tests using
 Enable the optional re-export when the caller wants maintained Bitcoin Core response records:
 
 ```toml
-nigiri-rs = { version = "0.4", features = ["bitcoin-rpc-types"] }
+nigiri-rs = { version = "0.3.0", features = ["bitcoin-rpc-types"] }
 ```
 
 ```rust,no_run
