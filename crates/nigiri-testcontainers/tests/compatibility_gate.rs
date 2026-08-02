@@ -80,11 +80,120 @@ struct NaturalDropCleanup<Electrs, Bitcoind> {
     bitcoind: Bitcoind,
 }
 
-impl<Electrs, Bitcoind> NaturalDropCleanup<Electrs, Bitcoind> {
-    fn release(self) {
+impl<Electrs, Bitcoind> NaturalDropCleanup<Electrs, Bitcoind>
+where
+    Electrs: Send + 'static,
+    Bitcoind: Send + 'static,
+{
+    async fn release(self) -> TestResult<()> {
+        self.release_with_timeout(DOCKER_COMMAND_TIMEOUT).await
+    }
+
+    async fn release_with_timeout(self, completion_timeout: Duration) -> TestResult<()> {
         let Self { electrs, bitcoind } = self;
-        drop(electrs);
-        drop(bitcoind);
+        let electrs_result = drop_with_timeout(electrs, "Electrs", completion_timeout).await;
+        let bitcoind_result = drop_with_timeout(bitcoind, "Bitcoind", completion_timeout).await;
+
+        let errors = [("Electrs", electrs_result), ("Bitcoind", bitcoind_result)]
+            .into_iter()
+            .filter_map(|(resource, result)| {
+                result.err().map(|error| format!("{resource}: {error}"))
+            })
+            .collect::<Vec<_>>();
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(
+                io::Error::other(format!("natural cleanup failed for {}", errors.join("; "),))
+                    .into(),
+            )
+        }
+    }
+}
+
+async fn drop_with_timeout<T: Send + 'static>(
+    value: T,
+    resource: &str,
+    bound: Duration,
+) -> TestResult<()> {
+    let resource = resource.to_owned();
+    let payload = Arc::new(StdMutex::new(Some(value)));
+    let (completion_sender, completion_receiver) =
+        tokio::sync::oneshot::channel::<TestResult<()>>();
+    let thread_payload = Arc::clone(&payload);
+    let thread_resource = resource.clone();
+
+    let join_handle = match std::thread::Builder::new()
+        .name(format!("nigiri-drop-{resource}"))
+        .spawn(move || {
+            // Each detached handle needs an isolated async drop worker so a stalled
+            // cleanup cannot serialize the next handle's natural drop.
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let value = thread_payload
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take();
+                    if let Some(value) = value {
+                        std::mem::forget(value);
+                    }
+                    let _ = completion_sender.send(Err(io::Error::other(format!(
+                        "detached drop runtime for {thread_resource} could not start: {error}",
+                    ))
+                    .into()));
+                    return;
+                }
+            };
+
+            let runtime_guard = runtime.enter();
+            let drop_result: TestResult<()> = match thread_payload
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                Some(value) => {
+                    drop(value);
+                    Ok(())
+                }
+                None => Err(io::Error::other(format!(
+                    "detached drop payload for {thread_resource} was already released",
+                ))
+                .into()),
+            };
+            drop(runtime_guard);
+            let _ = completion_sender.send(drop_result);
+        }) {
+        Ok(join_handle) => join_handle,
+        Err(error) => {
+            std::mem::forget(payload);
+            return Err(io::Error::other(format!(
+                "detached drop thread for {resource} could not start: {error}",
+            ))
+            .into());
+        }
+    };
+    drop(join_handle);
+
+    match timeout(bound, completion_receiver).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => {
+            Err(io::Error::other(format!("detached drop for {resource} failed: {error}",)).into())
+        }
+        Ok(Err(error)) => Err(io::Error::other(format!(
+            "detached drop for {resource} closed its completion channel: {error}",
+        ))
+        .into()),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("detached drop for {resource} timed out after {bound:?}"),
+        )
+        .into()),
     }
 }
 
@@ -783,7 +892,7 @@ impl SmokeInstance {
         Ok(())
     }
 
-    async fn cleanup(self) -> CleanupTargets {
+    async fn cleanup(self) -> TestResult<CleanupTargets> {
         let SmokeInstance {
             cleanup_handles,
             topology,
@@ -799,7 +908,7 @@ impl SmokeInstance {
             bitcoind_volume,
         };
 
-        cleanup_handles.release();
+        cleanup_handles.release().await?;
 
         eprintln!(
             "compatibility gate released handles for natural cleanup: network={} bitcoin={} ({}) volume={} electrs={} ({})",
@@ -810,7 +919,7 @@ impl SmokeInstance {
             cleanup.topology.electrs,
             cleanup.electrs_id,
         );
-        cleanup
+        Ok(cleanup)
     }
 }
 
@@ -1147,8 +1256,8 @@ impl Drop for DropRecorder {
     }
 }
 
-#[test]
-fn natural_drop_cleanup_releases_electrs_before_bitcoind() {
+#[tokio::test]
+async fn natural_drop_cleanup_releases_electrs_before_bitcoind() {
     let events = Arc::new(StdMutex::new(Vec::new()));
     NaturalDropCleanup {
         electrs: DropRecorder {
@@ -1160,9 +1269,77 @@ fn natural_drop_cleanup_releases_electrs_before_bitcoind() {
             events: Arc::clone(&events),
         },
     }
-    .release();
+    .release()
+    .await
+    .unwrap();
 
     assert_eq!(&*events.lock().unwrap(), &["electrs", "bitcoind"]);
+}
+
+struct TimedDropRecorder {
+    attempted: &'static str,
+    finished: &'static str,
+    events: Arc<StdMutex<Vec<&'static str>>>,
+    delay: Duration,
+}
+
+impl Drop for TimedDropRecorder {
+    fn drop(&mut self) {
+        self.events.lock().unwrap().push(self.attempted);
+        std::thread::sleep(self.delay);
+        self.events.lock().unwrap().push(self.finished);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn natural_drop_cleanup_keeps_parent_responsive_after_electrs_timeout() {
+    const COMPLETION_BOUND: Duration = Duration::from_millis(5);
+    const PARENT_BOUND: Duration = Duration::from_millis(25);
+    const ELECTRS_DROP_DELAY: Duration = Duration::from_millis(40);
+
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let cleanup = NaturalDropCleanup {
+        electrs: TimedDropRecorder {
+            attempted: "electrs-attempted",
+            finished: "electrs-finished",
+            events: Arc::clone(&events),
+            delay: ELECTRS_DROP_DELAY,
+        },
+        bitcoind: TimedDropRecorder {
+            attempted: "bitcoind-attempted",
+            finished: "bitcoind-finished",
+            events: Arc::clone(&events),
+            delay: Duration::ZERO,
+        },
+    };
+
+    let mut release = tokio::spawn(cleanup.release_with_timeout(COMPLETION_BOUND));
+    let release_result = timeout(PARENT_BOUND, &mut release)
+        .await
+        .expect("a blocked Electrs drop must not block its parent past the cleanup bound")
+        .unwrap();
+    let error = release_result.expect_err("Electrs completion must time out");
+    assert!(error.to_string().contains("Electrs"));
+
+    assert_eq!(
+        &*events.lock().unwrap(),
+        &[
+            "electrs-attempted",
+            "bitcoind-attempted",
+            "bitcoind-finished"
+        ],
+    );
+
+    sleep(Duration::from_millis(60)).await;
+    assert_eq!(
+        &*events.lock().unwrap(),
+        &[
+            "electrs-attempted",
+            "bitcoind-attempted",
+            "bitcoind-finished",
+            "electrs-finished",
+        ],
+    );
 }
 
 #[tokio::test]
@@ -1417,7 +1594,7 @@ async fn pinned_images_work_without_nigiri_volumes_or_compose() {
     assert_ne!(instance.http_port, ELECTRS_HTTP_PORT);
     assert_ne!(instance.electrum_port, ELECTRUM_TCP_PORT);
     instance.assert_runtime_topology().await.unwrap();
-    let cleanup = instance.cleanup().await;
+    let cleanup = instance.cleanup().await.unwrap();
     assert_resources_are_removed(&cleanup).await.unwrap();
 }
 
@@ -1442,6 +1619,8 @@ async fn two_pinned_topologies_coexist() {
     left.assert_runtime_topology().await.unwrap();
     right.assert_runtime_topology().await.unwrap();
     let (left_cleanup, right_cleanup) = tokio::join!(left.cleanup(), right.cleanup());
+    let left_cleanup = left_cleanup.unwrap();
+    let right_cleanup = right_cleanup.unwrap();
     let (left_removed, right_removed) = tokio::join!(
         assert_resources_are_removed(&left_cleanup),
         assert_resources_are_removed(&right_cleanup),
