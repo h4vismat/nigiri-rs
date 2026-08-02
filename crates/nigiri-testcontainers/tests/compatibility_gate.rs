@@ -91,8 +91,25 @@ where
 
     async fn release_with_timeout(self, completion_timeout: Duration) -> TestResult<()> {
         let Self { electrs, bitcoind } = self;
-        let electrs_result = drop_with_timeout(electrs, "Electrs", completion_timeout).await;
-        let bitcoind_result = drop_with_timeout(bitcoind, "Bitcoind", completion_timeout).await;
+        let (electrs_initiation, bitcoind_initiation) = std::sync::mpsc::channel();
+        let electrs = dispatch_drop(
+            electrs,
+            "Electrs",
+            DropInitiation::Signal(electrs_initiation),
+            completion_timeout,
+        );
+        let bitcoind = dispatch_drop(
+            bitcoind,
+            "Bitcoind",
+            DropInitiation::Wait {
+                receiver: bitcoind_initiation,
+                bound: completion_timeout,
+            },
+            completion_timeout,
+        );
+
+        let electrs_result = await_dispatched_drop(electrs, completion_timeout).await;
+        let bitcoind_result = await_dispatched_drop(bitcoind, completion_timeout).await;
 
         let errors = [("Electrs", electrs_result), ("Bitcoind", bitcoind_result)]
             .into_iter()
@@ -112,16 +129,52 @@ where
     }
 }
 
-async fn drop_with_timeout<T: Send + 'static>(
+enum DropInitiation {
+    Signal(std::sync::mpsc::Sender<()>),
+    Wait {
+        receiver: std::sync::mpsc::Receiver<()>,
+        bound: Duration,
+    },
+}
+
+impl DropInitiation {
+    fn wait_before_drop(&self) {
+        match self {
+            Self::Signal(_) => {}
+            Self::Wait { receiver, bound } => {
+                let _ = receiver.recv_timeout(*bound);
+            }
+        }
+    }
+
+    fn signal_after_drop(self) {
+        match self {
+            Self::Signal(sender) => {
+                let _ = sender.send(());
+            }
+            Self::Wait { .. } => {}
+        }
+    }
+}
+
+struct DispatchedDrop {
+    resource: String,
+    completion_receiver: tokio::sync::oneshot::Receiver<TestResult<()>>,
+}
+
+fn dispatch_drop<T: Send + 'static>(
     value: T,
     resource: &str,
-    bound: Duration,
-) -> TestResult<()> {
+    initiation: DropInitiation,
+    worker_shutdown_bound: Duration,
+) -> DispatchedDrop {
     let resource = resource.to_owned();
     let payload = Arc::new(StdMutex::new(Some(value)));
     let (completion_sender, completion_receiver) =
         tokio::sync::oneshot::channel::<TestResult<()>>();
+    let completion_sender = Arc::new(StdMutex::new(Some(completion_sender)));
     let thread_payload = Arc::clone(&payload);
+    let thread_completion_sender = Arc::clone(&completion_sender);
     let thread_resource = resource.clone();
 
     let join_handle = match std::thread::Builder::new()
@@ -143,10 +196,16 @@ async fn drop_with_timeout<T: Send + 'static>(
                     if let Some(value) = value {
                         std::mem::forget(value);
                     }
-                    let _ = completion_sender.send(Err(io::Error::other(format!(
-                        "detached drop runtime for {thread_resource} could not start: {error}",
-                    ))
-                    .into()));
+                    if let Some(sender) = thread_completion_sender
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                    {
+                        let _ = sender.send(Err(io::Error::other(format!(
+                            "detached drop runtime for {thread_resource} could not start: {error}",
+                        ))
+                        .into()));
+                    }
                     return;
                 }
             };
@@ -158,7 +217,9 @@ async fn drop_with_timeout<T: Send + 'static>(
                 .take()
             {
                 Some(value) => {
+                    initiation.wait_before_drop();
                     drop(value);
+                    initiation.signal_after_drop();
                     Ok(())
                 }
                 None => Err(io::Error::other(format!(
@@ -167,19 +228,49 @@ async fn drop_with_timeout<T: Send + 'static>(
                 .into()),
             };
             drop(runtime_guard);
-            let _ = completion_sender.send(drop_result);
+            runtime.shutdown_timeout(worker_shutdown_bound);
+            if let Some(sender) = thread_completion_sender
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = sender.send(drop_result);
+            }
         }) {
         Ok(join_handle) => join_handle,
         Err(error) => {
             std::mem::forget(payload);
-            return Err(io::Error::other(format!(
-                "detached drop thread for {resource} could not start: {error}",
-            ))
-            .into());
+            if let Some(sender) = completion_sender
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = sender.send(Err(io::Error::other(format!(
+                    "detached drop thread for {resource} could not start: {error}",
+                ))
+                .into()));
+            }
+            return DispatchedDrop {
+                resource,
+                completion_receiver,
+            };
         }
     };
     drop(join_handle);
 
+    DispatchedDrop {
+        resource,
+        completion_receiver,
+    }
+}
+
+async fn await_dispatched_drop(
+    DispatchedDrop {
+        resource,
+        completion_receiver,
+    }: DispatchedDrop,
+    bound: Duration,
+) -> TestResult<()> {
     match timeout(bound, completion_receiver).await {
         Ok(Ok(Ok(()))) => Ok(()),
         Ok(Ok(Err(error))) => {
@@ -1276,68 +1367,338 @@ async fn natural_drop_cleanup_releases_electrs_before_bitcoind() {
     assert_eq!(&*events.lock().unwrap(), &["electrs", "bitcoind"]);
 }
 
-struct TimedDropRecorder {
+#[derive(Default)]
+struct DropBlocker {
+    released: StdMutex<bool>,
+    release_condition: std::sync::Condvar,
+}
+
+impl DropBlocker {
+    fn release(&self) {
+        let mut released = self
+            .released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *released = true;
+        self.release_condition.notify_all();
+    }
+
+    fn wait(&self) {
+        let released = self
+            .released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        drop(
+            self.release_condition
+                .wait_while(released, |released| !*released)
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+    }
+}
+
+struct DropReleaseGuard {
+    blockers: [Arc<DropBlocker>; 2],
+}
+
+impl Drop for DropReleaseGuard {
+    fn drop(&mut self) {
+        for blocker in &self.blockers {
+            blocker.release();
+        }
+    }
+}
+
+struct BlockingDropRecorder {
     attempted: &'static str,
     finished: &'static str,
     events: Arc<StdMutex<Vec<&'static str>>>,
-    delay: Duration,
+    attempted_sender: Option<tokio::sync::oneshot::Sender<()>>,
+    finished_sender: Option<tokio::sync::oneshot::Sender<()>>,
+    blocker: Arc<DropBlocker>,
 }
 
-impl Drop for TimedDropRecorder {
+impl Drop for BlockingDropRecorder {
     fn drop(&mut self) {
         self.events.lock().unwrap().push(self.attempted);
-        std::thread::sleep(self.delay);
+        if let Some(sender) = self.attempted_sender.take() {
+            let _ = sender.send(());
+        }
+        self.blocker.wait();
         self.events.lock().unwrap().push(self.finished);
+        if let Some(sender) = self.finished_sender.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+fn blocking_drop_recorder(
+    attempted: &'static str,
+    finished: &'static str,
+    events: Arc<StdMutex<Vec<&'static str>>>,
+) -> (
+    BlockingDropRecorder,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Receiver<()>,
+    Arc<DropBlocker>,
+) {
+    let (attempted_sender, attempted_receiver) = tokio::sync::oneshot::channel();
+    let (finished_sender, finished_receiver) = tokio::sync::oneshot::channel();
+    let blocker = Arc::new(DropBlocker::default());
+    let recorder = BlockingDropRecorder {
+        attempted,
+        finished,
+        events,
+        attempted_sender: Some(attempted_sender),
+        finished_sender: Some(finished_sender),
+        blocker: Arc::clone(&blocker),
+    };
+    (recorder, attempted_receiver, finished_receiver, blocker)
+}
+
+fn assert_drop_events(events: &Arc<StdMutex<Vec<&'static str>>>, expected: &[&'static str]) {
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), expected.len());
+    for event in expected {
+        assert!(events.contains(event), "missing drop event {event}");
+    }
+}
+
+struct WorkerExitNotifier {
+    sender: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for WorkerExitNotifier {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+std::thread_local! {
+    static DETACHED_DROP_WORKER_EXIT: std::cell::RefCell<Option<WorkerExitNotifier>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct RuntimeTerminationDropRecorder {
+    blocker: Arc<DropBlocker>,
+    blocking_started_sender: Option<tokio::sync::oneshot::Sender<()>>,
+    blocking_finished_sender: Option<tokio::sync::oneshot::Sender<()>>,
+    worker_exited_sender: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for RuntimeTerminationDropRecorder {
+    fn drop(&mut self) {
+        let worker_exited_sender = self.worker_exited_sender.take();
+        DETACHED_DROP_WORKER_EXIT.with(|notifier| {
+            *notifier.borrow_mut() = Some(WorkerExitNotifier {
+                sender: worker_exited_sender,
+            });
+        });
+
+        let blocker = Arc::clone(&self.blocker);
+        let blocking_started_sender = self.blocking_started_sender.take();
+        let blocking_finished_sender = self.blocking_finished_sender.take();
+        tokio::runtime::Handle::current().spawn_blocking(move || {
+            if let Some(sender) = blocking_started_sender {
+                let _ = sender.send(());
+            }
+            blocker.wait();
+            if let Some(sender) = blocking_finished_sender {
+                let _ = sender.send(());
+            }
+        });
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatched_drop_waits_for_bounded_runtime_shutdown_before_success() {
+    const WORKER_SHUTDOWN_BOUND: Duration = Duration::from_millis(100);
+    const WATCHDOG: Duration = Duration::from_secs(2);
+
+    let blocker = Arc::new(DropBlocker::default());
+    let (blocking_started_sender, blocking_started) = tokio::sync::oneshot::channel();
+    let (blocking_finished_sender, blocking_finished) = tokio::sync::oneshot::channel();
+    let (worker_exited_sender, mut worker_exited) = tokio::sync::oneshot::channel();
+    let (initiation_sender, _initiation_receiver) = std::sync::mpsc::channel();
+    let dispatched = dispatch_drop(
+        RuntimeTerminationDropRecorder {
+            blocker: Arc::clone(&blocker),
+            blocking_started_sender: Some(blocking_started_sender),
+            blocking_finished_sender: Some(blocking_finished_sender),
+            worker_exited_sender: Some(worker_exited_sender),
+        },
+        "runtime-termination-surrogate",
+        DropInitiation::Signal(initiation_sender),
+        WORKER_SHUTDOWN_BOUND,
+    );
+    let completion = tokio::spawn(await_dispatched_drop(dispatched, WATCHDOG));
+
+    timeout(WATCHDOG, blocking_started)
+        .await
+        .expect("runtime blocking work must begin")
+        .expect("runtime blocking work start sender must remain connected");
+    let worker_exited_before_blocker_release =
+        matches!(timeout(WATCHDOG, &mut worker_exited).await, Ok(Ok(())));
+
+    blocker.release();
+    timeout(WATCHDOG, blocking_finished)
+        .await
+        .expect("runtime blocking work must finish after explicit release")
+        .expect("runtime blocking work finish sender must remain connected");
+    if !worker_exited_before_blocker_release {
+        timeout(WATCHDOG, &mut worker_exited)
+            .await
+            .expect("detached worker must exit after runtime blocking work releases")
+            .expect("detached worker exit sender must remain connected");
+    }
+    let completion = timeout(WATCHDOG, completion)
+        .await
+        .expect("drop completion task must finish")
+        .expect("drop completion task must not panic");
+
+    assert!(
+        worker_exited_before_blocker_release,
+        "success must wait for bounded runtime shutdown rather than implicit runtime drop",
+    );
+    assert!(
+        completion.is_ok(),
+        "bounded runtime shutdown must report success"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn natural_drop_cleanup_keeps_parent_responsive_after_electrs_timeout() {
-    const COMPLETION_BOUND: Duration = Duration::from_millis(5);
-    const PARENT_BOUND: Duration = Duration::from_millis(25);
-    const ELECTRS_DROP_DELAY: Duration = Duration::from_millis(40);
+    const COMPLETION_BOUND: Duration = Duration::from_millis(100);
+    const WATCHDOG: Duration = Duration::from_secs(2);
 
     let events = Arc::new(StdMutex::new(Vec::new()));
-    let cleanup = NaturalDropCleanup {
-        electrs: TimedDropRecorder {
-            attempted: "electrs-attempted",
-            finished: "electrs-finished",
-            events: Arc::clone(&events),
-            delay: ELECTRS_DROP_DELAY,
-        },
-        bitcoind: TimedDropRecorder {
-            attempted: "bitcoind-attempted",
-            finished: "bitcoind-finished",
-            events: Arc::clone(&events),
-            delay: Duration::ZERO,
-        },
+    let (electrs, electrs_attempted, electrs_finished, electrs_blocker) =
+        blocking_drop_recorder("electrs-attempted", "electrs-finished", Arc::clone(&events));
+    let (bitcoind, bitcoind_attempted, bitcoind_finished, bitcoind_blocker) =
+        blocking_drop_recorder(
+            "bitcoind-attempted",
+            "bitcoind-finished",
+            Arc::clone(&events),
+        );
+    let release_guard = DropReleaseGuard {
+        blockers: [Arc::clone(&electrs_blocker), Arc::clone(&bitcoind_blocker)],
     };
+    let cleanup = NaturalDropCleanup { electrs, bitcoind };
 
-    let mut release = tokio::spawn(cleanup.release_with_timeout(COMPLETION_BOUND));
-    let release_result = timeout(PARENT_BOUND, &mut release)
+    let release = tokio::spawn(cleanup.release_with_timeout(COMPLETION_BOUND));
+    timeout(WATCHDOG, electrs_attempted)
         .await
-        .expect("a blocked Electrs drop must not block its parent past the cleanup bound")
+        .expect("Electrs detached drop must begin")
+        .expect("Electrs attempt sender must remain connected");
+    timeout(WATCHDOG, bitcoind_attempted)
+        .await
+        .expect("Bitcoind drop must be attempted after Electrs times out")
+        .expect("Bitcoind attempt sender must remain connected");
+    bitcoind_blocker.release();
+    timeout(WATCHDOG, bitcoind_finished)
+        .await
+        .expect("Bitcoind detached drop must finish after explicit release")
+        .expect("Bitcoind finish sender must remain connected");
+    let release_result = timeout(WATCHDOG, release)
+        .await
+        .expect("bounded cleanup must return without a scheduler-sensitive parent deadline")
         .unwrap();
     let error = release_result.expect_err("Electrs completion must time out");
     assert!(error.to_string().contains("Electrs"));
 
-    assert_eq!(
-        &*events.lock().unwrap(),
+    assert_drop_events(
+        &events,
         &[
             "electrs-attempted",
             "bitcoind-attempted",
-            "bitcoind-finished"
+            "bitcoind-finished",
         ],
     );
 
-    sleep(Duration::from_millis(60)).await;
-    assert_eq!(
-        &*events.lock().unwrap(),
+    electrs_blocker.release();
+    timeout(WATCHDOG, electrs_finished)
+        .await
+        .expect("Electrs detached drop must finish after explicit release")
+        .expect("Electrs finish sender must remain connected");
+    drop(release_guard);
+    assert_drop_events(
+        &events,
         &[
             "electrs-attempted",
             "bitcoind-attempted",
             "bitcoind-finished",
             "electrs-finished",
+        ],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn natural_drop_cleanup_cancellation_keeps_both_blocking_drops_detached() {
+    const COMPLETION_BOUND: Duration = Duration::from_millis(100);
+    const WATCHDOG: Duration = Duration::from_secs(2);
+
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let (electrs, electrs_attempted, electrs_finished, electrs_blocker) =
+        blocking_drop_recorder("electrs-attempted", "electrs-finished", Arc::clone(&events));
+    let (bitcoind, bitcoind_attempted, bitcoind_finished, bitcoind_blocker) =
+        blocking_drop_recorder(
+            "bitcoind-attempted",
+            "bitcoind-finished",
+            Arc::clone(&events),
+        );
+    let release_guard = DropReleaseGuard {
+        blockers: [Arc::clone(&electrs_blocker), Arc::clone(&bitcoind_blocker)],
+    };
+    let cleanup = NaturalDropCleanup { electrs, bitcoind };
+
+    let mut release = tokio::spawn(cleanup.release_with_timeout(COMPLETION_BOUND));
+    timeout(WATCHDOG, electrs_attempted)
+        .await
+        .expect("Electrs detached drop must begin before cancellation")
+        .expect("Electrs attempt sender must remain connected");
+
+    release.abort();
+    timeout(WATCHDOG, bitcoind_attempted)
+        .await
+        .expect("Bitcoind drop must still be attempted after cancellation")
+        .expect("Bitcoind attempt sender must remain connected");
+    let cancellation = timeout(WATCHDOG, &mut release).await;
+    let cancellation_completed = matches!(&cancellation, Ok(Err(error)) if error.is_cancelled());
+
+    electrs_blocker.release();
+    bitcoind_blocker.release();
+    timeout(WATCHDOG, electrs_finished)
+        .await
+        .expect("Electrs detached drop must finish after explicit release")
+        .expect("Electrs finish sender must remain connected");
+    timeout(WATCHDOG, bitcoind_finished)
+        .await
+        .expect("Bitcoind detached drop must finish after explicit release")
+        .expect("Bitcoind finish sender must remain connected");
+    if cancellation.is_err() {
+        let joined_after_release = timeout(WATCHDOG, &mut release)
+            .await
+            .expect("cancelled cleanup task must finish after blockers release");
+        assert!(
+            joined_after_release
+                .expect_err("cancelled cleanup task cannot return normally")
+                .is_cancelled()
+        );
+    }
+    drop(release_guard);
+
+    assert!(
+        cancellation_completed,
+        "cancelling cleanup must not wait for a blocking handle Drop on its parent task",
+    );
+    assert_drop_events(
+        &events,
+        &[
+            "electrs-attempted",
+            "bitcoind-attempted",
+            "electrs-finished",
+            "bitcoind-finished",
         ],
     );
 }
