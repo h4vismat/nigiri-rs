@@ -114,7 +114,7 @@ mod tests {
         );
     }
 
-    // Catches a regression that changes a pinned image descriptor or drops its digest.
+    // Catches a regression that changes a pinned image descriptor, drops its digest, or rejects it.
     #[test]
     fn default_images_preserve_exact_descriptors() {
         let bitcoind = ContainerImage::bitcoind_default();
@@ -128,6 +128,9 @@ mod tests {
             bitcoind.testcontainers_tag(),
             "v30.0@sha256:f5826a32aed9287cc5ffdec0996f5272634c4b346529cb8627224986ff555101"
         );
+        bitcoind
+            .validate()
+            .expect("the pinned bitcoind image descriptor is valid");
 
         let electrs = ContainerImage::electrs_default();
         assert_eq!(electrs.name(), "ghcr.io/vulpemventures/electrs");
@@ -140,6 +143,9 @@ mod tests {
             electrs.testcontainers_tag(),
             "latest@sha256:999a2218f423c0fb167ee53b282aa7929a9d4abba38ef16f67f407acd00589d4"
         );
+        electrs
+            .validate()
+            .expect("the pinned electrs image descriptor is valid");
     }
 
     // Catches a regression that forces caller-provided images to have a digest.
