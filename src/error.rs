@@ -48,4 +48,32 @@ pub enum NigiriError {
         operation: Cow<'static, str>,
         detail: String,
     },
+    #[error("{operation} committed transaction {txid}, but confirmation mining failed")]
+    PostTransactionMiningFailed {
+        operation: Cow<'static, str>,
+        txid: String,
+        #[source]
+        source: Box<NigiriError>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NigiriError;
+
+    // Catches a regression that discards the committed transaction id or underlying mining error.
+    #[test]
+    fn post_transaction_error_displays_the_committed_txid() {
+        let error = NigiriError::PostTransactionMiningFailed {
+            operation: "faucet".into(),
+            txid: "11".repeat(32),
+            source: Box::new(NigiriError::InvalidResponse {
+                operation: "mine confirmation".into(),
+                detail: "expected a block hash list".to_owned(),
+            }),
+        };
+
+        assert!(error.to_string().contains(&"11".repeat(32)));
+        assert!(std::error::Error::source(&error).is_some());
+    }
 }

@@ -21,7 +21,7 @@ pub enum Liquid {}
 pub trait NigiriNetwork: private::Sealed {
     type Txid: Display;
     type BlockHash: Display + DeserializeOwned;
-    type Address;
+    type Address: Display;
     type Utxo;
     type TxInfo;
     type AddressInfo;
@@ -49,7 +49,7 @@ pub(crate) mod private {
     use super::*;
 
     pub trait Sealed: Sized {
-        fn rpc_prefix() -> &'static [&'static str];
+        fn native_send_params(address: &str, amount: serde_json::Number) -> serde_json::Value;
 
         fn parse_txid(
             operation: &'static str,
@@ -96,8 +96,8 @@ pub(crate) mod private {
     }
 
     impl Sealed for super::Bitcoin {
-        fn rpc_prefix() -> &'static [&'static str] {
-            &["rpc"]
+        fn native_send_params(address: &str, amount: serde_json::Number) -> serde_json::Value {
+            serde_json::json!([address, amount])
         }
 
         fn parse_txid(
@@ -155,8 +155,8 @@ pub(crate) mod private {
     }
 
     impl Sealed for super::Liquid {
-        fn rpc_prefix() -> &'static [&'static str] {
-            &["rpc", "--liquid"]
+        fn native_send_params(address: &str, amount: serde_json::Number) -> serde_json::Value {
+            serde_json::json!([address, amount, "", "", false, false, 1, "unset", false, ""])
         }
 
         fn parse_txid(
@@ -244,5 +244,32 @@ pub(crate) mod private {
             operation: operation.into(),
             detail: format!("expected {expected}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::{Bitcoin, Liquid};
+
+    // Catches a regression that stringifies amounts or changes a network's positional RPC vector.
+    #[test]
+    fn native_send_vectors_match_bitcoin_and_elements_rpc_contracts() {
+        use crate::network::private::Sealed;
+
+        let amount = serde_json::Number::from_str("0.00000001").unwrap();
+        assert_eq!(
+            Bitcoin::native_send_params("bcrt1qdestination", amount.clone()),
+            serde_json::from_str::<serde_json::Value>(r#"["bcrt1qdestination",0.00000001]"#)
+                .unwrap()
+        );
+        assert_eq!(
+            Liquid::native_send_params("ert1qdestination", amount),
+            serde_json::from_str::<serde_json::Value>(
+                r#"["ert1qdestination",0.00000001,"","",false,false,1,"unset",false,""]"#
+            )
+            .unwrap()
+        );
     }
 }
