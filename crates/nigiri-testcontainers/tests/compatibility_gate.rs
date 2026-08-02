@@ -1,4 +1,11 @@
-use std::{error::Error, io, process::Command, time::Duration};
+use std::{
+    error::Error,
+    future::Future,
+    io,
+    process::Output,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use nigiri_rs::{Bitcoin, NigiriClient, NigiriConfig};
 use serde_json::Value;
@@ -8,6 +15,7 @@ use testcontainers::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    process::Command,
     sync::{Barrier, Mutex},
     time::{Instant, sleep, timeout},
 };
@@ -28,9 +36,11 @@ const ELECTRUM_TCP_PORT: u16 = 50_000;
 const RPC_USER: &str = "admin1";
 const RPC_PASSWORD: &str = "123";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+const DOCKER_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const BITCOIND_DATA_VOLUME_DESTINATION: &str = "/data/.bitcoin";
 const ANONYMOUS_VOLUME_ID_LENGTH: usize = 64;
 const DOCKER_ANONYMOUS_VOLUME_LABEL: &str = "com.docker.volume.anonymous";
+const MAX_DIAGNOSTIC_CHARS: usize = 4 * 1024;
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -55,8 +65,7 @@ struct CleanupTargets {
 }
 
 struct SmokeInstance {
-    electrs: ContainerAsync<GenericImage>,
-    bitcoin: ContainerAsync<GenericImage>,
+    cleanup_handles: NaturalDropCleanup<ContainerAsync<GenericImage>, ContainerAsync<GenericImage>>,
     topology: TopologyNames,
     bitcoin_id: String,
     electrs_id: String,
@@ -64,6 +73,19 @@ struct SmokeInstance {
     rpc_port: u16,
     http_port: u16,
     electrum_port: u16,
+}
+
+struct NaturalDropCleanup<Electrs, Bitcoind> {
+    electrs: Electrs,
+    bitcoind: Bitcoind,
+}
+
+impl<Electrs, Bitcoind> NaturalDropCleanup<Electrs, Bitcoind> {
+    fn release(self) {
+        let Self { electrs, bitcoind } = self;
+        drop(electrs);
+        drop(bitcoind);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,7 +116,7 @@ impl InitialMiningGate {
     }
 
     async fn observe_bitcoind(&self, bitcoin_id: &str, bitcoin_name: &str) -> TestResult<()> {
-        let inspected = docker_inspect("container", bitcoin_id)?;
+        let inspected = docker_inspect("container", bitcoin_id).await?;
         if inspected.get("Id").and_then(Value::as_str) != Some(bitcoin_id)
             || inspected.pointer("/State/Running").and_then(Value::as_bool) != Some(true)
             || inspected.pointer("/Name").and_then(Value::as_str)
@@ -174,24 +196,109 @@ fn mapped_http_url(host: &str, port: u16) -> TestResult<Url> {
     Ok(url)
 }
 
-fn rpc_client(node_rpc_url: Url) -> TestResult<NigiriClient<Bitcoin>> {
-    Ok(NigiriClient::with_config(NigiriConfig {
+fn fixture_rpc_config(node_rpc_url: Url) -> NigiriConfig {
+    NigiriConfig {
         esplora_url: node_rpc_url.clone(),
         node_rpc_url,
         node_rpc_user: RPC_USER.to_owned(),
         node_rpc_password: RPC_PASSWORD.to_owned(),
+        // Initial 101-block mining is part of fixture startup, so it shares the
+        // fixture's bounded startup budget without changing the library default.
+        timeout: STARTUP_TIMEOUT,
         ..Default::default()
-    })?)
+    }
 }
 
-fn docker_inspect(resource_kind: &str, target: &str) -> TestResult<Value> {
-    let output = Command::new("docker")
-        .args([resource_kind, "inspect", target])
-        .output()?;
+fn rpc_client(config: NigiriConfig) -> TestResult<NigiriClient<Bitcoin>> {
+    Ok(NigiriClient::with_config(config)?)
+}
+
+fn bounded_diagnostic(text: &str) -> String {
+    let mut bounded = text.chars().take(MAX_DIAGNOSTIC_CHARS).collect::<String>();
+    if text.chars().count() > MAX_DIAGNOSTIC_CHARS {
+        bounded.push_str("\n[diagnostic truncated]");
+    }
+    bounded
+}
+
+fn command_diagnostic(program: &str, arguments: &[&str]) -> String {
+    let arguments = arguments.join(" ");
+    bounded_diagnostic(&format!("command={program} {arguments}"))
+}
+
+async fn run_bounded_command(
+    program: &str,
+    arguments: &[&str],
+    resource: &str,
+    operation_timeout: Duration,
+) -> TestResult<Output> {
+    let resource = bounded_diagnostic(resource);
+    let command_diagnostic = command_diagnostic(program, arguments);
+    let mut command = Command::new(program);
+    command.args(arguments).kill_on_drop(true);
+
+    match timeout(operation_timeout, command.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "control-plane command for {resource} could not start: {error}; {command_diagnostic}",
+            ),
+        )
+        .into()),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "control-plane command for {resource} timed out after {operation_timeout:?}; {command_diagnostic}",
+            ),
+        )
+        .into()),
+    }
+}
+
+async fn await_control_plane<T, E, F>(
+    resource: &str,
+    operation: &str,
+    operation_future: F,
+) -> TestResult<T>
+where
+    E: std::fmt::Display,
+    F: Future<Output = Result<T, E>>,
+{
+    let resource = bounded_diagnostic(resource);
+    match timeout(STARTUP_TIMEOUT, operation_future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(io::Error::other(format!(
+            "Docker control-plane {operation} for {resource} failed: {}",
+            bounded_diagnostic(&error.to_string()),
+        ))
+        .into()),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "Docker control-plane {operation} for {resource} timed out after {STARTUP_TIMEOUT:?}; resource-specific diagnostics are bounded",
+            ),
+        )
+        .into()),
+    }
+}
+
+async fn docker_inspect_output(resource_kind: &str, target: &str) -> TestResult<Output> {
+    run_bounded_command(
+        "docker",
+        &[resource_kind, "inspect", target],
+        &format!("Docker {resource_kind} {target}"),
+        DOCKER_COMMAND_TIMEOUT,
+    )
+    .await
+}
+
+async fn docker_inspect(resource_kind: &str, target: &str) -> TestResult<Value> {
+    let output = docker_inspect_output(resource_kind, target).await?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "docker {resource_kind} inspect {target} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim(),
+            bounded_diagnostic(String::from_utf8_lossy(&output.stderr).trim()),
         ))
         .into());
     }
@@ -207,10 +314,8 @@ fn docker_inspect(resource_kind: &str, target: &str) -> TestResult<Value> {
     Ok(inspected.pop().expect("one inspected Docker object"))
 }
 
-fn docker_resource_is_removed(resource_kind: &str, target: &str) -> TestResult<bool> {
-    let output = Command::new("docker")
-        .args([resource_kind, "inspect", target])
-        .output()?;
+async fn docker_resource_is_removed(resource_kind: &str, target: &str) -> TestResult<bool> {
+    let output = docker_inspect_output(resource_kind, target).await?;
     if output.status.success() {
         return Ok(false);
     }
@@ -222,7 +327,7 @@ fn docker_resource_is_removed(resource_kind: &str, target: &str) -> TestResult<b
 
     Err(io::Error::other(format!(
         "docker {resource_kind} inspect {target} failed while checking cleanup: {}",
-        diagnostic.trim(),
+        bounded_diagnostic(diagnostic.trim()),
     ))
     .into())
 }
@@ -235,13 +340,8 @@ fn is_missing_docker_resource_diagnostic(diagnostic: &str) -> bool {
         || (diagnostic.contains("network ") && diagnostic.ends_with(" not found"))
 }
 
-fn bounded_docker_inspect_diagnostic(resource_kind: &str, target: &str) -> String {
-    const MAX_DIAGNOSTIC_CHARS: usize = 4 * 1024;
-
-    match Command::new("docker")
-        .args([resource_kind, "inspect", target])
-        .output()
-    {
+async fn bounded_docker_inspect_diagnostic(resource_kind: &str, target: &str) -> String {
+    match docker_inspect_output(resource_kind, target).await {
         Ok(output) => {
             let text = format!(
                 "status={}\n{}{}",
@@ -249,14 +349,11 @@ fn bounded_docker_inspect_diagnostic(resource_kind: &str, target: &str) -> Strin
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             );
-            let mut bounded = text.chars().take(MAX_DIAGNOSTIC_CHARS).collect::<String>();
-            if text.chars().count() > MAX_DIAGNOSTIC_CHARS {
-                bounded.push_str("\n[diagnostic truncated]");
-            }
-            format!("docker {resource_kind} inspect {target}: {bounded}")
+            bounded_diagnostic(&format!("docker {resource_kind} inspect {target}: {text}"))
         }
         Err(error) => format!(
-            "docker {resource_kind} inspect {target} could not run while diagnosing cleanup: {error}",
+            "docker {resource_kind} inspect {target} could not run while diagnosing cleanup: {}",
+            bounded_diagnostic(&error.to_string()),
         ),
     }
 }
@@ -462,13 +559,13 @@ fn assert_anonymous_volume_metadata(
     Ok(())
 }
 
-fn capture_pinned_bitcoind_volume_from_docker(
+async fn capture_pinned_bitcoind_volume_from_docker(
     bitcoin_id: &str,
     bitcoin_name: &str,
 ) -> TestResult<CapturedAnonymousVolume> {
-    let inspected = docker_inspect("container", bitcoin_id)?;
+    let inspected = docker_inspect("container", bitcoin_id).await?;
     let volume = capture_pinned_bitcoind_anonymous_volume(&inspected, bitcoin_name)?;
-    let volume_inspected = docker_inspect("volume", &volume.name)?;
+    let volume_inspected = docker_inspect("volume", &volume.name).await?;
     assert_anonymous_volume_metadata(&volume_inspected, &volume)?;
     Ok(volume)
 }
@@ -637,8 +734,8 @@ fn expected_electrs_command(bitcoin_name: &str) -> Vec<String> {
 }
 
 impl SmokeInstance {
-    fn assert_runtime_topology(&self) -> TestResult<()> {
-        let bitcoin = docker_inspect("container", &self.bitcoin_id)?;
+    async fn assert_runtime_topology(&self) -> TestResult<()> {
+        let bitcoin = docker_inspect("container", &self.bitcoin_id).await?;
         assert_container_runtime(
             &bitcoin,
             &self.topology.bitcoin,
@@ -648,10 +745,10 @@ impl SmokeInstance {
             &[(BITCOIND_RPC_PORT, self.rpc_port)],
             ContainerMountPolicy::PinnedBitcoindAnonymousVolume(&self.bitcoind_volume),
         )?;
-        let volume = docker_inspect("volume", &self.bitcoind_volume.name)?;
+        let volume = docker_inspect("volume", &self.bitcoind_volume.name).await?;
         assert_anonymous_volume_metadata(&volume, &self.bitcoind_volume)?;
 
-        let electrs = docker_inspect("container", &self.electrs_id)?;
+        let electrs = docker_inspect("container", &self.electrs_id).await?;
         assert_container_runtime(
             &electrs,
             &self.topology.electrs,
@@ -686,10 +783,9 @@ impl SmokeInstance {
         Ok(())
     }
 
-    async fn cleanup(self) -> TestResult<CleanupTargets> {
+    async fn cleanup(self) -> CleanupTargets {
         let SmokeInstance {
-            electrs,
-            bitcoin,
+            cleanup_handles,
             topology,
             bitcoin_id,
             electrs_id,
@@ -703,13 +799,10 @@ impl SmokeInstance {
             bitcoind_volume,
         };
 
-        let electrs_result = electrs.rm().await;
-        let bitcoin_result = bitcoin.rm().await;
-        electrs_result?;
-        bitcoin_result?;
+        cleanup_handles.release();
 
         eprintln!(
-            "compatibility gate requested cleanup: network={} bitcoin={} ({}) volume={} electrs={} ({})",
+            "compatibility gate released handles for natural cleanup: network={} bitcoin={} ({}) volume={} electrs={} ({})",
             cleanup.topology.network,
             cleanup.topology.bitcoin,
             cleanup.bitcoin_id,
@@ -717,23 +810,30 @@ impl SmokeInstance {
             cleanup.topology.electrs,
             cleanup.electrs_id,
         );
-        Ok(cleanup)
+        cleanup
     }
 }
 
 async fn assert_resources_are_removed(cleanup: &CleanupTargets) -> TestResult<()> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
-        let bitcoin_id_removed = docker_resource_is_removed("container", &cleanup.bitcoin_id)?;
-        let bitcoin_name_removed =
-            docker_resource_is_removed("container", &cleanup.topology.bitcoin)?;
-        let electrs_id_removed = docker_resource_is_removed("container", &cleanup.electrs_id)?;
-        let electrs_name_removed =
-            docker_resource_is_removed("container", &cleanup.topology.electrs)?;
+        let (
+            bitcoin_id_removed,
+            bitcoin_name_removed,
+            electrs_id_removed,
+            electrs_name_removed,
+            network_removed,
+            volume_removed,
+        ) = tokio::try_join!(
+            docker_resource_is_removed("container", &cleanup.bitcoin_id),
+            docker_resource_is_removed("container", &cleanup.topology.bitcoin),
+            docker_resource_is_removed("container", &cleanup.electrs_id),
+            docker_resource_is_removed("container", &cleanup.topology.electrs),
+            docker_resource_is_removed("network", &cleanup.topology.network),
+            docker_resource_is_removed("volume", &cleanup.bitcoind_volume.name),
+        )?;
         let bitcoin_removed = bitcoin_id_removed && bitcoin_name_removed;
         let electrs_removed = electrs_id_removed && electrs_name_removed;
-        let network_removed = docker_resource_is_removed("network", &cleanup.topology.network)?;
-        let volume_removed = docker_resource_is_removed("volume", &cleanup.bitcoind_volume.name)?;
         if bitcoin_removed && electrs_removed && network_removed && volume_removed {
             eprintln!(
                 "compatibility gate confirmed cleanup: network={} bitcoin={} volume={} electrs={}",
@@ -747,40 +847,35 @@ async fn assert_resources_are_removed(cleanup: &CleanupTargets) -> TestResult<()
         if Instant::now() >= deadline {
             let mut diagnostics = Vec::new();
             if !bitcoin_id_removed {
-                diagnostics.push(bounded_docker_inspect_diagnostic(
-                    "container",
-                    &cleanup.bitcoin_id,
-                ));
+                diagnostics.push(
+                    bounded_docker_inspect_diagnostic("container", &cleanup.bitcoin_id).await,
+                );
             }
             if !bitcoin_name_removed {
-                diagnostics.push(bounded_docker_inspect_diagnostic(
-                    "container",
-                    &cleanup.topology.bitcoin,
-                ));
+                diagnostics.push(
+                    bounded_docker_inspect_diagnostic("container", &cleanup.topology.bitcoin).await,
+                );
             }
             if !electrs_id_removed {
-                diagnostics.push(bounded_docker_inspect_diagnostic(
-                    "container",
-                    &cleanup.electrs_id,
-                ));
+                diagnostics.push(
+                    bounded_docker_inspect_diagnostic("container", &cleanup.electrs_id).await,
+                );
             }
             if !electrs_name_removed {
-                diagnostics.push(bounded_docker_inspect_diagnostic(
-                    "container",
-                    &cleanup.topology.electrs,
-                ));
+                diagnostics.push(
+                    bounded_docker_inspect_diagnostic("container", &cleanup.topology.electrs).await,
+                );
             }
             if !network_removed {
-                diagnostics.push(bounded_docker_inspect_diagnostic(
-                    "network",
-                    &cleanup.topology.network,
-                ));
+                diagnostics.push(
+                    bounded_docker_inspect_diagnostic("network", &cleanup.topology.network).await,
+                );
             }
             if !volume_removed {
-                diagnostics.push(bounded_docker_inspect_diagnostic(
-                    "volume",
-                    &cleanup.bitcoind_volume.name,
-                ));
+                diagnostics.push(
+                    bounded_docker_inspect_diagnostic("volume", &cleanup.bitcoind_volume.name)
+                        .await,
+                );
             }
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -915,30 +1010,43 @@ async fn start_smoke_instance(
     let electrs_name = format!("nigiri-electrs-{id}-{suffix}");
 
     let bitcoind_tag = format!("{BITCOIND_TAG}@{BITCOIND_DIGEST}");
-    let bitcoin = GenericImage::new(BITCOIND_IMAGE, bitcoind_tag.as_str())
-        .with_exposed_port(BITCOIND_RPC_PORT.tcp())
-        .with_network(network_name.clone())
-        .with_container_name(bitcoin_name.clone())
-        .with_cmd([
-            "-regtest=1",
-            "-server=1",
-            "-txindex=1",
-            "-rpcbind=0.0.0.0:18443",
-            "-rpcallowip=0.0.0.0/0",
-            "-rpcuser=admin1",
-            "-rpcpassword=123",
-            "-fallbackfee=0.00001",
-            "-printtoconsole=1",
-        ])
-        .start()
-        .await?;
+    let bitcoin = await_control_plane(
+        &bitcoin_name,
+        "start Bitcoind",
+        GenericImage::new(BITCOIND_IMAGE, bitcoind_tag.as_str())
+            .with_exposed_port(BITCOIND_RPC_PORT.tcp())
+            .with_network(network_name.clone())
+            .with_container_name(bitcoin_name.clone())
+            .with_cmd([
+                "-regtest=1",
+                "-server=1",
+                "-txindex=1",
+                "-rpcbind=0.0.0.0:18443",
+                "-rpcallowip=0.0.0.0/0",
+                "-rpcuser=admin1",
+                "-rpcpassword=123",
+                "-fallbackfee=0.00001",
+                "-printtoconsole=1",
+            ])
+            .start(),
+    )
+    .await?;
     let bitcoin_id = bitcoin.id().to_owned();
-    let bitcoind_volume = capture_pinned_bitcoind_volume_from_docker(&bitcoin_id, &bitcoin_name)?;
+    let bitcoind_volume =
+        capture_pinned_bitcoind_volume_from_docker(&bitcoin_id, &bitcoin_name).await?;
 
-    let bitcoin_host = bitcoin.get_host().await?.to_string();
-    let rpc_port = bitcoin.get_host_port_ipv4(BITCOIND_RPC_PORT.tcp()).await?;
+    let bitcoin_host =
+        await_control_plane(&bitcoin_name, "resolve Bitcoind host", bitcoin.get_host())
+            .await?
+            .to_string();
+    let rpc_port = await_control_plane(
+        &bitcoin_name,
+        "resolve Bitcoind RPC host port",
+        bitcoin.get_host_port_ipv4(BITCOIND_RPC_PORT.tcp()),
+    )
+    .await?;
     let mut root_rpc_url = mapped_http_url(&bitcoin_host, rpc_port)?;
-    let root_client = rpc_client(root_rpc_url.clone())?;
+    let root_client = rpc_client(fixture_rpc_config(root_rpc_url.clone()))?;
     wait_for_bitcoind(&root_client).await?;
 
     let wallet_name = format!("compat-{suffix}");
@@ -950,45 +1058,62 @@ async fn start_smoke_instance(
         .map_err(|()| io::Error::new(io::ErrorKind::InvalidInput, "RPC URL is not hierarchical"))?
         .push("wallet")
         .push(&wallet_name);
-    let wallet_client = rpc_client(root_rpc_url.clone())?;
+    let wallet_client = rpc_client(fixture_rpc_config(root_rpc_url.clone()))?;
     let mining_address = wallet_client.new_address().await?.to_string();
     initial_mining_gate
         .mine_initial_chain(&bitcoin_id, &bitcoin_name, &wallet_client, &mining_address)
         .await?;
 
     let electrs_tag = format!("{ELECTRS_TAG}@{ELECTRS_DIGEST}");
-    let electrs = GenericImage::new(ELECTRS_IMAGE, electrs_tag.as_str())
-        .with_entrypoint("/build/electrs")
-        .with_exposed_port(ELECTRS_HTTP_PORT.tcp())
-        .with_exposed_port(ELECTRUM_TCP_PORT.tcp())
-        .with_network(network_name.clone())
-        .with_container_name(electrs_name.clone())
-        .with_cmd([
-            "-vvvv".to_owned(),
-            "--network".to_owned(),
-            "regtest".to_owned(),
-            "--daemon-dir".to_owned(),
-            "/tmp/bitcoin".to_owned(),
-            "--db-dir".to_owned(),
-            "/tmp/electrs".to_owned(),
-            "--daemon-rpc-addr".to_owned(),
-            format!("{bitcoin_name}:18443"),
-            "--cookie".to_owned(),
-            "admin1:123".to_owned(),
-            "--http-addr".to_owned(),
-            "0.0.0.0:30000".to_owned(),
-            "--electrum-rpc-addr".to_owned(),
-            "0.0.0.0:50000".to_owned(),
-            "--cors".to_owned(),
-            "*".to_owned(),
-            "--jsonrpc-import".to_owned(),
-        ])
-        .start()
-        .await?;
+    let electrs = await_control_plane(
+        &electrs_name,
+        "start Electrs",
+        GenericImage::new(ELECTRS_IMAGE, electrs_tag.as_str())
+            .with_entrypoint("/build/electrs")
+            .with_exposed_port(ELECTRS_HTTP_PORT.tcp())
+            .with_exposed_port(ELECTRUM_TCP_PORT.tcp())
+            .with_network(network_name.clone())
+            .with_container_name(electrs_name.clone())
+            .with_cmd([
+                "-vvvv".to_owned(),
+                "--network".to_owned(),
+                "regtest".to_owned(),
+                "--daemon-dir".to_owned(),
+                "/tmp/bitcoin".to_owned(),
+                "--db-dir".to_owned(),
+                "/tmp/electrs".to_owned(),
+                "--daemon-rpc-addr".to_owned(),
+                format!("{bitcoin_name}:18443"),
+                "--cookie".to_owned(),
+                "admin1:123".to_owned(),
+                "--http-addr".to_owned(),
+                "0.0.0.0:30000".to_owned(),
+                "--electrum-rpc-addr".to_owned(),
+                "0.0.0.0:50000".to_owned(),
+                "--cors".to_owned(),
+                "*".to_owned(),
+                "--jsonrpc-import".to_owned(),
+            ])
+            .start(),
+    )
+    .await?;
 
-    let electrs_host = electrs.get_host().await?.to_string();
-    let http_port = electrs.get_host_port_ipv4(ELECTRS_HTTP_PORT.tcp()).await?;
-    let electrum_port = electrs.get_host_port_ipv4(ELECTRUM_TCP_PORT.tcp()).await?;
+    let electrs_host =
+        await_control_plane(&electrs_name, "resolve Electrs host", electrs.get_host())
+            .await?
+            .to_string();
+    let http_port = await_control_plane(
+        &electrs_name,
+        "resolve Electrs HTTP host port",
+        electrs.get_host_port_ipv4(ELECTRS_HTTP_PORT.tcp()),
+    )
+    .await?;
+    let electrum_port = await_control_plane(
+        &electrs_name,
+        "resolve Electrs TCP host port",
+        electrs.get_host_port_ipv4(ELECTRUM_TCP_PORT.tcp()),
+    )
+    .await?;
     wait_for_esplora_height(&mapped_http_url(&electrs_host, http_port)?).await?;
     assert_electrum_height(&electrs_host, electrum_port).await?;
 
@@ -1004,9 +1129,57 @@ async fn start_smoke_instance(
         rpc_port,
         http_port,
         electrum_port,
-        electrs,
-        bitcoin,
+        cleanup_handles: NaturalDropCleanup {
+            electrs,
+            bitcoind: bitcoin,
+        },
     })
+}
+
+struct DropRecorder {
+    name: &'static str,
+    events: Arc<StdMutex<Vec<&'static str>>>,
+}
+
+impl Drop for DropRecorder {
+    fn drop(&mut self) {
+        self.events.lock().unwrap().push(self.name);
+    }
+}
+
+#[test]
+fn natural_drop_cleanup_releases_electrs_before_bitcoind() {
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    NaturalDropCleanup {
+        electrs: DropRecorder {
+            name: "electrs",
+            events: Arc::clone(&events),
+        },
+        bitcoind: DropRecorder {
+            name: "bitcoind",
+            events: Arc::clone(&events),
+        },
+    }
+    .release();
+
+    assert_eq!(&*events.lock().unwrap(), &["electrs", "bitcoind"]);
+}
+
+#[tokio::test]
+async fn bounded_command_timeout_reports_a_resource_specific_diagnostic() {
+    let error = run_bounded_command(
+        "sleep",
+        &["2"],
+        "fixture-control-plane",
+        Duration::from_millis(25),
+    )
+    .await
+    .unwrap_err();
+
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("fixture-control-plane"));
+    assert!(diagnostic.contains("timed out"));
+    assert!(diagnostic.len() < 5 * 1024);
 }
 
 #[test]
@@ -1206,12 +1379,23 @@ fn docker_cleanup_recognizes_the_observed_missing_resource_diagnostics() {
     ));
 }
 
+#[test]
+fn fixture_rpc_config_uses_the_sixty_second_startup_budget() {
+    let node_rpc_url = Url::parse("http://127.0.0.1:18443/wallet/fixture").unwrap();
+    let config = fixture_rpc_config(node_rpc_url.clone());
+
+    assert_eq!(config.timeout, STARTUP_TIMEOUT);
+    assert_eq!(config.timeout, Duration::from_secs(60));
+    assert_eq!(config.node_rpc_url, node_rpc_url);
+}
+
 #[tokio::test]
 async fn fixture_rpc_client_allows_a_node_operation_past_the_legacy_five_second_override() {
     let (node_rpc_url, server) = delayed_node_rpc_server(Duration::from_secs(6))
         .await
         .unwrap();
-    let client = rpc_client(node_rpc_url).unwrap();
+    let config = fixture_rpc_config(node_rpc_url);
+    let client = rpc_client(config).unwrap();
 
     let response = client
         .rpc::<Value, _>("getblockchaininfo", ())
@@ -1232,8 +1416,8 @@ async fn pinned_images_work_without_nigiri_volumes_or_compose() {
     assert_ne!(instance.rpc_port, BITCOIND_RPC_PORT);
     assert_ne!(instance.http_port, ELECTRS_HTTP_PORT);
     assert_ne!(instance.electrum_port, ELECTRUM_TCP_PORT);
-    instance.assert_runtime_topology().unwrap();
-    let cleanup = instance.cleanup().await.unwrap();
+    instance.assert_runtime_topology().await.unwrap();
+    let cleanup = instance.cleanup().await;
     assert_resources_are_removed(&cleanup).await.unwrap();
 }
 
@@ -1255,13 +1439,13 @@ async fn two_pinned_topologies_coexist() {
     assert_ne!(left.http_port, right.http_port);
     assert_ne!(left.bitcoin_id, right.bitcoin_id);
     assert_ne!(left.electrs_id, right.electrs_id);
-    left.assert_runtime_topology().unwrap();
-    right.assert_runtime_topology().unwrap();
+    left.assert_runtime_topology().await.unwrap();
+    right.assert_runtime_topology().await.unwrap();
     let (left_cleanup, right_cleanup) = tokio::join!(left.cleanup(), right.cleanup());
-    assert_resources_are_removed(&left_cleanup.unwrap())
-        .await
-        .unwrap();
-    assert_resources_are_removed(&right_cleanup.unwrap())
-        .await
-        .unwrap();
+    let (left_removed, right_removed) = tokio::join!(
+        assert_resources_are_removed(&left_cleanup),
+        assert_resources_are_removed(&right_cleanup),
+    );
+    left_removed.unwrap();
+    right_removed.unwrap();
 }
