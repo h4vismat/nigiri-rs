@@ -16,7 +16,7 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// or Elements regtest response and keeps the worst case survivable.
 pub const MAX_RESPONSE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 
-/// Complete immutable configuration for a Nigiri client.
+/// Complete immutable client configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NigiriConfig {
     /// Esplora HTTP endpoint.

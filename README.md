@@ -1,6 +1,6 @@
 # nigiri-rs
 
-`nigiri-rs` is a typed asynchronous client for Bitcoin and Liquid services in an already-running [Nigiri](https://github.com/vulpemventures/nigiri) regtest environment.
+`nigiri-rs` is a typed asynchronous client for compatible Bitcoin and Liquid regtest services. A host-owned [Nigiri](https://github.com/vulpemventures/nigiri) environment is one compatible setup, not the only architecture.
 
 Version 0.3.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
 
@@ -8,13 +8,15 @@ Version 0.2.0 was the breaking release that introduced network marker types sele
 
 ## Lifecycle ownership
 
-The host owns Nigiri's complete lifecycle. This library provides readiness checks but never:
+The host owns the complete lifecycle of its regtest services. This library provides readiness checks but never:
 
-- starts or stops Nigiri;
-- invokes Docker;
-- provisions or deletes datadirs;
+- starts or stops services;
+- invokes Docker or Testcontainers;
+- provisions or deletes service data directories;
 - removes containers or volumes;
 - performs cleanup from `Drop`.
+
+Host-owned Nigiri remains a compatible setup; start it before using the default endpoints or an explicitly ignored host test. The forthcoming `nigiri-testcontainers` companion crate will provide fixture lifecycle separately, without adding a Docker or Testcontainers dependency to this core crate.
 
 Start the required services before running a client or an explicitly ignored host test:
 
@@ -62,10 +64,10 @@ There is deliberately no default generic parameter. `NigiriClient::new()` withou
 
 ## Verified default endpoints
 
-| Network | Node JSON-RPC | Chopsticks | Esplora/electrs |
-| --- | --- | --- | --- |
-| Bitcoin | `http://localhost:18443/` | `http://localhost:3000/` | `http://localhost:30000/` |
-| Liquid | `http://localhost:18884/` | `http://localhost:3001/` | `http://localhost:30001/` |
+| Network | Node JSON-RPC | Esplora/electrs |
+| --- | --- | --- |
+| Bitcoin | `http://localhost:18443/` | `http://localhost:30000/` |
+| Liquid | `http://localhost:18884/` | `http://localhost:30001/` |
 
 The default node credentials are the public Nigiri regtest credentials: user `admin1`, password `123`. They are intentionally visible in `NigiriConfig`'s derived `Debug` output; they are not production secrets.
 
@@ -113,7 +115,7 @@ Unlike the former CLI transport, JSON-RPC does not coerce strings according to a
 
 ### Response size limit
 
-One `NigiriConfig::max_response_bytes` limit applies to every response body: node JSON-RPC, Chopsticks, and Esplora. It defaults to `DEFAULT_MAX_RESPONSE_BYTES` (64 KiB) and is capped at `MAX_RESPONSE_BYTES_LIMIT` (16 MiB). Anything past the configured limit is rejected rather than buffered. Raise it for methods with large results:
+One `NigiriConfig::max_response_bytes` limit applies to every response body: node JSON-RPC and Esplora. It defaults to `DEFAULT_MAX_RESPONSE_BYTES` (64 KiB) and is capped at `MAX_RESPONSE_BYTES_LIMIT` (16 MiB). Anything past the configured limit is rejected rather than buffered. Raise it for methods with large results:
 
 ```rust,no_run
 use nigiri_rs::{Bitcoin, DEFAULT_MAX_RESPONSE_BYTES, NigiriClient, NigiriConfig};
@@ -129,6 +131,8 @@ let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
 ```
 
 Arbitrary RPC methods may mutate node wallets or active chain state. Tests using mutating RPCs must coordinate host access and restore valid state. This API does not start, stop, delete, or otherwise manage Nigiri.
+
+`faucet` writes directly through the configured node wallet RPC and `broadcast_tx` writes directly through the configured node RPC. Each first commits its transaction, then mines exactly one block. If that mining step fails after a commit, both return `NigiriError::PostTransactionMiningFailed` with the committed transaction ID; inspect node state before retrying.
 
 `NigiriConfig::timeout` bounds each HTTP operation against an already-running node or service. A timeout says the client did not receive a response in time; a mutating request may still have committed, so inspect node state before retrying.
 

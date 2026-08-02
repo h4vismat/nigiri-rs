@@ -8,7 +8,7 @@ use crate::{
     http::{endpoint, send_bounded},
 };
 
-/// Typed client for an already-running Nigiri network.
+/// Typed client for configured regtest services.
 #[derive(Debug, Clone)]
 pub struct NigiriClient<N: NigiriNetwork> {
     pub(crate) config: NigiriConfig,
@@ -97,7 +97,12 @@ impl<N: NigiriNetwork> NigiriClient<N> {
             .map_err(|_| invalid(OPERATION, "decimal height"))
     }
 
-    /// Funds an address and returns the native funding transaction identifier.
+    /// Funds an address through the node wallet RPC, mines exactly one block, and
+    /// returns the native funding transaction identifier.
+    ///
+    /// If the wallet funding transaction commits but the subsequent mining fails,
+    /// returns [`NigiriError::PostTransactionMiningFailed`] with the committed
+    /// transaction identifier. Inspect node state before retrying.
     pub async fn faucet(
         &self,
         address: &str,
@@ -189,7 +194,11 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         N::parse_tx_status(OPERATION, &body)
     }
 
-    /// Broadcasts a raw transaction through the node, then mines a block.
+    /// Broadcasts a raw transaction through the node RPC, then mines exactly one block.
+    ///
+    /// If the broadcast commits but the subsequent mining fails, returns
+    /// [`NigiriError::PostTransactionMiningFailed`] with the committed transaction
+    /// identifier. Inspect node state before retrying.
     pub async fn broadcast_tx(&self, transaction_hex: &str) -> Result<N::Txid, NigiriError> {
         const OPERATION: &str = "broadcast transaction";
         let value: String =

@@ -1,7 +1,8 @@
-//! Typed Bitcoin and Liquid clients for an already-running Nigiri regtest environment.
+//! Typed clients for compatible Bitcoin and Liquid regtest services.
 //!
-//! Nigiri's lifecycle is owned by the host application. This crate never starts,
-//! stops, deletes, or otherwise manages Nigiri or its Docker resources.
+//! This lifecycle-neutral core crate does not provision services. For a companion
+//! fixture crate that owns service lifecycle, use `nigiri-testcontainers` once it
+//! is available.
 //!
 //! # Clients
 //!
