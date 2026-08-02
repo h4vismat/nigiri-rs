@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "Typed Bitcoin and Liquid clients for host-owned Nigiri regtest infrastructure"
+description = "Typed Bitcoin and Liquid regtest service clients"
 repository = "https://github.com/h4vismat/nigiri-rs"
 
 [features]
