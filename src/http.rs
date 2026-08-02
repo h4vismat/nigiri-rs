@@ -75,17 +75,6 @@ fn bounded_error_text(body: &[u8], exceeded: bool, sensitive: &[&str]) -> String
     text
 }
 
-pub(crate) fn parse_txid<N: NigiriNetwork>(
-    operation: &'static str,
-    body: &[u8],
-) -> Result<N::Txid, NigiriError> {
-    let text = std::str::from_utf8(body).map_err(|_| NigiriError::InvalidResponse {
-        operation: operation.into(),
-        detail: "expected a UTF-8 transaction identifier".to_owned(),
-    })?;
-    N::parse_txid(operation, text)
-}
-
 pub(crate) fn endpoint(
     base: &url::Url,
     operation: &'static str,

@@ -327,3 +327,74 @@ async fn faucet_preserves_committed_txid_when_confirmation_mining_fails() {
     assert_eq!(requests[0]["method"], "sendtoaddress");
     assert_eq!(requests[1]["method"], "getnewaddress");
 }
+
+#[tokio::test]
+async fn broadcast_uses_node_rpc_then_mines_one_block() {
+    let (url, requests) = sequential_rpc_server(vec![
+        ("200 OK", rpc_response(serde_json::json!(SEND_TXID))),
+        (
+            "200 OK",
+            rpc_response(serde_json::json!(BITCOIN_MINING_ADDRESS)),
+        ),
+        ("200 OK", rpc_response(serde_json::json!([BLOCK_HASH]))),
+    ])
+    .await;
+    let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+        node_rpc_url: url,
+        timeout: Duration::from_secs(2),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let txid = client.broadcast_tx("02000000000100").await.unwrap();
+    assert_eq!(txid.to_string(), SEND_TXID);
+
+    let requests = requests.await.unwrap();
+    assert_eq!(requests[0]["method"], "sendrawtransaction");
+    assert_eq!(requests[0]["params"], serde_json::json!(["02000000000100"]));
+    assert_eq!(requests[1]["method"], "getnewaddress");
+    assert_eq!(requests[2]["method"], "generatetoaddress");
+}
+
+#[tokio::test]
+async fn broadcast_preserves_committed_txid_when_confirmation_mining_fails() {
+    let (url, requests) = sequential_rpc_server(vec![
+        ("200 OK", rpc_response(serde_json::json!(SEND_TXID))),
+        (
+            "200 OK",
+            rpc_response(serde_json::json!(BITCOIN_MINING_ADDRESS)),
+        ),
+        (
+            "200 OK",
+            serde_json::json!({
+                "result": null,
+                "error": {"code": -1, "message": "mining unavailable"},
+                "id": "nigiri-rs"
+            })
+            .to_string(),
+        ),
+    ])
+    .await;
+    let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+        node_rpc_url: url,
+        timeout: Duration::from_secs(2),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let error = client.broadcast_tx("02000000000100").await.unwrap_err();
+    assert!(matches!(
+        error,
+        NigiriError::PostTransactionMiningFailed {
+            ref txid,
+            source,
+            ..
+        } if txid == SEND_TXID && matches!(*source, NigiriError::RpcFailed { code: -1, .. })
+    ));
+
+    let requests = requests.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0]["method"], "sendrawtransaction");
+    assert_eq!(requests[1]["method"], "getnewaddress");
+    assert_eq!(requests[2]["method"], "generatetoaddress");
+}

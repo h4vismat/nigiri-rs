@@ -5,7 +5,7 @@ use url::Url;
 
 use crate::{
     Bitcoin, Liquid, NigiriConfig, NigiriError, NigiriNetwork, TxStatus,
-    http::{endpoint, parse_txid, send_bounded},
+    http::{endpoint, send_bounded},
 };
 
 /// Typed client for an already-running Nigiri network.
@@ -189,18 +189,14 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         N::parse_tx_status(OPERATION, &body)
     }
 
-    /// Broadcasts a raw transaction through Chopsticks, which mines a block.
+    /// Broadcasts a raw transaction through the node, then mines a block.
     pub async fn broadcast_tx(&self, transaction_hex: &str) -> Result<N::Txid, NigiriError> {
         const OPERATION: &str = "broadcast transaction";
-        let url = endpoint(&self.config.chopsticks_url, OPERATION, &["tx"])?;
-        let body = send_bounded(
-            self,
-            OPERATION,
-            self.http.post(url).body(transaction_hex.to_owned()),
-            &[transaction_hex],
-        )
-        .await?;
-        parse_txid::<N>(OPERATION, &body)
+        let value: String =
+            crate::node_rpc::call(self, "sendrawtransaction", (transaction_hex,)).await?;
+        let txid = N::parse_txid(OPERATION, &value)?;
+        self.mine_committed_transaction(OPERATION, &txid).await?;
+        Ok(txid)
     }
 
     /// Polls until a native transaction is confirmed or the supplied timeout elapses.
