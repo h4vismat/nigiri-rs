@@ -118,7 +118,6 @@ const LIQUID_MINING_ADDRESS: &str = "ert1qwhh2n5qypypm0eufahm2pvj8raj9zq5c27cysu
 
 fn config(base: Url) -> NigiriConfig {
     NigiriConfig {
-        chopsticks_url: base.clone(),
         esplora_url: base,
         timeout: Duration::from_secs(2),
         max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
@@ -130,7 +129,6 @@ fn config(base: Url) -> NigiriConfig {
 async fn configured_response_limit_rejects_oversized_esplora_success() {
     let (base, _) = one_shot_server("200 OK", "123456789".to_owned()).await;
     let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
-        chopsticks_url: base.clone(),
         esplora_url: base,
         max_response_bytes: 8,
         ..Default::default()

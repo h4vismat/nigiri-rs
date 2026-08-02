@@ -19,8 +19,6 @@ pub const MAX_RESPONSE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 /// Complete immutable configuration for a Nigiri client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NigiriConfig {
-    /// Chopsticks HTTP endpoint.
-    pub chopsticks_url: Url,
     /// Esplora HTTP endpoint.
     pub esplora_url: Url,
     /// Node JSON-RPC endpoint. Bitcoin defaults to port 18443; Liquid to 18884.
@@ -34,7 +32,7 @@ pub struct NigiriConfig {
     pub node_rpc_password: String,
     /// Maximum duration of one HTTP request and response operation.
     pub timeout: Duration,
-    /// Maximum bytes retained from one node RPC, Chopsticks, or Esplora response body.
+    /// Maximum bytes retained from one node RPC or Esplora response body.
     ///
     /// Anything past this limit is rejected rather than buffered, so raise it
     /// deliberately for methods whose results are large (`listunspent`,
@@ -49,7 +47,6 @@ pub struct NigiriConfig {
     ///
     /// # fn main() -> Result<(), nigiri_rs::NigiriError> {
     /// let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
-    ///     chopsticks_url: "http://localhost:3000".parse().unwrap(),
     ///     esplora_url: "http://localhost:30000".parse().unwrap(),
     ///     timeout: std::time::Duration::from_secs(30),
     ///     max_response_bytes: 4 * DEFAULT_MAX_RESPONSE_BYTES,
@@ -64,24 +61,15 @@ pub struct NigiriConfig {
 
 impl NigiriConfig {
     pub(crate) fn bitcoin() -> Self {
-        Self::defaults(
-            "http://localhost:3000",
-            "http://localhost:30000",
-            "http://localhost:18443/",
-        )
+        Self::defaults("http://localhost:30000", "http://localhost:18443/")
     }
 
     pub(crate) fn liquid() -> Self {
-        Self::defaults(
-            "http://localhost:3001",
-            "http://localhost:30001",
-            "http://localhost:18884/",
-        )
+        Self::defaults("http://localhost:30001", "http://localhost:18884/")
     }
 
-    fn defaults(chopsticks_url: &str, esplora_url: &str, node_rpc_url: &str) -> Self {
+    fn defaults(esplora_url: &str, node_rpc_url: &str) -> Self {
         Self {
-            chopsticks_url: Url::parse(chopsticks_url).expect("static Nigiri URL is valid"),
             esplora_url: Url::parse(esplora_url).expect("static Nigiri URL is valid"),
             node_rpc_url: Url::parse(node_rpc_url).expect("static Nigiri URL is valid"),
             node_rpc_user: "admin1".to_owned(),
@@ -92,7 +80,6 @@ impl NigiriConfig {
     }
 
     pub(crate) fn validate_and_normalize(mut self) -> Result<Self, NigiriError> {
-        normalize_url(&mut self.chopsticks_url)?;
         normalize_url(&mut self.esplora_url)?;
         normalize_url(&mut self.node_rpc_url)?;
 
@@ -116,7 +103,7 @@ impl NigiriConfig {
 impl Default for NigiriConfig {
     /// Returns the Bitcoin service defaults.
     ///
-    /// A custom [`crate::NigiriClient<crate::Liquid>`] must override all three
+    /// A custom [`crate::NigiriClient<crate::Liquid>`] must override both
     /// service URLs, including [`NigiriConfig::node_rpc_url`].
     fn default() -> Self {
         Self::bitcoin()
@@ -154,13 +141,11 @@ mod tests {
     use super::{DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT, NigiriConfig};
 
     #[test]
-    fn verified_network_defaults_include_both_service_endpoints() {
+    fn verified_network_defaults_include_esplora_and_node_endpoints() {
         let bitcoin = NigiriConfig::bitcoin();
         let liquid = NigiriConfig::liquid();
 
-        assert_eq!(bitcoin.chopsticks_url.as_str(), "http://localhost:3000/");
         assert_eq!(bitcoin.esplora_url.as_str(), "http://localhost:30000/");
-        assert_eq!(liquid.chopsticks_url.as_str(), "http://localhost:3001/");
         assert_eq!(liquid.esplora_url.as_str(), "http://localhost:30001/");
         assert_eq!(bitcoin.node_rpc_url.as_str(), "http://localhost:18443/");
         assert_eq!(liquid.node_rpc_url.as_str(), "http://localhost:18884/");
@@ -172,15 +157,10 @@ mod tests {
     }
 
     #[test]
-    fn default_configuration_uses_bitcoin_defaults() {
-        assert_eq!(NigiriConfig::default(), NigiriConfig::bitcoin());
-    }
-
-    #[test]
     fn custom_configuration_normalizes_each_base_url() {
         let config = NigiriConfig {
-            chopsticks_url: "https://fixture.invalid/chopsticks".parse().unwrap(),
             esplora_url: "http://fixture.invalid/esplora".parse().unwrap(),
+            node_rpc_url: "https://fixture.invalid/rpc".parse().unwrap(),
             timeout: Duration::from_secs(9),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             ..Default::default()
@@ -189,26 +169,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            config.chopsticks_url.as_str(),
-            "https://fixture.invalid/chopsticks/"
-        );
-        assert_eq!(
             config.esplora_url.as_str(),
             "http://fixture.invalid/esplora/"
         );
-        assert_eq!(config.timeout, Duration::from_secs(9));
-    }
-
-    #[test]
-    fn custom_node_rpc_url_is_normalized() {
-        let config = NigiriConfig {
-            node_rpc_url: "https://fixture.invalid/rpc".parse().unwrap(),
-            ..Default::default()
-        }
-        .validate_and_normalize()
-        .unwrap();
-
         assert_eq!(config.node_rpc_url.as_str(), "https://fixture.invalid/rpc/");
+        assert_eq!(config.timeout, Duration::from_secs(9));
     }
 
     #[test]

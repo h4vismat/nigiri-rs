@@ -209,7 +209,6 @@ use nigiri_rs::{Bitcoin, NigiriClient, NigiriConfig};
 use url::Url;
 
 let config = NigiriConfig {
-    chopsticks_url: Url::parse("http://regtest-host:4300")?,
     esplora_url: Url::parse("http://regtest-host:4301")?,
     node_rpc_url: Url::parse("http://regtest-host:18443")?,
     node_rpc_user: "admin1".to_owned(),
@@ -224,7 +223,7 @@ let client = NigiriClient::<Bitcoin>::with_config(config)?;
 
 Construction accepts only HTTP(S) base URLs, normalizes their trailing slash, rejects query/fragment components, and requires a nonzero timeout and response limit. `NigiriConfig::default()` provides the Bitcoin endpoint and public regtest node credentials; `NigiriClient::<Liquid>::new()` selects the Liquid defaults. Cloning a client clones only immutable configuration and the shared HTTP transport; it never implies ownership of an external process.
 
-`NigiriConfig::default()` is Bitcoin-specific. For a custom `NigiriClient<Liquid>`, override the Chopsticks, Esplora, and node JSON-RPC URLs rather than relying on struct update syntax alone.
+`NigiriConfig::default()` is Bitcoin-specific. For a custom `NigiriClient<Liquid>`, override the Esplora and node JSON-RPC URLs rather than relying on struct update syntax alone.
 
 ## Typed network differences
 

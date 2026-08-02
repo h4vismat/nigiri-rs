@@ -274,7 +274,6 @@ mod tests {
     #[tokio::test]
     async fn a_zero_response_limit_is_rejected_during_configuration() {
         let error = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
-            chopsticks_url: Url::parse("http://127.0.0.1:1").unwrap(),
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             timeout: Duration::from_secs(1),
             max_response_bytes: 0,
@@ -296,7 +295,6 @@ mod tests {
         // An unbounded ceiling would let one RPC failure allocate its way to an
         // out-of-memory abort while formatting the error.
         let error = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
-            chopsticks_url: Url::parse("http://127.0.0.1:1").unwrap(),
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             timeout: Duration::from_secs(1),
             max_response_bytes: crate::MAX_RESPONSE_BYTES_LIMIT + 1,
@@ -314,7 +312,6 @@ mod tests {
 
         // The boundary itself must be accepted.
         NigiriClient::<Bitcoin>::with_config(NigiriConfig {
-            chopsticks_url: Url::parse("http://127.0.0.1:1").unwrap(),
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             timeout: Duration::from_secs(1),
             max_response_bytes: crate::MAX_RESPONSE_BYTES_LIMIT,
@@ -326,7 +323,6 @@ mod tests {
     #[tokio::test]
     async fn zero_block_generation_is_rejected_before_transport() {
         let config = NigiriConfig {
-            chopsticks_url: Url::parse("http://127.0.0.1:1").unwrap(),
             esplora_url: Url::parse("http://127.0.0.1:1").unwrap(),
             node_rpc_url: Url::parse("http://127.0.0.1:1").unwrap(),
             timeout: Duration::from_secs(1),

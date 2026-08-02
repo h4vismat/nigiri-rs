@@ -49,7 +49,6 @@ fn explicit_network_markers_select_native_types_and_defaults() {
 #[test]
 fn custom_configuration_is_normalized_once() {
     let config = NigiriConfig {
-        chopsticks_url: Url::parse("http://127.0.0.1:4100/api").unwrap(),
         esplora_url: Url::parse("http://127.0.0.1:4200/api").unwrap(),
         timeout: Duration::from_secs(7),
         max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
@@ -64,8 +63,7 @@ fn custom_configuration_is_normalized_once() {
 #[test]
 fn invalid_configuration_is_rejected() {
     let config = NigiriConfig {
-        chopsticks_url: Url::parse("ftp://127.0.0.1/faucet").unwrap(),
-        esplora_url: Url::parse("http://127.0.0.1:4200").unwrap(),
+        esplora_url: Url::parse("ftp://127.0.0.1/esplora").unwrap(),
         timeout: Duration::from_secs(7),
         max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         ..Default::default()
