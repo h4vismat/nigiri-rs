@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use url::Url;
 
@@ -32,8 +32,6 @@ pub struct NigiriConfig {
     /// These values are deliberately visible in derived [`Debug`] output because
     /// Nigiri publishes them as fixed regtest defaults; they are not production secrets.
     pub node_rpc_password: String,
-    /// Legacy Nigiri executable path retained for configuration compatibility until Phase 3.
-    pub executable: PathBuf,
     /// Maximum duration of one HTTP request and response operation.
     pub timeout: Duration,
     /// Maximum bytes retained from one node RPC, Chopsticks, or Esplora response body.
@@ -53,7 +51,6 @@ pub struct NigiriConfig {
     /// let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
     ///     chopsticks_url: "http://localhost:3000".parse().unwrap(),
     ///     esplora_url: "http://localhost:30000".parse().unwrap(),
-    ///     executable: "nigiri".into(),
     ///     timeout: std::time::Duration::from_secs(30),
     ///     max_response_bytes: 4 * DEFAULT_MAX_RESPONSE_BYTES,
     ///     ..Default::default()
@@ -89,7 +86,6 @@ impl NigiriConfig {
             node_rpc_url: Url::parse(node_rpc_url).expect("static Nigiri URL is valid"),
             node_rpc_user: "admin1".to_owned(),
             node_rpc_password: "123".to_owned(),
-            executable: PathBuf::from("nigiri"),
             timeout: DEFAULT_TIMEOUT,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         }
@@ -100,9 +96,6 @@ impl NigiriConfig {
         normalize_url(&mut self.esplora_url)?;
         normalize_url(&mut self.node_rpc_url)?;
 
-        if self.executable.as_os_str().is_empty() {
-            return Err(invalid_configuration("executable path must not be empty"));
-        }
         if self.timeout.is_zero() {
             return Err(invalid_configuration("timeout must be greater than zero"));
         }
@@ -156,7 +149,7 @@ fn invalid_configuration(detail: &'static str) -> NigiriError {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::time::Duration;
 
     use super::{DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT, NigiriConfig};
 
@@ -175,7 +168,6 @@ mod tests {
         assert_eq!(liquid.node_rpc_user, "admin1");
         assert_eq!(bitcoin.node_rpc_password, "123");
         assert_eq!(liquid.node_rpc_password, "123");
-        assert_eq!(bitcoin.executable, PathBuf::from("nigiri"));
         assert_eq!(liquid.timeout, DEFAULT_TIMEOUT);
     }
 
@@ -189,7 +181,6 @@ mod tests {
         let config = NigiriConfig {
             chopsticks_url: "https://fixture.invalid/chopsticks".parse().unwrap(),
             esplora_url: "http://fixture.invalid/esplora".parse().unwrap(),
-            executable: PathBuf::from("/opt/nigiri"),
             timeout: Duration::from_secs(9),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             ..Default::default()
@@ -205,7 +196,6 @@ mod tests {
             config.esplora_url.as_str(),
             "http://fixture.invalid/esplora/"
         );
-        assert_eq!(config.executable, PathBuf::from("/opt/nigiri"));
         assert_eq!(config.timeout, Duration::from_secs(9));
     }
 
