@@ -1,7 +1,6 @@
 use std::{marker::PhantomData, str::FromStr, time::Duration};
 
 use bitcoin::Denomination;
-use serde::Deserialize;
 use url::Url;
 
 use crate::{
@@ -105,33 +104,39 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         amount: Option<bitcoin::Amount>,
     ) -> Result<N::Txid, NigiriError> {
         const OPERATION: &str = "faucet";
-        let url = endpoint(&self.config.chopsticks_url, OPERATION, &["faucet"])?;
-        let amount_text = amount.map(|value| value.to_string_in(Denomination::Bitcoin));
-        let mut request = serde_json::Map::new();
-        request.insert(
-            "address".to_owned(),
-            serde_json::Value::String(address.to_owned()),
-        );
-        if let Some(value) = amount_text.as_deref() {
-            let number = serde_json::Number::from_str(value)
-                .map_err(|_| invalid(OPERATION, "exact BTC amount"))?;
-            request.insert("amount".to_owned(), serde_json::Value::Number(number));
-        }
-        let body = send_bounded(
+        let amount = amount.unwrap_or(bitcoin::Amount::ONE_BTC);
+        let amount = serde_json::Number::from_str(&amount.to_string_in(Denomination::Bitcoin))
+            .map_err(|_| NigiriError::InvalidRequest {
+                detail: "faucet amount could not be represented as JSON".into(),
+            })?;
+        let value: String = crate::node_rpc::call(
             self,
-            OPERATION,
-            self.http.post(url).json(&request),
-            &[address, amount_text.as_deref().unwrap_or("")],
+            "sendtoaddress",
+            N::native_send_params(address, amount),
         )
         .await?;
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct FaucetResponse {
-            tx_id: String,
+        let txid = N::parse_txid(OPERATION, &value)?;
+        self.mine_committed_transaction(OPERATION, &txid).await?;
+        Ok(txid)
+    }
+
+    async fn mine_committed_transaction(
+        &self,
+        operation: &'static str,
+        txid: &N::Txid,
+    ) -> Result<(), NigiriError> {
+        let result = async {
+            let address = self.new_address().await?;
+            self.generate_to_address(1, &address.to_string()).await?;
+            Ok::<(), NigiriError>(())
         }
-        let response: FaucetResponse =
-            serde_json::from_slice(&body).map_err(|_| invalid(OPERATION, "faucet response"))?;
-        N::parse_txid(OPERATION, &response.tx_id)
+        .await;
+
+        result.map_err(|source| NigiriError::PostTransactionMiningFailed {
+            operation: operation.into(),
+            txid: txid.to_string(),
+            source: Box::new(source),
+        })
     }
 
     /// Returns the UTXOs associated with an address path.
