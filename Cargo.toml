@@ -24,3 +24,7 @@ url = "2.5.8"
 
 [dev-dependencies]
 fs2 = "0.4.3"
+
+[workspace]
+members = [".", "crates/nigiri-testcontainers"]
+resolver = "2"

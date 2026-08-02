@@ -19,9 +19,12 @@ pub const MAX_RESPONSE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 /// Complete immutable client configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NigiriConfig {
-    /// Esplora HTTP endpoint.
+    /// Esplora HTTP base URL.
     pub esplora_url: Url,
-    /// Node JSON-RPC endpoint. Bitcoin defaults to port 18443; Liquid to 18884.
+    /// Exact node JSON-RPC endpoint URL. Bitcoin defaults to port 18443; Liquid to 18884.
+    ///
+    /// The path is preserved exactly so callers can target a wallet-specific Bitcoin Core RPC
+    /// endpoint such as `/wallet/name`.
     pub node_rpc_url: Url,
     /// Node JSON-RPC username. The default is Nigiri's public regtest user `admin1`.
     pub node_rpc_user: String,
@@ -80,8 +83,9 @@ impl NigiriConfig {
     }
 
     pub(crate) fn validate_and_normalize(mut self) -> Result<Self, NigiriError> {
-        normalize_url(&mut self.esplora_url)?;
-        normalize_url(&mut self.node_rpc_url)?;
+        validate_endpoint_url(&self.esplora_url)?;
+        validate_endpoint_url(&self.node_rpc_url)?;
+        normalize_base_url(&mut self.esplora_url);
 
         if self.timeout.is_zero() {
             return Err(invalid_configuration("timeout must be greater than zero"));
@@ -110,7 +114,7 @@ impl Default for NigiriConfig {
     }
 }
 
-fn normalize_url(url: &mut Url) -> Result<(), NigiriError> {
+fn validate_endpoint_url(url: &Url) -> Result<(), NigiriError> {
     if !matches!(url.scheme(), "http" | "https") || url.cannot_be_a_base() {
         return Err(invalid_configuration(
             "endpoint URLs must use HTTP or HTTPS and support relative paths",
@@ -121,11 +125,14 @@ fn normalize_url(url: &mut Url) -> Result<(), NigiriError> {
             "endpoint URLs must not contain a query or fragment",
         ));
     }
+    Ok(())
+}
+
+fn normalize_base_url(url: &mut Url) {
     if !url.path().ends_with('/') {
         let normalized = format!("{}/", url.path());
         url.set_path(&normalized);
     }
-    Ok(())
 }
 
 fn invalid_configuration(detail: &'static str) -> NigiriError {
@@ -157,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_configuration_normalizes_each_base_url() {
+    fn custom_esplora_base_url_normalizes_without_changing_node_rpc_endpoint() {
         let config = NigiriConfig {
             esplora_url: "http://fixture.invalid/esplora".parse().unwrap(),
             node_rpc_url: "https://fixture.invalid/rpc".parse().unwrap(),
@@ -172,8 +179,39 @@ mod tests {
             config.esplora_url.as_str(),
             "http://fixture.invalid/esplora/"
         );
-        assert_eq!(config.node_rpc_url.as_str(), "https://fixture.invalid/rpc/");
+        assert_eq!(config.node_rpc_url.as_str(), "https://fixture.invalid/rpc");
         assert_eq!(config.timeout, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn custom_wallet_node_rpc_endpoint_preserves_path_without_trailing_slash() {
+        let config = NigiriConfig {
+            node_rpc_url: "http://fixture.invalid/wallet/name".parse().unwrap(),
+            ..Default::default()
+        }
+        .validate_and_normalize()
+        .unwrap();
+
+        assert_eq!(
+            config.node_rpc_url.as_str(),
+            "http://fixture.invalid/wallet/name"
+        );
+    }
+
+    #[test]
+    fn endpoint_urls_reject_queries_and_fragments() {
+        for config in [
+            NigiriConfig {
+                esplora_url: "http://fixture.invalid/esplora?cursor=1".parse().unwrap(),
+                ..Default::default()
+            },
+            NigiriConfig {
+                node_rpc_url: "http://fixture.invalid/rpc#fragment".parse().unwrap(),
+                ..Default::default()
+            },
+        ] {
+            assert!(config.validate_and_normalize().is_err());
+        }
     }
 
     #[test]
