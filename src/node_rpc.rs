@@ -32,6 +32,34 @@ where
     P: Serialize,
     R: DeserializeOwned,
 {
+    call_with_sensitive(client, method, params, &[]).await
+}
+
+pub(crate) async fn call_sensitive<N, P, R>(
+    client: &NigiriClient<N>,
+    method: &str,
+    params: P,
+    sensitive: &[&str],
+) -> Result<R, NigiriError>
+where
+    N: NigiriNetwork,
+    P: Serialize,
+    R: DeserializeOwned,
+{
+    call_with_sensitive(client, method, params, sensitive).await
+}
+
+async fn call_with_sensitive<N, P, R>(
+    client: &NigiriClient<N>,
+    method: &str,
+    params: P,
+    sensitive: &[&str],
+) -> Result<R, NigiriError>
+where
+    N: NigiriNetwork,
+    P: Serialize,
+    R: DeserializeOwned,
+{
     let mut params = serde_json::to_value(params).map_err(|_| NigiriError::InvalidRequest {
         detail: "node RPC parameters could not be serialized".into(),
     })?;
@@ -67,7 +95,10 @@ where
             return Err(NigiriError::HttpStatus {
                 operation: method.to_owned().into(),
                 status,
-                body: String::from_utf8_lossy(&body).into_owned(),
+                body: crate::http::redact_sensitive(
+                    String::from_utf8_lossy(&body).into_owned(),
+                    sensitive,
+                ),
             });
         }
         Err(_) => {
@@ -82,7 +113,7 @@ where
         return Err(NigiriError::RpcFailed {
             method: method.to_owned().into(),
             code: error.code,
-            message: error.message,
+            message: crate::http::redact_sensitive(error.message, sensitive),
         });
     }
 

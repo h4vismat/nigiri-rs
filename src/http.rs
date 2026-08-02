@@ -65,12 +65,16 @@ async fn read_bounded(
 }
 
 fn bounded_error_text(body: &[u8], exceeded: bool, sensitive: &[&str]) -> String {
-    let mut text = String::from_utf8_lossy(body).into_owned();
-    for value in sensitive.iter().filter(|value| !value.is_empty()) {
-        text = text.replace(value, "[redacted]");
-    }
+    let mut text = redact_sensitive(String::from_utf8_lossy(body).into_owned(), sensitive);
     if exceeded {
         text.push_str("…[truncated]");
+    }
+    text
+}
+
+pub(crate) fn redact_sensitive(mut text: String, sensitive: &[&str]) -> String {
+    for value in sensitive.iter().filter(|value| !value.is_empty()) {
+        text = text.replace(value, "[redacted]");
     }
     text
 }

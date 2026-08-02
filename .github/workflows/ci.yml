@@ -45,9 +45,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 1.85 is the rust-version floor declared in Cargo.toml. stable catches
+        # 1.88 is the rust-version floor declared in Cargo.toml. stable catches
         # regressions from newer compilers.
-        toolchain: ["1.85", stable]
+        toolchain: ["1.88", stable]
         # Default features alone never compile tests/rpc_types_feature.rs or the
         # gated test in tests/rpc_api.rs, so both columns are required to know the
         # optional feature still works.

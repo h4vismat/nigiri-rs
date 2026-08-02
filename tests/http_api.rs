@@ -248,6 +248,38 @@ async fn bitcoin_faucet_default_amount_is_a_native_json_number() {
 }
 
 #[tokio::test]
+async fn faucet_redacts_address_and_exact_amount_from_http_status_body() {
+    let address = "bcrt1qcallerfundingaddress";
+    let amount_text = "0.00000001";
+    let body = format!("wallet rejected address {address} and amount {amount_text}");
+    let (url, requests) = sequential_rpc_server(vec![("502 Bad Gateway", body)]).await;
+    let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+        node_rpc_url: url,
+        timeout: Duration::from_secs(2),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let error = client
+        .faucet(address, Some(Amount::from_sat(1)))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        NigiriError::HttpStatus {
+            status,
+            ref body,
+            ..
+        } if status.as_u16() == 502
+            && body == "wallet rejected address [redacted] and amount [redacted]"
+    ));
+    let requests = requests.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"], "sendtoaddress");
+}
+
+#[tokio::test]
 async fn liquid_faucet_sends_native_vector_then_mines_one_block() {
     let (url, requests) = sequential_rpc_server(vec![
         ("200 OK", rpc_response(serde_json::json!(SEND_TXID))),
@@ -352,6 +384,41 @@ async fn broadcast_uses_node_rpc_then_mines_one_block() {
     assert_eq!(requests[0]["params"], serde_json::json!(["02000000000100"]));
     assert_eq!(requests[1]["method"], "getnewaddress");
     assert_eq!(requests[2]["method"], "generatetoaddress");
+}
+
+#[tokio::test]
+async fn broadcast_redacts_transaction_hex_from_rpc_error_message() {
+    let transaction_hex = "02000000000100callertransaction";
+    let body = serde_json::json!({
+        "result": null,
+        "error": {
+            "code": -26,
+            "message": format!("transaction {transaction_hex} rejected")
+        },
+        "id": "nigiri-rs"
+    })
+    .to_string();
+    let (url, requests) = sequential_rpc_server(vec![("500 Internal Server Error", body)]).await;
+    let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+        node_rpc_url: url,
+        timeout: Duration::from_secs(2),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let error = client.broadcast_tx(transaction_hex).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        NigiriError::RpcFailed {
+            code: -26,
+            ref message,
+            ..
+        } if message == "transaction [redacted] rejected"
+    ));
+    let requests = requests.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"], "sendrawtransaction");
 }
 
 #[tokio::test]

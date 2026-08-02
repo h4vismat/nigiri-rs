@@ -31,7 +31,7 @@ Surfaced by the 0.3.0 specialist review:
 **Completed:** current main
 
 `.github/workflows/ci.yml` runs formatting, Clippy with warnings denied, default- and
-all-feature target tests on Rust 1.85 and stable, all-feature doctests, packaging checks,
+all-feature target tests on Rust 1.88 and stable, all-feature doctests, packaging checks,
 and separately gated host suites.
 
 ### Bound `max_rpc_response_bytes` from above

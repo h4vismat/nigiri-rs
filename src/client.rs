@@ -110,14 +110,17 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     ) -> Result<N::Txid, NigiriError> {
         const OPERATION: &str = "faucet";
         let amount = amount.unwrap_or(bitcoin::Amount::ONE_BTC);
-        let amount = serde_json::Number::from_str(&amount.to_string_in(Denomination::Bitcoin))
-            .map_err(|_| NigiriError::InvalidRequest {
+        let amount_text = amount.to_string_in(Denomination::Bitcoin);
+        let amount = serde_json::Number::from_str(&amount_text).map_err(|_| {
+            NigiriError::InvalidRequest {
                 detail: "faucet amount could not be represented as JSON".into(),
-            })?;
-        let value: String = crate::node_rpc::call(
+            }
+        })?;
+        let value: String = crate::node_rpc::call_sensitive(
             self,
             "sendtoaddress",
             N::native_send_params(address, amount),
+            &[address, &amount_text],
         )
         .await?;
         let txid = N::parse_txid(OPERATION, &value)?;
@@ -201,8 +204,13 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     /// identifier. Inspect node state before retrying.
     pub async fn broadcast_tx(&self, transaction_hex: &str) -> Result<N::Txid, NigiriError> {
         const OPERATION: &str = "broadcast transaction";
-        let value: String =
-            crate::node_rpc::call(self, "sendrawtransaction", (transaction_hex,)).await?;
+        let value: String = crate::node_rpc::call_sensitive(
+            self,
+            "sendrawtransaction",
+            (transaction_hex,),
+            &[transaction_hex],
+        )
+        .await?;
         let txid = N::parse_txid(OPERATION, &value)?;
         self.mine_committed_transaction(OPERATION, &txid).await?;
         Ok(txid)
