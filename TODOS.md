@@ -24,9 +24,6 @@ Surfaced by the 0.3.0 specialist review:
 - `LiquidBlockchainInfo` is declared in both `tests/rpc_api.rs` and `tests/host_liquid.rs` with
   the same three fields but `blocks: i64` in one and `u64` in the other. The divergence is
   arbitrary.
-- The fixture's payload sizes (`70000`, `60000`) are duplicated as bare Rust literals whose
-  only significance is straddling `DEFAULT_MAX_RPC_RESPONSE_BYTES`. Nothing names the relation,
-  so changing the default breaks the tests with no indication which side is wrong.
 ## Completed
 
 ### Exercise all feature combinations in CI
@@ -50,7 +47,7 @@ Chopsticks, and Esplora response bodies. The fixed Esplora-only `MAX_BODY_BYTES`
 
 `validate_and_normalize` rejected only zero, leaving the sole ceiling on process-output
 buffering unbounded above. Added `MAX_RPC_RESPONSE_BYTES_LIMIT` (16 MiB) and a rejection with
-a boundary test. The remaining error-excerpt half is tracked separately as P3.
+a boundary test.
 
 ### Use a distinct error variant for pre-spawn input rejection
 
