@@ -1,5 +1,9 @@
 //! Ephemeral Bitcoin regtest fixtures backed by Testcontainers.
 
+mod bitcoind;
+mod deadline;
+mod diagnostics;
+mod electrs;
 mod endpoint;
 mod error;
 mod image;
@@ -7,6 +11,13 @@ mod image;
 pub use endpoint::ElectrumEndpoint;
 pub use error::FixtureError;
 pub use image::ContainerImage;
+
+/// The fixture's regtest RPC credentials.
+///
+/// Declared once for the whole crate: the service requests, the client configuration, and the
+/// redaction patterns all derive from these, so they cannot drift apart.
+pub(crate) const RPC_USER: &str = "admin1";
+pub(crate) const RPC_PASSWORD: &str = "123";
 
 #[cfg(test)]
 const COMPATIBILITY_GATE_VERSION: &str = "nigiri-v0.5.17";

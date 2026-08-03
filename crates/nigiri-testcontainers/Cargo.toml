@@ -13,11 +13,16 @@ bitcoin-rpc-types = ["nigiri-rs/bitcoin-rpc-types"]
 
 [dependencies]
 nigiri-rs = { version = "0.3.0", path = "../.." }
-reqwest = { version = "0.13.2", features = ["json"] }
-serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 testcontainers = "0.27.3"
 thiserror = "2.0.18"
-tokio = { version = "1.50.0", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "test-util", "time"] }
+tokio = { version = "1.50.0", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
 url = "2.5.8"
 uuid = { version = "1.20.0", features = ["v4"] }
+
+[dev-dependencies]
+# Only the compatibility gate drives HTTP, sockets, subprocesses, and the pausable clock; the library
+# itself needs none of them.
+reqwest = { version = "0.13.2", features = ["json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.50.0", features = ["net", "process", "test-util"] }
