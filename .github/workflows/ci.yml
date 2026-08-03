@@ -37,7 +37,7 @@ jobs:
 
       # --all-features so the bitcoin-rpc-types surface is linted too.
       - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test (${{ matrix.toolchain }}, ${{ matrix.features }})
@@ -74,15 +74,15 @@ jobs:
           fi
 
       - name: cargo build
-        run: cargo build --all-targets ${{ steps.flags.outputs.cargo_features }}
+        run: cargo build --workspace --all-targets ${{ steps.flags.outputs.cargo_features }}
 
       # Host suites are #[ignore] and need a running Nigiri, so they stay out of
       # this job. The host-tests job below covers them.
       - name: cargo test
-        run: cargo test --all-targets ${{ steps.flags.outputs.cargo_features }}
+        run: cargo test --workspace --all-targets ${{ steps.flags.outputs.cargo_features }}
 
       - name: cargo test --doc
-        run: cargo test --doc ${{ steps.flags.outputs.cargo_features }}
+        run: cargo test --workspace --doc ${{ steps.flags.outputs.cargo_features }}
 
   packaging:
     name: Package for crates.io
@@ -101,14 +101,45 @@ jobs:
 
       # Catches missing files, bad metadata, and anything excluded from the
       # published tarball that the crate actually needs to build.
-      - name: cargo package
-        run: cargo package --all-features
+      - name: cargo package nigiri-rs
+        run: cargo package -p nigiri-rs --all-features
+
+      # --no-verify because verification would build the archive against a published nigiri-rs,
+      # and the path dependency it needs is not on crates.io yet.
+      - name: cargo package nigiri-testcontainers
+        run: cargo package -p nigiri-testcontainers --all-features --no-verify
+
+  bitcoin-fixture:
+    name: Bitcoin fixture suite
+    runs-on: ubuntu-latest
+    # Docker is preinstalled on the runner and is the only external service needed: each test starts
+    # its own regtest stack, so there is no Nigiri to install and no Compose file to bring up.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bitcoin-fixture
+
+      # --test-threads=1 keeps image pulls and container starts sequential on a shared runner.
+      - name: Bitcoin fixture suite
+        run: cargo test -p nigiri-testcontainers --test bitcoin_fixture --all-features -- --ignored --test-threads=1 --nocapture
+
+      # Proves the ephemeral promise: this one lives inside the crate because the identifiers of what
+      # a fixture created are deliberately not public.
+      - name: Fixture teardown proof
+        run: cargo test -p nigiri-testcontainers --lib --all-features dropping_a_fixture_removes_every_resource_it_created -- --ignored --nocapture
 
   host-tests:
-    name: Host suites against live Nigiri
+    name: Liquid host suite against live Nigiri
     runs-on: ubuntu-latest
-    # Only on master and on demand: booting Nigiri pulls several container images
-    # and the mutating suites need exclusive access to one chain.
+    # Only on master and on demand: booting Nigiri pulls several container images and the Liquid
+    # suite needs exclusive access to one chain. Bitcoin no longer runs here.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
@@ -142,10 +173,6 @@ jobs:
             done
             curl -fsS "http://localhost:$port/blocks/tip/height" >/dev/null
           done
-
-      # Bitcoin needs no host Nigiri: each test starts its own fixture and owns its chain.
-      - name: Bitcoin fixture suite
-        run: cargo test -p nigiri-testcontainers --test bitcoin_fixture --all-features -- --ignored --test-threads=1
 
       # --test-threads=1 is mandatory: the Liquid suite still reorgs a shared chain.
       - name: Liquid host suite

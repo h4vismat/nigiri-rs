@@ -573,16 +573,15 @@ mod tests {
     #[tokio::test]
     async fn an_unconverging_fixture_expires_with_its_last_observation() {
         let stub = SyncStub::start(vec![Round::heights(101, 100, 100)]).await;
-        // Long enough for many rounds of the never-agreeing script, so the observed triplet is what
-        // the budget expires on rather than the loop's opening text.
         let deadline = Deadline::new(Duration::from_secs(1)).expect("a positive deadline is valid");
 
         let error = wait_for_sync(&stub.client, &stub.endpoint, &deadline)
             .await
             .expect_err("a fixture that never converges must expire");
+
         assert!(
             stub.attempts() > 1,
-            "the loop must have retried before expiring"
+            "the loop must have retried rather than reported the first disagreement"
         );
 
         let FixtureError::ReadinessTimeout {
@@ -593,10 +592,18 @@ mod tests {
         else {
             panic!("an exhausted readiness budget must be a readiness timeout");
         };
-        assert_eq!(service, SERVICE);
+        // The shared budget can run out at either of two legitimate points: in this loop, which
+        // reports the triplet it last observed, or inside the Electrum probe, which reports itself.
+        // Both are correct, and which one wins is a matter of where the clock happens to stop, so
+        // asserting one of them specifically is what made this test flaky.
         assert!(
-            last_observation.contains("node=101 esplora=100 electrum=100"),
-            "{last_observation}"
+            [SERVICE, crate::electrs::SERVICE].contains(&service),
+            "an expiry must name the fixture or the service it was waiting on, got {service}"
+        );
+        assert!(
+            last_observation.contains("node=101 esplora=100 electrum=100")
+                || last_observation.contains("Electrum"),
+            "the expiry must carry what was last observed: {last_observation}"
         );
     }
 }

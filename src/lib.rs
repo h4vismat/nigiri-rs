@@ -1,8 +1,12 @@
 //! Typed clients for compatible Bitcoin and Liquid regtest services.
 //!
-//! This lifecycle-neutral core crate does not provision services. For a companion
-//! fixture crate that owns service lifecycle, use `nigiri-testcontainers` once it
-//! is available.
+//! This lifecycle-neutral core crate does not provision services: point it at a
+//! Nigiri installation or any compatible endpoints you already run.
+//!
+//! To have the services provisioned for you, use the companion `nigiri-testcontainers`
+//! crate in this workspace. It starts a throwaway Bitcoin regtest stack per test,
+//! hands back a client already pointed at it, and removes everything on drop. It
+//! needs Docker and no Nigiri installation. This crate does not depend on it.
 //!
 //! # Clients
 //!

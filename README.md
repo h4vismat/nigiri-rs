@@ -16,7 +16,7 @@ The host owns the complete lifecycle of its regtest services. This library provi
 - removes containers or volumes;
 - performs cleanup from `Drop`.
 
-Host-owned Nigiri remains a compatible setup; start it before using the default endpoints or an explicitly ignored host test. The forthcoming `nigiri-testcontainers` companion crate will provide fixture lifecycle separately, without adding a Docker or Testcontainers dependency to this core crate.
+Host-owned Nigiri remains a compatible setup; start it before using the default endpoints or an explicitly ignored host test. The `nigiri-testcontainers` companion crate in this workspace provides fixture lifecycle separately, and this core crate does not depend on it: no Docker or Testcontainers dependency is added here.
 
 Start the required services before running a client or an explicitly ignored host test:
 
@@ -29,6 +29,29 @@ nigiri start --liquid
 ```
 
 The verified CLI and port contract is Nigiri v0.5.16, commit `39fd5891d093bfb8c2575b79640b95a830834f9c`.
+
+## Provisioning services
+
+This crate does not start or stop anything. Two paths exist, and they can be used side by side.
+
+**Ephemeral fixtures.** The companion `nigiri-testcontainers` crate starts a throwaway Bitcoin regtest stack for a test and removes it afterwards:
+
+```rust
+use nigiri_testcontainers::BitcoinFixture;
+
+# async fn example() -> Result<(), nigiri_testcontainers::FixtureError> {
+let fixture = BitcoinFixture::start().await?;
+let client = fixture.client();
+let electrum_host = fixture.electrum_endpoint().host();
+let electrum_port = fixture.electrum_endpoint().port();
+# let _ = (client, electrum_host, electrum_port);
+# Ok(())
+# }
+```
+
+Docker must be running; no Nigiri installation is needed. Containers, their anonymous volumes, and the network are removed when the fixture is dropped. Ports are assigned by the runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a machine pulls two pinned images and is slow; later starts are ready in a few seconds. Bitcoin only: there is no Liquid fixture, and Podman is untested.
+
+**Services you run yourself.** Point `NigiriClient` at a host-owned Nigiri installation or any compatible endpoints, as the quick start below does. Nothing in this crate starts, stops, or deletes them.
 
 ## Quick start
 

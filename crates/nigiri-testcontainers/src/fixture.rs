@@ -306,13 +306,19 @@ mod tests {
         }
     }
 
-    // Catches a regression that leaves a container, volume, or network behind. This is the promise
-    // "ephemeral" makes, and it can only be checked from inside the crate: the identifiers of what a
-    // fixture created are deliberately not public.
+    /// The label Docker puts on a volume it created implicitly for a container.
+    const DOCKER_ANONYMOUS_VOLUME_LABEL: &str = "com.docker.volume.anonymous";
+
+    // Catches a regression that leaves a container, volume, or network behind, and one that gives a
+    // fixture storage outliving it. "Ephemeral" is the crate's whole promise, and it can only be
+    // checked from inside: the identifiers of what a fixture created are deliberately not public.
+    //
+    // Storage is asserted before the drop and absence after it, in one fixture, because starting a
+    // second one to check the other half would double the slowest test in the suite.
     #[tokio::test]
     #[ignore = "requires Docker and pulls pinned Bitcoin images"]
     async fn dropping_a_fixture_removes_every_resource_it_created() {
-        use testcontainers::bollard::Docker;
+        use testcontainers::bollard::{Docker, models::MountPointTypeEnum};
 
         let fixture = BitcoinFixture::start()
             .await
@@ -320,12 +326,70 @@ mod tests {
         let bitcoind = fixture.handles.bitcoin.id().to_owned();
         let electrs = fixture.handles.electrs.id().to_owned();
         let network = fixture.network.clone();
-        println!("created bitcoind={bitcoind} electrs={electrs} network={network}");
-
-        drop(fixture);
 
         let docker = Docker::connect_with_local_defaults()
             .expect("the daemon that just served the fixture is reachable");
+
+        // Every mount must be a volume Docker created for this container alone. A bind, a named
+        // volume, or a host path would outlive the fixture or be shared with something else.
+        let mut volumes = Vec::new();
+        for container in [&bitcoind, &electrs] {
+            let inspected = docker
+                .inspect_container(container, None)
+                .await
+                .expect("a running fixture container can be inspected");
+
+            for mount in inspected.mounts.unwrap_or_default() {
+                assert_eq!(
+                    mount.typ,
+                    Some(MountPointTypeEnum::VOLUME),
+                    "a fixture may only mount Docker volumes: {mount:?}"
+                );
+                let name = mount.name.clone().expect("a volume mount names its volume");
+                assert_eq!(
+                    name.len(),
+                    64,
+                    "a fixture volume must be anonymous, so Docker names it by digest: {name}"
+                );
+                assert!(
+                    name.chars().all(|character| character.is_ascii_hexdigit()),
+                    "an anonymous volume name is hexadecimal: {name}"
+                );
+
+                let volume = docker
+                    .inspect_volume(&name)
+                    .await
+                    .expect("a mounted volume can be inspected");
+                assert_eq!(volume.driver, "local", "{name} must use local storage");
+                assert_eq!(
+                    volume.scope.map(|scope| scope.to_string()),
+                    Some("local".to_owned())
+                );
+                assert_eq!(
+                    volume.labels.keys().collect::<Vec<_>>(),
+                    vec![DOCKER_ANONYMOUS_VOLUME_LABEL],
+                    "{name} carries labels beyond Docker's anonymous marker, so it is not a volume \
+                     this fixture created"
+                );
+                assert!(
+                    volume.options.is_empty(),
+                    "{name} configures storage options, so it is not ephemeral: {:?}",
+                    volume.options
+                );
+
+                volumes.push(name);
+            }
+        }
+        assert!(
+            !volumes.is_empty(),
+            "the pinned Bitcoind image declares an anonymous volume, so at least one is expected"
+        );
+        println!(
+            "created bitcoind={bitcoind} electrs={electrs} network={network} volumes={volumes:?}"
+        );
+
+        drop(fixture);
+
         // Removal is asynchronous, so this polls rather than asserting once.
         let mut outstanding = Vec::new();
         for _ in 0..100 {
@@ -337,6 +401,11 @@ mod tests {
             }
             if docker.inspect_network(&network, None).await.is_ok() {
                 outstanding.push(network.clone());
+            }
+            for volume in &volumes {
+                if docker.inspect_volume(volume).await.is_ok() {
+                    outstanding.push(volume.clone());
+                }
             }
             if outstanding.is_empty() {
                 break;
