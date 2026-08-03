@@ -280,10 +280,6 @@ cargo test --test host_liquid -- --ignored --test-threads=1
 
 The Liquid Esplora endpoint must be ready first. When reusing a stale regtest chain, the host may need to mine a fresh block so the node leaves initial block download and electrs begins serving requests. The Liquid reorg test records its baseline, invalidates only a tip it created, reconsiders it before releasing the lock, and leaves a valid active chain.
 
-## Migrating from 0.1.x
-
-See [MIGRATION.md](MIGRATION.md) for the breaking API changes.
-
 ## License
 
 MIT
