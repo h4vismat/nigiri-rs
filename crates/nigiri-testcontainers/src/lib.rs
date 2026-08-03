@@ -7,11 +7,14 @@ mod electrs;
 mod electrum;
 mod endpoint;
 mod error;
+mod fixture;
 mod image;
+mod owned_start;
 mod readiness;
 
 pub use endpoint::ElectrumEndpoint;
 pub use error::FixtureError;
+pub use fixture::{BitcoinFixture, BitcoinFixtureBuilder};
 pub use image::ContainerImage;
 
 /// The fixture's regtest RPC credentials.
