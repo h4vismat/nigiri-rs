@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::{future::Future, time::Duration};
 
 use nigiri_rs::{Bitcoin, NigiriClient, NigiriConfig, NigiriError};
@@ -15,23 +13,16 @@ use crate::{
     deadline::Deadline,
     diagnostics::{MAX_SOURCE_BYTES, redacted_head, redacted_source, redacted_tail},
     endpoint::mapped_http_url,
-    owned_start::{
-        attach_container_log, classify_start_error, container_log_tail,
-        port_discovery_with_log_result, run_owned_start,
-    },
+    owned_start::{attach_container_log, classify_start_error, mapped_port, run_owned_start},
+    readiness::RETRY_DELAY,
 };
 
-const SERVICE: &str = "bitcoind";
-const RPC_PORT: u16 = 18_443;
-const READINESS_RETRY_DELAY: Duration = Duration::from_millis(100);
+pub(crate) const SERVICE: &str = "bitcoind";
+pub(crate) const RPC_PORT: u16 = 18_443;
 
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) struct StartedBitcoind {
     pub(crate) container: ContainerAsync<GenericImage>,
-    pub(crate) client: NigiriClient<Bitcoin>,
     pub(crate) client_config: NigiriConfig,
-    pub(crate) network_name: String,
-    pub(crate) container_name: String,
 }
 
 struct InitialMiningGate {
@@ -66,7 +57,6 @@ impl InitialMiningGate {
     }
 }
 
-#[cfg_attr(test, allow(dead_code))]
 static INITIAL_MINING_GATE: InitialMiningGate = InitialMiningGate::new();
 
 pub(crate) fn request(
@@ -85,7 +75,7 @@ pub(crate) fn request(
                 "-regtest=1".to_owned(),
                 "-server=1".to_owned(),
                 "-txindex=1".to_owned(),
-                "-rpcbind=0.0.0.0:18443".to_owned(),
+                format!("-rpcbind=0.0.0.0:{RPC_PORT}"),
                 "-rpcallowip=0.0.0.0/0".to_owned(),
                 format!("-rpcuser={RPC_USER}"),
                 format!("-rpcpassword={RPC_PASSWORD}"),
@@ -95,19 +85,18 @@ pub(crate) fn request(
     )
 }
 
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) async fn start_bitcoind(
     image: &ContainerImage,
-    network_name: String,
-    container_name: String,
+    network_name: &str,
+    container_name: &str,
     deadline: &Deadline,
 ) -> Result<StartedBitcoind, FixtureError> {
-    let container_request = request(image, &network_name, &container_name)?;
+    let container_request = request(image, network_name, container_name)?;
     let container = run_owned_start(
         SERVICE,
         image,
         deadline,
-        &container_name,
+        container_name,
         "starting Bitcoind container",
         container_request.start(),
     )
@@ -118,24 +107,14 @@ pub(crate) async fn start_bitcoind(
         .await?
         .map_err(|error| classify_start_error(SERVICE, image, error))?
         .to_string();
-    let rpc_port = match deadline
-        .run(
-            "bitcoind",
-            "resolving Bitcoind RPC mapped port",
-            container.get_host_port_ipv4(RPC_PORT.tcp()),
-        )
-        .await?
-    {
-        Ok(port) => port,
-        Err(error) => {
-            return Err(port_discovery_with_log_result(
-                SERVICE,
-                RPC_PORT,
-                error,
-                container_log_tail(SERVICE, &container, deadline).await,
-            ));
-        }
-    };
+    let rpc_port = mapped_port(
+        SERVICE,
+        &container,
+        RPC_PORT,
+        "resolving Bitcoind RPC mapped port",
+        deadline,
+    )
+    .await?;
 
     let root_url = mapped_http_url(&host, rpc_port)?;
     let root_config = fixture_rpc_config(
@@ -185,10 +164,7 @@ pub(crate) async fn start_bitcoind(
 
     Ok(StartedBitcoind {
         container,
-        client,
         client_config,
-        network_name,
-        container_name,
     })
 }
 
@@ -197,8 +173,7 @@ pub(crate) async fn start_bitcoind(
 /// `FixtureError::Client` forwards a `NigiriError` and its whole raw cause chain, and a rejected
 /// fixture configuration carries the fixture credentials, so the rejection is reported as bounded,
 /// redacted configuration detail instead.
-#[cfg_attr(test, allow(dead_code))]
-fn fixture_client(config: NigiriConfig) -> Result<NigiriClient<Bitcoin>, FixtureError> {
+pub(crate) fn fixture_client(config: NigiriConfig) -> Result<NigiriClient<Bitcoin>, FixtureError> {
     NigiriClient::<Bitcoin>::with_config(config).map_err(|source| {
         FixtureError::InvalidConfiguration {
             detail: redacted_head(
@@ -211,9 +186,8 @@ fn fixture_client(config: NigiriConfig) -> Result<NigiriClient<Bitcoin>, Fixture
 
 /// The node RPC half of a fixture client's configuration.
 ///
-/// `esplora_url` is a placeholder pointing at the same node: this task starts no indexer, so the
-/// returned client is node-RPC-only until Electrs is wired in and supplies a real Esplora base URL.
-#[cfg_attr(test, allow(dead_code))]
+/// `esplora_url` is a self-pointing placeholder: only the node half is known here, and
+/// `BitcoinFixtureBuilder::start` replaces it with the Esplora base URL Electrs publishes.
 fn fixture_rpc_config(node_rpc_url: Url, timeout: Duration) -> NigiriConfig {
     NigiriConfig {
         esplora_url: node_rpc_url.clone(),
@@ -225,7 +199,6 @@ fn fixture_rpc_config(node_rpc_url: Url, timeout: Duration) -> NigiriConfig {
     }
 }
 
-#[cfg_attr(test, allow(dead_code))]
 async fn wait_for_root_rpc(
     root: &NigiriClient<Bitcoin>,
     deadline: &Deadline,
@@ -248,7 +221,7 @@ async fn wait_for_root_rpc(
                     .run(
                         "bitcoind",
                         &last_observation,
-                        tokio::time::sleep(READINESS_RETRY_DELAY),
+                        tokio::time::sleep(RETRY_DELAY),
                     )
                     .await?;
             }

@@ -9,8 +9,6 @@
 //! Every entry point takes the service it is starting, so Bitcoind and Electrs share one
 //! implementation and report failures under their own name.
 
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::{future::Future, io, pin::Pin, sync::Arc, time::Duration};
 
 use testcontainers::{
@@ -19,6 +17,7 @@ use testcontainers::{
         API_DEFAULT_VERSION, Docker, errors::Error as BollardError,
         query_parameters::RemoveContainerOptionsBuilder,
     },
+    core::IntoContainerPort,
     core::error::{ClientError, TestcontainersError, WaitContainerError},
 };
 use tokio::io::AsyncReadExt;
@@ -727,7 +726,35 @@ pub(crate) fn port_discovery_with_log_result(
     port_discovery_error(service, container_port, error, &diagnostics)
 }
 
-#[cfg_attr(test, allow(dead_code))]
+/// Resolves one mapped host port, attaching the container's own log to a failure.
+///
+/// A port that never opened is explained by the container's log and nothing else, so the log is
+/// collected on the failing path rather than left to the caller to guess at.
+pub(crate) async fn mapped_port(
+    service: &'static str,
+    container: &ContainerAsync<GenericImage>,
+    container_port: u16,
+    last_observation: &'static str,
+    deadline: &Deadline,
+) -> Result<u16, FixtureError> {
+    match deadline
+        .run(
+            service,
+            last_observation,
+            container.get_host_port_ipv4(container_port.tcp()),
+        )
+        .await?
+    {
+        Ok(port) => Ok(port),
+        Err(error) => Err(port_discovery_with_log_result(
+            service,
+            container_port,
+            error,
+            container_log_tail(service, container, deadline).await,
+        )),
+    }
+}
+
 /// A bounded, redacted tail of both of a container's output streams, labelled by service.
 ///
 /// Both streams are read because Bitcoin Core and Electrs do not agree on which one carries a fatal

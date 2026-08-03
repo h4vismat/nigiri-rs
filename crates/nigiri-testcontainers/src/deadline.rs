@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::{future::Future, time::Duration};
 
 use tokio::time::Instant;

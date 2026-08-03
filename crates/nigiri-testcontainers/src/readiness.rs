@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::{fmt, time::Duration};
 
 use nigiri_rs::{Bitcoin, NigiriClient};
@@ -11,8 +9,9 @@ use crate::{
     electrum,
 };
 
-pub(crate) const SERVICE: &str = "fixture";
-const RETRY_DELAY: Duration = Duration::from_millis(100);
+const SERVICE: &str = "fixture";
+/// Shared by every fixture readiness loop, so polling cannot drift between them.
+pub(crate) const RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// The three heights that must agree before a fixture is queryable.
 ///
@@ -169,6 +168,24 @@ mod tests {
                 electrum: None,
             }
         }
+
+        /// The node is up but the indexer's HTTP half is not answering yet.
+        const fn esplora_unavailable(node: u64) -> Self {
+            Self {
+                node: Some(node),
+                esplora: None,
+                electrum: None,
+            }
+        }
+
+        /// The node and Esplora are up but the Electrum port is not serving yet.
+        const fn electrum_unavailable(node: u64, esplora: u64) -> Self {
+            Self {
+                node: Some(node),
+                esplora: Some(esplora),
+                electrum: None,
+            }
+        }
     }
 
     /// Serves the node RPC, the Esplora tip, and the Electrum tip from one scripted script, so a
@@ -181,6 +198,28 @@ mod tests {
     }
 
     impl SyncStub {
+        /// Replaces the Electrum half with a listener that accepts and then says nothing, so the probe
+        /// can only end on the shared deadline.
+        async fn with_silent_electrum(mut self) -> Self {
+            let silent = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("a loopback listener is available");
+            let port = silent
+                .local_addr()
+                .expect("a bound listener has an address")
+                .port();
+
+            self.servers.push(tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((stream, _)) = silent.accept().await {
+                    held.push(stream);
+                }
+            }));
+            self.endpoint =
+                ElectrumEndpoint::new("127.0.0.1", port).expect("a loopback endpoint is valid");
+            self
+        }
+
         async fn start(script: Vec<Round>) -> Self {
             let script = Arc::new(script);
             let rounds = Arc::new(AtomicUsize::new(0));
@@ -447,6 +486,86 @@ mod tests {
             .expect("a transiently unavailable service must be retried");
 
         assert_eq!(stub.attempts(), 3);
+    }
+
+    // Catches a regression in the two transient paths a node-only failure never reaches. An indexer
+    // that has not opened its port yet is the ordinary case this loop exists to tolerate.
+    #[tokio::test]
+    async fn an_indexer_that_is_not_serving_yet_is_retried_and_named() {
+        let stub = SyncStub::start(vec![
+            Round::esplora_unavailable(101),
+            Round::electrum_unavailable(101, 101),
+            Round::all(101),
+        ])
+        .await;
+        let deadline =
+            Deadline::new(Duration::from_secs(30)).expect("a positive deadline is valid");
+
+        wait_for_sync(&stub.client, &stub.endpoint, &deadline)
+            .await
+            .expect("an indexer that is still starting must be retried");
+
+        assert_eq!(
+            stub.attempts(),
+            3,
+            "each half of the indexer must be retried, not reported"
+        );
+    }
+
+    // Catches a regression that names the wrong service when an indexer half fails: the observation a
+    // readiness timeout carries is the only thing that says where to look.
+    #[tokio::test]
+    async fn a_failing_indexer_half_is_named_in_the_observation() {
+        for (round, expected) in [
+            (Round::esplora_unavailable(101), "esplora: "),
+            (Round::electrum_unavailable(101, 101), "electrum: "),
+        ] {
+            let stub = SyncStub::start(vec![round]).await;
+            let deadline =
+                Deadline::new(Duration::from_secs(1)).expect("a positive deadline is valid");
+
+            let error = wait_for_sync(&stub.client, &stub.endpoint, &deadline)
+                .await
+                .expect_err("a permanently unavailable indexer must expire");
+
+            let FixtureError::ReadinessTimeout {
+                last_observation, ..
+            } = error
+            else {
+                panic!("an exhausted readiness budget must be a readiness timeout");
+            };
+            assert!(
+                last_observation.starts_with(expected),
+                "expected {expected:?} to open the observation: {last_observation}"
+            );
+        }
+    }
+
+    // Catches a regression that retries an Electrum probe whose own expiry already spent the shared
+    // budget. Retrying it would report the failure as the fixture's rather than the indexer's, sending
+    // a reader to the wrong service.
+    #[tokio::test]
+    async fn an_electrum_probe_expiry_is_reported_as_electrs_rather_than_retried() {
+        let stub = SyncStub::start(vec![Round::all(101)])
+            .await
+            .with_silent_electrum()
+            .await;
+        let deadline = Deadline::new(Duration::from_secs(1)).expect("a positive deadline is valid");
+
+        let error = wait_for_sync(&stub.client, &stub.endpoint, &deadline)
+            .await
+            .expect_err("a probe that is never answered must expire");
+
+        assert!(
+            matches!(
+                error,
+                FixtureError::ReadinessTimeout {
+                    service: "electrs",
+                    ..
+                }
+            ),
+            "{error}"
+        );
     }
 
     // Catches a regression that returns a synthetic error instead of the readiness timeout, or that

@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::io;
 
 use tokio::{
@@ -13,19 +11,19 @@ use crate::{
     diagnostics::{MAX_SOURCE_BYTES, redacted_head, redacted_source},
 };
 
-const SERVICE: &str = "electrs";
+use crate::electrs::SERVICE;
 const PROBE_ID: &str = "nigiri-testcontainers";
-pub(crate) const PROBE_OPERATION: &str = "blockchain.headers.subscribe";
+const PROBE_OPERATION: &str = "blockchain.headers.subscribe";
 /// The largest response line accepted before parsing. Electrs answers this method in well under a
 /// kilobyte, so anything larger is a misbehaving or wrong service rather than a tip.
-pub(crate) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// The exact request Electrs answers, as one line.
 ///
 /// Built from the same constants the response is attributed to, and asserted byte-for-byte by
 /// `the_probe_request_is_exactly_one_headers_subscribe_line`, because a stray space or a missing
 /// newline leaves Electrs waiting instead of answering.
-pub(crate) fn request_line() -> String {
+fn request_line() -> String {
     format!("{{\"id\":\"{PROBE_ID}\",\"method\":\"{PROBE_OPERATION}\",\"params\":[]}}\n")
 }
 
@@ -297,6 +295,36 @@ mod tests {
             .expect_err("a response larger than the read bound must fail");
 
         assert_bounded_probe_failure(error, &[MARKER, "xxxxxxxx"]);
+        let _ = served.await;
+    }
+
+    // Catches an off-by-one at the read bound: a legitimate response exactly at the limit must still
+    // parse, and one byte past it must be refused.
+    #[tokio::test]
+    async fn the_read_bound_accepts_its_limit_and_refuses_one_byte_past_it() {
+        let envelope = "{\"result\":{\"height\":101},\"pad\":\"\"}\n".len();
+        let at_limit = format!(
+            "{{\"result\":{{\"height\":101}},\"pad\":\"{}\"}}\n",
+            "p".repeat(MAX_RESPONSE_BYTES - envelope)
+        );
+        assert_eq!(at_limit.len(), MAX_RESPONSE_BYTES);
+
+        let (endpoint, served) = electrum_stub(at_limit.clone().into_bytes()).await;
+        let height = tip_height(&endpoint, &deadline())
+            .await
+            .expect("a response exactly at the read bound must still parse");
+        assert_eq!(height, 101);
+        served.await.expect("the stub must finish");
+
+        let mut past_limit = at_limit.into_bytes();
+        past_limit.insert(past_limit.len() - 1, b'p');
+        assert_eq!(past_limit.len(), MAX_RESPONSE_BYTES + 1);
+
+        let (endpoint, served) = electrum_stub(past_limit).await;
+        let error = tip_height(&endpoint, &deadline())
+            .await
+            .expect_err("one byte past the read bound must be refused");
+        assert_bounded_probe_failure(error, &["pppp"]);
         let _ = served.await;
     }
 

@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use testcontainers::{
     ContainerAsync, ContainerRequest, GenericImage, ImageExt, core::IntoContainerPort,
     runners::AsyncRunner,
@@ -10,18 +8,14 @@ use crate::{
     ContainerImage, ElectrumEndpoint, FixtureError, RPC_PASSWORD, RPC_USER,
     deadline::Deadline,
     endpoint::mapped_http_url,
-    owned_start::{
-        classify_start_error, container_log_tail, port_discovery_with_log_result, run_owned_start,
-    },
+    owned_start::{classify_start_error, mapped_port, run_owned_start},
 };
 
-const SERVICE: &str = "electrs";
-const BITCOIND_RPC_PORT: u16 = 18_443;
+pub(crate) const SERVICE: &str = "electrs";
 const HTTP_PORT: u16 = 30_000;
 const ELECTRUM_PORT: u16 = 50_000;
 
 /// A running Electrs and the two endpoints a fixture serves from it.
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) struct StartedElectrs {
     pub(crate) container: ContainerAsync<GenericImage>,
     pub(crate) esplora_url: Url,
@@ -32,7 +26,6 @@ pub(crate) struct StartedElectrs {
 ///
 /// Electrs is reached only through mapped ports, never the fixed container ports, so concurrent
 /// fixtures cannot collide on the host.
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) async fn start_electrs(
     image: &ContainerImage,
     network_name: &str,
@@ -56,40 +49,28 @@ pub(crate) async fn start_electrs(
         .await?
         .map_err(|error| classify_start_error(SERVICE, image, error))?
         .to_string();
-    let esplora_port = mapped_port(&container, HTTP_PORT, deadline).await?;
-    let electrum_port = mapped_port(&container, ELECTRUM_PORT, deadline).await?;
+    let esplora_port = mapped_port(
+        SERVICE,
+        &container,
+        HTTP_PORT,
+        "resolving the Electrs Esplora mapped port",
+        deadline,
+    )
+    .await?;
+    let electrum_port = mapped_port(
+        SERVICE,
+        &container,
+        ELECTRUM_PORT,
+        "resolving the Electrs Electrum mapped port",
+        deadline,
+    )
+    .await?;
 
     Ok(StartedElectrs {
         container,
         esplora_url: mapped_http_url(&host, esplora_port)?,
         electrum_endpoint: ElectrumEndpoint::new(host, electrum_port)?,
     })
-}
-
-/// Resolves one mapped port, attaching Electrs's own log to a failure since that log is what explains
-/// an index that never opened its port.
-#[cfg_attr(test, allow(dead_code))]
-async fn mapped_port(
-    container: &ContainerAsync<GenericImage>,
-    container_port: u16,
-    deadline: &Deadline,
-) -> Result<u16, FixtureError> {
-    match deadline
-        .run(
-            SERVICE,
-            "resolving an Electrs mapped port",
-            container.get_host_port_ipv4(container_port.tcp()),
-        )
-        .await?
-    {
-        Ok(port) => Ok(port),
-        Err(error) => Err(port_discovery_with_log_result(
-            SERVICE,
-            container_port,
-            error,
-            container_log_tail(SERVICE, container, deadline).await,
-        )),
-    }
 }
 
 pub(crate) fn request(
@@ -116,7 +97,7 @@ pub(crate) fn request(
                 "--db-dir".to_owned(),
                 "/tmp/electrs".to_owned(),
                 "--daemon-rpc-addr".to_owned(),
-                format!("{bitcoin_name}:{BITCOIND_RPC_PORT}"),
+                format!("{bitcoin_name}:{}", crate::bitcoind::RPC_PORT),
                 "--cookie".to_owned(),
                 format!("{RPC_USER}:{RPC_PASSWORD}"),
                 "--http-addr".to_owned(),

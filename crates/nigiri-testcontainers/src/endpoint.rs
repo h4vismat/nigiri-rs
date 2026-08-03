@@ -9,7 +9,6 @@ pub struct ElectrumEndpoint {
 }
 
 impl ElectrumEndpoint {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(host: impl Into<String>, port: u16) -> Result<Self, FixtureError> {
         let host = host.into();
 
@@ -41,7 +40,6 @@ impl ElectrumEndpoint {
 ///
 /// The runtime chooses both the host and the port, so neither is trusted into a URL by string
 /// concatenation.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn mapped_http_url(host: &str, port: u16) -> Result<Url, FixtureError> {
     let mut url = Url::parse("http://localhost/").expect("the static mapped URL is valid");
     // A URL host must bracket an IPv6 literal, but a container runtime reports one bare, so the

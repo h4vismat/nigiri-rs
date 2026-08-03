@@ -1,6 +1,6 @@
 //! The public fixture: one funded, synchronized Bitcoin regtest stack per instance.
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use nigiri_rs::{Bitcoin, NigiriClient};
 use testcontainers::{ContainerAsync, GenericImage};
@@ -18,25 +18,44 @@ const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// Dropping the fixture removes everything it created. The field order is deliberate: Electrs is
 /// dropped before Bitcoind, so the indexer is gone before the node it indexes disappears underneath
 /// it.
-#[derive(Debug)]
 pub struct BitcoinFixture {
-    // Held for their `Drop`, which is what removes the containers, in this order.
     #[expect(
         dead_code,
-        reason = "the handle's only job is to reap its container when the fixture is dropped"
+        reason = "the handles exist only to reap their containers when the fixture is dropped"
     )]
-    electrs: ContainerAsync<GenericImage>,
-    #[expect(
-        dead_code,
-        reason = "the handle's only job is to reap its container when the fixture is dropped"
-    )]
-    bitcoin: ContainerAsync<GenericImage>,
+    handles: ContainerHandles<ContainerAsync<GenericImage>, ContainerAsync<GenericImage>>,
     client: NigiriClient<Bitcoin>,
     electrum_endpoint: ElectrumEndpoint,
 }
 
+/// The fixture's container handles, held only for their `Drop`.
+///
+/// Declaring them in one place makes the order a property of a type a test can drop, rather than of
+/// two adjacent fields nothing checks. Rust drops fields in declaration order, so the indexer goes
+/// first and is never left pointed at a node that has already disappeared.
+#[expect(
+    dead_code,
+    reason = "these handles exist only to reap their containers when the fixture is dropped"
+)]
+struct ContainerHandles<Indexer, Node> {
+    electrs: Indexer,
+    bitcoin: Node,
+}
+
+// Written by hand rather than derived: the held client's configuration carries the RPC password,
+// and the rest of the crate works to keep that out of any caller-visible text.
+impl fmt::Debug for BitcoinFixture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BitcoinFixture")
+            .field("electrum_endpoint", &self.electrum_endpoint)
+            .finish_non_exhaustive()
+    }
+}
+
 impl BitcoinFixture {
     /// A builder carrying the pinned images and the 60-second startup budget.
+    #[must_use]
     pub fn builder() -> BitcoinFixtureBuilder {
         BitcoinFixtureBuilder {
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
@@ -51,11 +70,13 @@ impl BitcoinFixture {
     }
 
     /// A client whose wallet already holds the proceeds of 101 mined blocks.
+    #[must_use]
     pub fn client(&self) -> &NigiriClient<Bitcoin> {
         &self.client
     }
 
     /// The mapped Electrum endpoint, for callers that speak the protocol directly.
+    #[must_use]
     pub fn electrum_endpoint(&self) -> &ElectrumEndpoint {
         &self.electrum_endpoint
     }
@@ -78,16 +99,19 @@ struct TopologyNames {
 
 impl BitcoinFixtureBuilder {
     /// Overrides the budget for the whole startup, not for any single step within it.
+    #[must_use]
     pub fn startup_timeout(mut self, timeout: Duration) -> Self {
         self.startup_timeout = timeout;
         self
     }
 
+    #[must_use]
     pub fn bitcoind_image(mut self, image: ContainerImage) -> Self {
         self.bitcoind_image = image;
         self
     }
 
+    #[must_use]
     pub fn electrs_image(mut self, image: ContainerImage) -> Self {
         self.electrs_image = image;
         self
@@ -107,8 +131,8 @@ impl BitcoinFixtureBuilder {
 
         let bitcoin = bitcoind::start_bitcoind(
             &self.bitcoind_image,
-            names.network.clone(),
-            names.bitcoind.clone(),
+            &names.network,
+            &names.bitcoind,
             &deadline,
         )
         .await?;
@@ -125,7 +149,9 @@ impl BitcoinFixtureBuilder {
             Ok(electrs) => electrs,
             // Bitcoind is running and holds the only account of what Electrs was pointed at.
             Err(error) => {
-                return Err(attach_container_log("bitcoind", error, &bitcoin.container).await);
+                return Err(
+                    attach_container_log(bitcoind::SERVICE, error, &bitcoin.container).await,
+                );
             }
         };
 
@@ -133,26 +159,24 @@ impl BitcoinFixtureBuilder {
         // published is applied to a copy of the wallet-scoped configuration.
         let mut client_config = bitcoin.client_config.clone();
         client_config.esplora_url = electrs.esplora_url.clone();
-        let client = NigiriClient::<Bitcoin>::with_config(client_config).map_err(|source| {
-            FixtureError::InvalidConfiguration {
-                detail: crate::diagnostics::redacted_head(
-                    &format!("fixture client configuration was rejected: {source}"),
-                    crate::diagnostics::MAX_SOURCE_BYTES,
-                ),
-            }
-        })?;
+        let client = bitcoind::fixture_client(client_config)?;
 
         if let Err(not_ready) =
             readiness::wait_for_sync(&client, &electrs.electrum_endpoint, &deadline).await
         {
             // Whichever service fell behind, its own log is what explains why.
-            let with_electrs = attach_container_log("electrs", not_ready, &electrs.container).await;
-            return Err(attach_container_log("bitcoind", with_electrs, &bitcoin.container).await);
+            let with_electrs =
+                attach_container_log(electrs::SERVICE, not_ready, &electrs.container).await;
+            return Err(
+                attach_container_log(bitcoind::SERVICE, with_electrs, &bitcoin.container).await,
+            );
         }
 
         Ok(BitcoinFixture {
-            electrs: electrs.container,
-            bitcoin: bitcoin.container,
+            handles: ContainerHandles {
+                electrs: electrs.container,
+                bitcoin: bitcoin.container,
+            },
             client,
             electrum_endpoint: electrs.electrum_endpoint,
         })
@@ -175,8 +199,46 @@ impl BitcoinFixtureBuilder {
 mod tests {
     use std::time::Duration;
 
-    use super::{BitcoinFixture, BitcoinFixtureBuilder};
+    use super::{BitcoinFixture, BitcoinFixtureBuilder, ContainerHandles};
     use crate::{ContainerImage, FixtureError};
+
+    /// Reports the order in which the fixture released its handles.
+    struct DropOrderRecorder {
+        name: &'static str,
+        order: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl Drop for DropOrderRecorder {
+        fn drop(&mut self) {
+            self.order
+                .lock()
+                .expect("the recorded order is never poisoned")
+                .push(self.name);
+        }
+    }
+
+    // Catches a regression that reorders the fixture's handles. Electrs must be released before the
+    // node it indexes, or the indexer is briefly pointed at a container that no longer exists.
+    #[test]
+    fn the_indexer_handle_is_released_before_the_node_it_indexes() {
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        drop(ContainerHandles {
+            electrs: DropOrderRecorder {
+                name: "electrs",
+                order: std::sync::Arc::clone(&order),
+            },
+            bitcoin: DropOrderRecorder {
+                name: "bitcoind",
+                order: std::sync::Arc::clone(&order),
+            },
+        });
+
+        assert_eq!(
+            *order.lock().expect("the recorded order is never poisoned"),
+            ["electrs", "bitcoind"]
+        );
+    }
 
     // Catches a regression that changes what a caller gets without asking for anything: the pinned
     // images and the 60-second budget the whole design is bounded by.

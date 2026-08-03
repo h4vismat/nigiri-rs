@@ -33,7 +33,6 @@ impl ContainerImage {
         self.digest.as_deref()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn validate(&self) -> Result<(), FixtureError> {
         if self.name.is_empty() {
             return Err(FixtureError::InvalidConfiguration {
@@ -62,7 +61,6 @@ impl ContainerImage {
         Ok(())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn testcontainers_tag(&self) -> String {
         match &self.digest {
             Some(digest) => format!("{}@{digest}", self.tag),
@@ -70,20 +68,17 @@ impl ContainerImage {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn bitcoind_default() -> Self {
         Self::new("ghcr.io/getumbrel/docker-bitcoind", "v30.0")
             .with_digest("sha256:f5826a32aed9287cc5ffdec0996f5272634c4b346529cb8627224986ff555101")
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn electrs_default() -> Self {
         Self::new("ghcr.io/vulpemventures/electrs", "latest")
             .with_digest("sha256:999a2218f423c0fb167ee53b282aa7929a9d4abba38ef16f67f407acd00589d4")
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn is_sha256_digest(digest: &str) -> bool {
     let Some(hex) = digest.strip_prefix("sha256:") else {
         return false;
