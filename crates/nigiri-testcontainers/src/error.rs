@@ -34,6 +34,14 @@ pub enum FixtureError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    #[error("{service} {operation} probe failed: {diagnostics}")]
+    Probe {
+        service: &'static str,
+        operation: &'static str,
+        diagnostics: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("{service} was not ready after {duration:?}: {last_observation}; {diagnostics}")]
     ReadinessTimeout {
         service: &'static str,
@@ -78,6 +86,27 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "failed to start bitcoind from registry.example/bitcoin:v1: health check timed out"
+        );
+        assert_eq!(
+            Error::source(&error).map(ToString::to_string).as_deref(),
+            Some("connection refused")
+        );
+    }
+
+    // Catches a regression that omits the probed service, its operation, the bounded diagnostics, or
+    // the underlying cause of a protocol probe failure.
+    #[test]
+    fn probe_reports_service_and_operation_and_preserves_its_source() {
+        let error = FixtureError::Probe {
+            service: "electrs",
+            operation: "blockchain.headers.subscribe",
+            diagnostics: "connection refused".to_owned(),
+            source: Box::new(io::Error::other("connection refused")),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "electrs blockchain.headers.subscribe probe failed: connection refused"
         );
         assert_eq!(
             Error::source(&error).map(ToString::to_string).as_deref(),

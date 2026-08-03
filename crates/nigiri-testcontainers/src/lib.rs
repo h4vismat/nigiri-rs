@@ -4,9 +4,11 @@ mod bitcoind;
 mod deadline;
 mod diagnostics;
 mod electrs;
+mod electrum;
 mod endpoint;
 mod error;
 mod image;
+mod readiness;
 
 pub use endpoint::ElectrumEndpoint;
 pub use error::FixtureError;

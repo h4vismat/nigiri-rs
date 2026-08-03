@@ -42,6 +42,7 @@ const ABANDONED_START_JOIN_BOUND: Duration = Duration::from_secs(5);
 const PARTIAL_CLEANUP_BOUND: Duration = Duration::from_secs(5);
 const DETACHED_DROP_JOIN_BOUND: Duration = Duration::from_secs(5);
 const DETACHED_DROP_SHUTDOWN_BOUND: Duration = Duration::from_millis(100);
+const DIAGNOSTIC_LOG_BOUND: Duration = Duration::from_secs(5);
 const DOCKER_CLEANUP_TIMEOUT: u64 = 5;
 const DEFAULT_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 const TESTCONTAINERS_KEEP_COMMAND: &str = "keep";
@@ -161,7 +162,11 @@ pub(crate) async fn start_bitcoind(
         deadline.remaining_or_expired("bitcoind", "configuring the root Bitcoind RPC client")?,
     );
     let root = fixture_client(root_config)?;
-    wait_for_root_rpc(&root, deadline).await?;
+    if let Err(not_ready) = wait_for_root_rpc(&root, deadline).await {
+        // A node that never answered is the likeliest startup failure, and its own log is the only
+        // thing that explains why, so the timeout carries a bounded tail of it.
+        return Err(attach_container_log(not_ready, &container).await);
+    }
 
     let wallet_name = format!("nigiri-rs-{}", Uuid::new_v4().simple());
     let wallet_creation = deadline
@@ -530,11 +535,11 @@ async fn attach_start_failure_cleanup<T: Send + 'static>(
         return error;
     }
 
-    // The removal is performed whatever the classification turned out to be; `attach_partial_cleanup`
+    // The removal is performed whatever the classification turned out to be; `attach_diagnostics`
     // drops the diagnostic for a variant that carries none rather than the removal being skipped.
     let removal = (guard.cleanup())(guard.container_name.clone()).await;
     guard.finish();
-    attach_partial_cleanup(error, removal)
+    attach_diagnostics(error, removal)
 }
 
 /// Abandons a startup task whose shared deadline expired.
@@ -601,7 +606,7 @@ async fn abandon_owned_start<T: Send + 'static>(
         ),
     };
 
-    attach_partial_cleanup(deadline_error, diagnostics)
+    attach_diagnostics(deadline_error, diagnostics)
 }
 
 /// Hands a late owned handle to natural Testcontainers cleanup, falling back to explicit removal.
@@ -822,7 +827,31 @@ fn partial_cleanup_diagnostic(
     }
 }
 
-fn attach_partial_cleanup(error: FixtureError, cleanup: String) -> FixtureError {
+/// Attaches a bounded tail of the container's own log to a readiness failure.
+///
+/// The shared budget is gone by the time this runs — that is what the failure means — so the log read
+/// gets its own bound, like the other error-path cleanups. A log that cannot be read is reported as
+/// such rather than replacing the failure that prompted it.
+async fn attach_container_log(
+    error: FixtureError,
+    container: &ContainerAsync<GenericImage>,
+) -> FixtureError {
+    let log_deadline = match Deadline::new(DIAGNOSTIC_LOG_BOUND) {
+        Ok(deadline) => deadline,
+        Err(_) => return error,
+    };
+    let diagnostics = match bitcoind_log_tail(container, &log_deadline).await {
+        Ok(diagnostics) => diagnostics,
+        Err(failure) => redacted_tail(&format!(
+            "could not read bitcoind diagnostic log within {DIAGNOSTIC_LOG_BOUND:?}: {failure}"
+        )),
+    };
+
+    attach_diagnostics(error, diagnostics)
+}
+
+/// Adds context to whichever error variant carries diagnostics, leaving the rest unchanged.
+fn attach_diagnostics(error: FixtureError, addition: String) -> FixtureError {
     match error {
         FixtureError::ContainerStart {
             service,
@@ -832,7 +861,7 @@ fn attach_partial_cleanup(error: FixtureError, cleanup: String) -> FixtureError 
         } => FixtureError::ContainerStart {
             service,
             image,
-            diagnostics: join_diagnostics(&diagnostics, &cleanup),
+            diagnostics: join_diagnostics(&diagnostics, &addition),
             source,
         },
         FixtureError::ReadinessTimeout {
@@ -844,7 +873,7 @@ fn attach_partial_cleanup(error: FixtureError, cleanup: String) -> FixtureError 
             service,
             duration,
             last_observation,
-            diagnostics: join_diagnostics(&diagnostics, &cleanup),
+            diagnostics: join_diagnostics(&diagnostics, &addition),
         },
         other => other,
     }
@@ -1008,7 +1037,7 @@ mod tests {
     use super::{
         AbandonOnDrop, CleanupTransport, InitialMiningGate, MAX_DIAGNOSTIC_BYTES,
         MAX_IMAGE_DESCRIPTOR_BYTES, MAX_SOURCE_BYTES, PartialCleanup, ROLLING_LOG_BYTES,
-        abandon_owned_start, append_log_tail, attach_partial_cleanup, bootstrap_error,
+        abandon_owned_start, append_log_tail, attach_diagnostics, bootstrap_error,
         classify_start_error, cleanup_transport, container_start_join_error, fixture_client,
         fixture_rpc_config, partial_cleanup_diagnostic, port_discovery_error,
         port_discovery_with_log_result, redacted_tail, request, resolve_docker_host,
@@ -1746,7 +1775,7 @@ mod tests {
     // rewrites a fixture error that carries no diagnostics at all.
     #[test]
     fn partial_cleanup_context_is_appended_only_to_diagnostic_bearing_errors() {
-        let start = attach_partial_cleanup(
+        let start = attach_diagnostics(
             FixtureError::ContainerStart {
                 service: "bitcoind",
                 image: "registry.example/bitcoin:v1".to_owned(),
@@ -1763,7 +1792,7 @@ mod tests {
             "docker rejected the create; removed partial container nigiri-bitcoind-abc"
         );
 
-        let unrelated = attach_partial_cleanup(
+        let unrelated = attach_diagnostics(
             FixtureError::InvalidConfiguration {
                 detail: "invalid image".to_owned(),
             },
