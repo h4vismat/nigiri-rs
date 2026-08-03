@@ -15,6 +15,9 @@ pub(crate) const MAX_SOURCE_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_REDACTION_CONTEXT_BYTES: usize = 32;
 const SOURCE_TRUNCATION_MARKER: &str = "[TRUNCATED]";
 const REDACTED: &str = "[REDACTED]";
+/// The leading bytes of every marker this module writes, used to recognise text it has already
+/// redacted. `]` terminates a value, so the marker is only ever seen up to this prefix.
+const REDACTED_PREFIX: &str = "[REDACTED";
 /// `base64("admin1:123")`, the form the credentials take in an HTTP basic-auth header. Asserted
 /// against [`RPC_USER`]/[`RPC_PASSWORD`] by `basic_auth_pattern_matches_the_fixture_credentials`.
 const BASIC_AUTH_PATTERN: &str = "YWRtaW4xOjEyMw==";
@@ -27,15 +30,29 @@ const _: () = assert!(
     "a bounded source must leave room for its truncation marker",
 );
 
+/// The name a password follows, whatever spelling a service chooses for the rest.
+const PASSWORD_ANCHOR: &str = "rpcpassword";
+/// Bytes that may sit between the anchor and the value: `=`, `:`, whitespace, and quotes cover
+/// command-line arguments, JSON, and prose alike.
+const ANCHOR_SEPARATORS: &[u8] = b"=: \t\"'";
+/// Bytes that end the redacted value.
+const VALUE_TERMINATORS: &[u8] = b" \t\r\n\"',}])";
+
 /// Replaces every spelling of the fixture credentials this crate can observe.
 ///
 /// Patterns are derived from the credential constants rather than repeated as literals, so changing
 /// the credentials cannot silently disable redaction. The bare password is deliberately not a
 /// pattern: `123` occurs in ordinary log text, so the password is redacted only in credential
-/// context. No replacement is shorter than its pattern, which is what lets a caller rely on the
-/// boundary slack still being present after redaction.
+/// context.
+///
+/// Whole-value matching is not enough on its own. A service is free to quote the value, change the
+/// separator, or change the case — `rpcpassword="123"` and `RPCPASSWORD=123` are the same secret and
+/// neither matches a fixed `rpcpassword=123` byte sequence. The password is therefore redacted by
+/// anchoring on its name and consuming whatever value follows, which also covers a value this crate
+/// has never seen. Redaction never shortens its input, which is what lets a caller rely on the
+/// boundary slack still being present afterwards.
 pub(crate) fn redact(value: &str) -> String {
-    let mut redacted = value.to_owned();
+    let mut redacted = redact_anchored_values(value);
 
     for (pattern, replacement) in redaction_patterns() {
         redacted = redacted.replace(&pattern, &replacement);
@@ -44,24 +61,91 @@ pub(crate) fn redact(value: &str) -> String {
     redacted
 }
 
-/// The pattern/replacement pairs applied by [`redact`], longest-matching spelling first.
-fn redaction_patterns() -> [(String, String); 5] {
+/// Redacts whatever value follows the password's name, case- and separator-insensitively.
+///
+/// Any token after the anchor is replaced, not just a known password: a value this crate cannot
+/// predict is exactly the one worth hiding. The cost is that prose like `rpcpassword was rejected`
+/// loses its next word, which is an acceptable trade on an error path.
+fn redact_anchored_values(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let anchor = PASSWORD_ANCHOR.as_bytes();
+    let mut redacted = String::with_capacity(value.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let anchored = bytes.len() - index >= anchor.len()
+            && bytes[index..index + anchor.len()].eq_ignore_ascii_case(anchor);
+        if !anchored {
+            // Advancing by whole characters keeps every index a UTF-8 boundary.
+            let character = value[index..]
+                .chars()
+                .next()
+                .expect("a byte index inside the value starts a character");
+            redacted.push(character);
+            index += character.len_utf8();
+            continue;
+        }
+
+        // The anchor keeps the casing the service used; only the value is replaced.
+        redacted.push_str(&value[index..index + anchor.len()]);
+        index += anchor.len();
+        while index < bytes.len() && ANCHOR_SEPARATORS.contains(&bytes[index]) {
+            redacted.push(char::from(bytes[index]));
+            index += 1;
+        }
+
+        let value_start = index;
+        while index < bytes.len() && !VALUE_TERMINATORS.contains(&bytes[index]) {
+            index += 1;
+        }
+        if index == value_start {
+            continue;
+        }
+
+        // Redaction must be idempotent: callers re-render already-redacted text, and replacing the
+        // marker again would both grow it without bound and mangle it.
+        let already_redacted = value[value_start..index].starts_with(REDACTED_PREFIX);
+        if already_redacted {
+            redacted.push_str(&value[value_start..index]);
+            continue;
+        }
+
+        redacted.push_str(REDACTED);
+        // Padded so redaction can only lengthen its input, never shorten it.
+        for _ in REDACTED.len()..index - value_start {
+            redacted.push('*');
+        }
+    }
+
+    redacted
+}
+
+/// The fixed pattern/replacement pairs applied by [`redact`], longest-matching spelling first.
+fn redaction_patterns() -> [(String, String); 3] {
     [
         (format!("{RPC_USER}:{RPC_PASSWORD}"), REDACTED.to_owned()),
         (
             BASIC_AUTH_PATTERN.to_owned(),
             REDACTED_BASIC_AUTH.to_owned(),
         ),
-        (
-            format!("rpcpassword={RPC_PASSWORD}"),
-            format!("rpcpassword={REDACTED}"),
-        ),
-        (
-            format!("rpcpassword {RPC_PASSWORD}"),
-            format!("rpcpassword {REDACTED}"),
-        ),
         (RPC_USER.to_owned(), REDACTED.to_owned()),
     ]
+}
+
+/// The longest credential-bearing sequence redaction must see whole in order to match it.
+///
+/// A caller keeps at least this much slack in front of a truncated buffer, so a sequence straddling
+/// the cut is either wholly present or wholly discarded.
+#[cfg(test)]
+fn longest_matchable_sequence() -> usize {
+    let anchored = PASSWORD_ANCHOR.len() + 2 + RPC_PASSWORD.len();
+
+    redaction_patterns()
+        .iter()
+        .map(|(pattern, _)| pattern.len())
+        .chain(std::iter::once(anchored))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Redacts, then keeps the terminal bytes: a container log's meaning is its final output.
@@ -183,8 +267,8 @@ mod tests {
 
     use super::{
         BASIC_AUTH_PATTERN, MAX_DIAGNOSTIC_BYTES, MAX_REDACTION_CONTEXT_BYTES, MAX_SOURCE_BYTES,
-        join_diagnostics, redact, redacted_head, redacted_source, redacted_tail,
-        redaction_patterns, utf8_head, utf8_tail,
+        join_diagnostics, longest_matchable_sequence, redact, redacted_head, redacted_source,
+        redacted_tail, redaction_patterns, utf8_head, utf8_tail,
     };
     use crate::{RPC_PASSWORD, RPC_USER};
 
@@ -240,6 +324,29 @@ mod tests {
                 "replacing {pattern} with {replacement} shrinks the retained buffer"
             );
         }
+
+        assert!(
+            longest_matchable_sequence() <= MAX_REDACTION_CONTEXT_BYTES,
+            "the longest matchable credential sequence ({} bytes) exceeds {MAX_REDACTION_CONTEXT_BYTES} bytes of slack",
+            longest_matchable_sequence()
+        );
+
+        // The anchored path replaces a value of unknown length, so its non-shrinking property is a
+        // property of the code rather than of a fixed pattern table.
+        for value in ["1", "123", "a-much-longer-rotated-password-value"] {
+            for spelling in [
+                format!("rpcpassword={value}"),
+                format!("rpcpassword: {value}"),
+                format!("\"rpcpassword\":\"{value}\""),
+            ] {
+                let redacted = redact(&spelling);
+                assert!(
+                    redacted.len() >= spelling.len(),
+                    "redacting {spelling} shrank it to {redacted}"
+                );
+                assert!(!redacted.contains(value), "{spelling} -> {redacted}");
+            }
+        }
     }
 
     // Catches a regression that lets a shrinking redaction leave a partial credential at the front of
@@ -284,6 +391,14 @@ mod tests {
             "-rpcpassword=123",
             "rpcpassword=123",
             "rpcpassword 123",
+            // Spellings a service is free to choose that a fixed byte sequence would miss.
+            "rpcpassword=\"123\"",
+            "\"rpcpassword\":\"123\"",
+            "rpcpassword: 123",
+            "rpcpassword:123",
+            "RPCPASSWORD=123",
+            "-RpcPassword=123",
+            "{\"rpcpassword\": \"123\"}",
             "admin1:123",
             "--cookie admin1:123",
             "Authorization: Basic YWRtaW4xOjEyMw==",
@@ -291,9 +406,25 @@ mod tests {
         ] {
             let redacted = redact(spelling);
             assert!(!redacted.contains("admin1"), "{spelling} -> {redacted}");
-            assert!(
-                !redacted.contains("=123") && !redacted.contains(" 123"),
-                "{spelling} -> {redacted}"
+            assert!(!redacted.contains(RPC_PASSWORD), "{spelling} -> {redacted}");
+        }
+    }
+
+    // Catches a regression that makes redaction non-idempotent. Callers re-render already-redacted
+    // text, so a second pass that grows or mangles the marker would shift every bounded tail.
+    #[test]
+    fn redacting_already_redacted_text_changes_nothing() {
+        for spelling in [
+            "-rpcuser=admin1 -rpcpassword=123 admin1:123",
+            "{\"rpcpassword\": \"123\"}",
+            "rpcpassword: 123, rpcuser: admin1",
+            "Authorization: Basic YWRtaW4xOjEyMw==",
+        ] {
+            let once = redact(spelling);
+            let twice = redact(&once);
+            assert_eq!(
+                once, twice,
+                "{spelling} redacts differently on a second pass"
             );
         }
     }
