@@ -19,13 +19,25 @@ const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// dropped before Bitcoind, so the indexer is gone before the node it indexes disappears underneath
 /// it.
 pub struct BitcoinFixture {
-    #[expect(
-        dead_code,
-        reason = "the handles exist only to reap their containers when the fixture is dropped"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the handles exist only to reap their containers when the fixture is dropped"
+        )
     )]
     handles: ContainerHandles<ContainerAsync<GenericImage>, ContainerAsync<GenericImage>>,
     client: NigiriClient<Bitcoin>,
     electrum_endpoint: ElectrumEndpoint,
+    /// Retained so the teardown test can name what must no longer exist once this is dropped.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the network is reaped by Testcontainers; its name is only read when proving that"
+        )
+    )]
+    network: String,
 }
 
 /// The fixture's container handles, held only for their `Drop`.
@@ -33,9 +45,12 @@ pub struct BitcoinFixture {
 /// Declaring them in one place makes the order a property of a type a test can drop, rather than of
 /// two adjacent fields nothing checks. Rust drops fields in declaration order, so the indexer goes
 /// first and is never left pointed at a node that has already disappeared.
-#[expect(
-    dead_code,
-    reason = "these handles exist only to reap their containers when the fixture is dropped"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "these handles exist only to reap their containers when the fixture is dropped"
+    )
 )]
 struct ContainerHandles<Indexer, Node> {
     electrs: Indexer,
@@ -179,6 +194,7 @@ impl BitcoinFixtureBuilder {
             },
             client,
             electrum_endpoint: electrs.electrum_endpoint,
+            network: names.network,
         })
     }
 
@@ -288,6 +304,50 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    // Catches a regression that leaves a container, volume, or network behind. This is the promise
+    // "ephemeral" makes, and it can only be checked from inside the crate: the identifiers of what a
+    // fixture created are deliberately not public.
+    #[tokio::test]
+    #[ignore = "requires Docker and pulls pinned Bitcoin images"]
+    async fn dropping_a_fixture_removes_every_resource_it_created() {
+        use testcontainers::bollard::Docker;
+
+        let fixture = BitcoinFixture::start()
+            .await
+            .expect("a pinned fixture must start against a real daemon");
+        let bitcoind = fixture.handles.bitcoin.id().to_owned();
+        let electrs = fixture.handles.electrs.id().to_owned();
+        let network = fixture.network.clone();
+        println!("created bitcoind={bitcoind} electrs={electrs} network={network}");
+
+        drop(fixture);
+
+        let docker = Docker::connect_with_local_defaults()
+            .expect("the daemon that just served the fixture is reachable");
+        // Removal is asynchronous, so this polls rather than asserting once.
+        let mut outstanding = Vec::new();
+        for _ in 0..100 {
+            outstanding.clear();
+            for container in [&bitcoind, &electrs] {
+                if docker.inspect_container(container, None).await.is_ok() {
+                    outstanding.push(container.clone());
+                }
+            }
+            if docker.inspect_network(&network, None).await.is_ok() {
+                outstanding.push(network.clone());
+            }
+            if outstanding.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        assert!(
+            outstanding.is_empty(),
+            "dropping the fixture left these behind: {outstanding:?}"
+        );
     }
 
     // The one test that proves the whole assembly against a real daemon: a fixture that reports

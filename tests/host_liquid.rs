@@ -48,7 +48,7 @@ async fn liquid_complete_shared_and_asset_contract() -> Result<(), BoxError> {
     assert_eq!(client.get_tx(&funding_txid).await?.txid, funding_txid);
 
     let destination = client.new_address().await?;
-    let signed = signed_wallet_transaction(true, &destination.to_string()).await?;
+    let signed = signed_wallet_transaction(&destination.to_string()).await?;
     let broadcast_txid = client.broadcast_tx(&signed).await?;
     client
         .wait_for_confirmation(&broadcast_txid, Duration::from_secs(30))

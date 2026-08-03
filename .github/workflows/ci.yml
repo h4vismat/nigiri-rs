@@ -143,10 +143,11 @@ jobs:
             curl -fsS "http://localhost:$port/blocks/tip/height" >/dev/null
           done
 
-      # --test-threads=1 is mandatory: the mutating suites reorg a shared chain.
-      - name: Bitcoin host suite
-        run: cargo test --test host_bitcoin --all-features -- --ignored --test-threads=1
+      # Bitcoin needs no host Nigiri: each test starts its own fixture and owns its chain.
+      - name: Bitcoin fixture suite
+        run: cargo test -p nigiri-testcontainers --test bitcoin_fixture --all-features -- --ignored --test-threads=1
 
+      # --test-threads=1 is mandatory: the Liquid suite still reorgs a shared chain.
       - name: Liquid host suite
         run: cargo test --test host_liquid --all-features -- --ignored --test-threads=1
 

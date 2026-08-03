@@ -262,16 +262,23 @@ cargo test
 cargo test --doc
 ```
 
-Host integration tests are always explicit and never silently skip. They reuse the existing host chain and do not stop or delete Nigiri. Mutating tests acquire an exclusive cross-process mutation lock; read-only public RPC tests deliberately run without that lock:
+Bitcoin integration tests need Docker but no Nigiri installation. Each one starts its own funded regtest stack through `nigiri-testcontainers`, owns its chain, and removes everything it created when it finishes:
 
 ```sh
-cargo test --test host_bitcoin -- --ignored --test-threads=1
+cargo test -p nigiri-testcontainers --test bitcoin_fixture -- --ignored --test-threads=1
+```
+
+Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other.
+
+One fixture is ready in about 6 seconds, well inside the 60-second default startup budget. Two started at once measured 103 seconds: the cost is contention, not queueing, because both nodes mine 101 blocks while both indexers follow them. Raise `startup_timeout` when starting fixtures in parallel.
+
+Liquid has no fixture yet, so its integration tests still reuse a host Nigiri chain and do acquire an exclusive cross-process mutation lock. They never stop or delete Nigiri:
+
+```sh
 cargo test --test host_liquid -- --ignored --test-threads=1
 ```
 
-Both Esplora endpoints must be ready before running the host suites. When reusing a stale regtest chain, the host may need to mine a fresh block so the node leaves initial block download and electrs begins serving requests.
-
-The reorg tests record their baseline, invalidate only a tip created by that test, reconsider it before releasing the lock, and leave a valid active chain.
+The Liquid Esplora endpoint must be ready first. When reusing a stale regtest chain, the host may need to mine a fresh block so the node leaves initial block download and electrs begins serving requests. The Liquid reorg test records its baseline, invalidates only a tip it created, reconsiders it before releasing the lock, and leaves a valid active chain.
 
 ## Migrating from 0.1.x
 

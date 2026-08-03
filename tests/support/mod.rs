@@ -34,17 +34,14 @@ impl Drop for HostChainLock {
     }
 }
 
-pub async fn host_rpc(
-    liquid: bool,
-    method: &'static str,
-    args: &[&str],
-) -> Result<String, BoxError> {
-    let mut command = Command::new("nigiri");
-    command.arg("rpc");
-    if liquid {
-        command.arg("--liquid");
-    }
-    let output = command
+/// Runs a Liquid RPC through the host Nigiri CLI.
+///
+/// Bitcoin no longer reaches this: its coverage runs against `nigiri-testcontainers` fixtures, which
+/// need no host installation. Liquid has no fixture yet, so it still shells out.
+pub async fn host_rpc(method: &'static str, args: &[&str]) -> Result<String, BoxError> {
+    let output = Command::new("nigiri")
+        .arg("rpc")
+        .arg("--liquid")
         .arg(method)
         .args(args)
         .stdin(Stdio::null())
@@ -67,30 +64,17 @@ pub async fn host_rpc(
     Ok(stdout)
 }
 
-pub async fn signed_wallet_transaction(
-    liquid: bool,
-    destination: &str,
-) -> Result<String, BoxError> {
-    let outputs = if liquid {
-        serde_json::to_string(&serde_json::json!([{ destination: 0.0001 }]))?
-    } else {
-        serde_json::to_string(&serde_json::json!({ destination: 0.0001 }))?
-    };
-    let raw = host_rpc(liquid, "createrawtransaction", &["[]", &outputs]).await?;
-    let funded = host_rpc(liquid, "fundrawtransaction", &[&raw]).await?;
+pub async fn signed_wallet_transaction(destination: &str) -> Result<String, BoxError> {
+    let outputs = serde_json::to_string(&serde_json::json!([{ destination: 0.0001 }]))?;
+    let raw = host_rpc("createrawtransaction", &["[]", &outputs]).await?;
+    let funded = host_rpc("fundrawtransaction", &[&raw]).await?;
     let funded: Value = serde_json::from_str(&funded)
         .map_err(|_| BoxError::from("fundrawtransaction returned invalid JSON"))?;
     let funded_hex = funded["hex"]
         .as_str()
         .ok_or("fundrawtransaction omitted hex")?;
-    let blinded;
-    let signable_hex = if liquid {
-        blinded = host_rpc(true, "blindrawtransaction", &[funded_hex]).await?;
-        blinded.as_str()
-    } else {
-        funded_hex
-    };
-    let signed = host_rpc(liquid, "signrawtransactionwithwallet", &[signable_hex]).await?;
+    let blinded = host_rpc("blindrawtransaction", &[funded_hex]).await?;
+    let signed = host_rpc("signrawtransactionwithwallet", &[&blinded]).await?;
     let signed: Value = serde_json::from_str(&signed)
         .map_err(|_| BoxError::from("signrawtransactionwithwallet returned invalid JSON"))?;
     if signed["complete"] != Value::Bool(true) {
