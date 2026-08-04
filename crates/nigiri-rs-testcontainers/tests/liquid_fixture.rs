@@ -215,3 +215,20 @@ async fn liquid_public_rpc_deserializes_native_elements_types() -> Result<(), Bo
     assert_eq!(info.bestblockhash.to_string().len(), 64);
     Ok(())
 }
+
+// Catches a fixture that leaves the client reporting the fixed container port.
+#[tokio::test]
+#[ignore = "requires Docker and pulls pinned Liquid images"]
+async fn client_reports_the_mapped_electrum_port() {
+    let fixture = Fixture::<Liquid>::start()
+        .await
+        .expect("a pinned Liquid fixture must start against a real daemon");
+
+    let from_client = fixture.client().electrum_endpoint();
+    assert_ne!(
+        from_client.port(),
+        50_001,
+        "the client must report the mapped port, not the fixed container port"
+    );
+    assert_eq!(from_client, fixture.electrum_endpoint());
+}

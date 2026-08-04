@@ -197,3 +197,22 @@ async fn concurrent_fixtures_are_independent() -> Result<(), BoxError> {
 
     Ok(())
 }
+
+// Catches a fixture that leaves the client reporting the fixed container port. A consumer builds
+// their Electrum connection string from the client, so a stale default here is unreachable in
+// practice and fails only at connect time.
+#[tokio::test]
+#[ignore = "requires Docker and pulls pinned Bitcoin images"]
+async fn client_reports_the_mapped_electrum_port() {
+    let fixture = Fixture::<Bitcoin>::start()
+        .await
+        .expect("a pinned fixture must start against a real daemon");
+
+    let from_client = fixture.client().electrum_endpoint();
+    assert_ne!(
+        from_client.port(),
+        50_000,
+        "the client must report the mapped port, not the fixed container port"
+    );
+    assert_eq!(from_client, fixture.electrum_endpoint());
+}

@@ -28,7 +28,6 @@ pub struct Fixture<C: FixtureChain> {
     )]
     handles: ContainerHandles<ContainerAsync<GenericImage>, ContainerAsync<GenericImage>>,
     client: NigiriClient<C>,
-    electrum_endpoint: ElectrumEndpoint,
     /// Retained so the teardown test can name what must no longer exist once this is dropped.
     #[cfg_attr(
         not(test),
@@ -64,7 +63,7 @@ impl<C: FixtureChain> fmt::Debug for Fixture<C> {
         formatter
             .debug_struct("Fixture")
             .field("chain", &C::CHAIN_NAME)
-            .field("electrum_endpoint", &self.electrum_endpoint)
+            .field("electrum_endpoint", &self.electrum_endpoint())
             .finish_non_exhaustive()
     }
 }
@@ -95,7 +94,7 @@ impl<C: FixtureChain> Fixture<C> {
     /// The mapped Electrum endpoint, for callers that speak the protocol directly.
     #[must_use]
     pub fn electrum_endpoint(&self) -> &ElectrumEndpoint {
-        &self.electrum_endpoint
+        self.client.electrum_endpoint()
     }
 }
 
@@ -178,10 +177,11 @@ impl<C: FixtureChain> FixtureBuilder<C> {
             }
         };
 
-        // The node client cannot be reconfigured in place, so the Esplora base URL Electrs just
-        // published is applied to a copy of the wallet-scoped configuration.
+        // The node client cannot be reconfigured in place, so both endpoints Electrs just
+        // published are applied to a copy of the wallet-scoped configuration.
         let mut client_config = node.client_config.clone();
         client_config.esplora_url = electrs.esplora_url.clone();
+        client_config.electrum = electrs.electrum_endpoint.clone();
         let client = node::fixture_client::<C>(client_config)?;
 
         if let Err(not_ready) =
@@ -199,7 +199,6 @@ impl<C: FixtureChain> FixtureBuilder<C> {
                 node: node.container,
             },
             client,
-            electrum_endpoint: electrs.electrum_endpoint,
             network: names.network,
         })
     }
