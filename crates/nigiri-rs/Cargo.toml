@@ -10,11 +10,12 @@ repository = "https://github.com/h4vismat/nigiri-rs"
 [features]
 default = []
 bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]
-testcontainers = ["dep:nigiri-rs-testcontainers"]
+testcontainers = ["dep:nigiri-rs-testcontainers", "dep:nigiri-rs-macros"]
 
 [dependencies]
 nigiri-rs-core = { version = "0.3.0", path = "../nigiri-rs-core" }
 nigiri-rs-testcontainers = { version = "0.1.0", path = "../nigiri-rs-testcontainers", optional = true }
+nigiri-rs-macros = { version = "0.1.0", path = "../nigiri-rs-macros", optional = true }
 
 [dev-dependencies]
 bitcoin = { version = "0.32.7", features = ["serde"] }

@@ -1,0 +1,16 @@
+[package]
+name = "nigiri-rs-macros"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Procedural macros for nigiri-rs"
+repository = "https://github.com/h4vismat/nigiri-rs"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.86"
+quote = "1.0.37"
+syn = { version = "2.0.77", features = ["full"] }
