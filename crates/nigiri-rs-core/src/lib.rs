@@ -74,6 +74,7 @@
 
 mod client;
 mod config;
+mod endpoint;
 mod error;
 mod http;
 mod liquid;
@@ -87,6 +88,7 @@ pub use corepc_types as bitcoin_rpc_types;
 
 pub use client::NigiriClient;
 pub use config::{DEFAULT_MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES_LIMIT, NigiriConfig};
+pub use endpoint::ElectrumEndpoint;
 pub use error::NigiriError;
 pub use network::{Bitcoin, Liquid, NigiriNetwork};
 pub use types::{

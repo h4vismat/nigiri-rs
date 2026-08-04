@@ -67,11 +67,10 @@ mod owned_start;
 mod readiness;
 
 pub use chain::FixtureChain;
-pub use endpoint::ElectrumEndpoint;
 pub use error::FixtureError;
 pub use fixture::{Fixture, FixtureBuilder};
 pub use image::ContainerImage;
-pub use nigiri_rs_core::{Bitcoin, Liquid};
+pub use nigiri_rs_core::{Bitcoin, ElectrumEndpoint, Liquid};
 
 /// The fixture's regtest RPC credentials.
 ///
