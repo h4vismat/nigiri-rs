@@ -5,10 +5,10 @@
 //! tests can run in parallel and mine or reorg freely without coordinating.
 //!
 //! ```no_run
-//! use nigiri_testcontainers::BitcoinFixture;
+//! use nigiri_testcontainers::{Bitcoin, Fixture};
 //!
 //! # async fn example() -> Result<(), nigiri_testcontainers::FixtureError> {
-//! let fixture = BitcoinFixture::start().await?;
+//! let fixture = Fixture::<Bitcoin>::start().await?;
 //! let client = fixture.client();
 //! let electrum_host = fixture.electrum_endpoint().host();
 //! let electrum_port = fixture.electrum_endpoint().port();
@@ -25,13 +25,13 @@
 //! The first start on a machine pulls two pinned images, which is slow; later starts reuse them and a
 //! fixture is ready in a few seconds.
 //!
-//! When [`BitcoinFixture::start`] returns, the node, Esplora, and Electrum all report the same tip,
+//! When [`Fixture::start`] returns, the node, Esplora, and Electrum all report the same tip,
 //! so the wallet's funds are queryable through any of them. That agreement is established once, at
 //! startup: blocks mined afterwards reach the indexer on its own schedule.
 //!
 //! Starting several fixtures at once costs more than starting one, because every node mines its own
 //! 101 blocks while every indexer follows it. Raise
-//! [`BitcoinFixtureBuilder::startup_timeout`] when doing that.
+//! [`FixtureBuilder::startup_timeout`] when doing that.
 //!
 //! The images are pinned by tag and digest. [`ContainerImage`] can replace them, but an image this
 //! crate has not been tested against may not honour the same arguments.
@@ -52,8 +52,9 @@ mod readiness;
 pub use chain::FixtureChain;
 pub use endpoint::ElectrumEndpoint;
 pub use error::FixtureError;
-pub use fixture::{BitcoinFixture, BitcoinFixtureBuilder};
+pub use fixture::{Fixture, FixtureBuilder};
 pub use image::ContainerImage;
+pub use nigiri_rs::{Bitcoin, Liquid};
 
 /// The fixture's regtest RPC credentials.
 ///

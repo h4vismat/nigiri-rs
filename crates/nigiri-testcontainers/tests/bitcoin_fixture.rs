@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use bitcoin::Amount;
-use nigiri_rs::{Bitcoin, NigiriClient};
-use nigiri_testcontainers::BitcoinFixture;
+use nigiri_rs::NigiriClient;
+use nigiri_testcontainers::{Bitcoin, Fixture};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -51,7 +51,7 @@ async fn signed_wallet_transaction(
 #[tokio::test]
 #[ignore = "requires Docker and pulls pinned Bitcoin images"]
 async fn bitcoin_complete_shared_contract() -> Result<(), BoxError> {
-    let fixture = BitcoinFixture::start().await?;
+    let fixture = Fixture::<Bitcoin>::start().await?;
     let client = fixture.client();
 
     assert!(client.block_height().await? > 0);
@@ -91,7 +91,7 @@ async fn bitcoin_complete_shared_contract() -> Result<(), BoxError> {
 #[tokio::test]
 #[ignore = "requires Docker and pulls pinned Bitcoin images"]
 async fn bitcoin_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
-    let fixture = BitcoinFixture::start().await?;
+    let fixture = Fixture::<Bitcoin>::start().await?;
     let client = fixture.client();
 
     let baseline = client.best_block_hash().await?;
@@ -118,7 +118,7 @@ async fn bitcoin_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
 #[tokio::test]
 #[ignore = "requires Docker and pulls pinned Bitcoin images"]
 async fn bitcoin_public_rpc_deserializes_native_and_core_v30_types() -> Result<(), BoxError> {
-    let fixture = BitcoinFixture::start().await?;
+    let fixture = Fixture::<Bitcoin>::start().await?;
     let client = fixture.client();
 
     let height: u64 = client.rpc("getblockcount", ()).await?;
@@ -152,10 +152,10 @@ const PARALLEL_STARTUP_BUDGET: Duration = Duration::from_secs(180);
 #[ignore = "requires Docker and pulls pinned Bitcoin images"]
 async fn concurrent_fixtures_are_independent() -> Result<(), BoxError> {
     let (left, right) = tokio::try_join!(
-        BitcoinFixture::builder()
+        Fixture::<Bitcoin>::builder()
             .startup_timeout(PARALLEL_STARTUP_BUDGET)
             .start(),
-        BitcoinFixture::builder()
+        Fixture::<Bitcoin>::builder()
             .startup_timeout(PARALLEL_STARTUP_BUDGET)
             .start(),
     )?;
@@ -172,7 +172,9 @@ async fn concurrent_fixtures_are_independent() -> Result<(), BoxError> {
     // Mining on one chain must not move the other. Both heights are read from the nodes rather than
     // through `block_height()`, which reports the indexer's view: a fixture guarantees the two agree
     // when it becomes ready, not that the indexer keeps pace with blocks mined afterwards.
-    async fn node_height(fixture: &BitcoinFixture) -> Result<u64, nigiri_rs::NigiriError> {
+    async fn node_height<C: nigiri_testcontainers::FixtureChain>(
+        fixture: &Fixture<C>,
+    ) -> Result<u64, nigiri_rs::NigiriError> {
         fixture.client().rpc("getblockcount", ()).await
     }
 

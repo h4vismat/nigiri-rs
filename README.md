@@ -37,10 +37,10 @@ This crate does not start or stop anything. Two paths exist, and they can be use
 **Ephemeral fixtures.** The companion `nigiri-testcontainers` crate starts a throwaway Bitcoin regtest stack for a test and removes it afterwards:
 
 ```rust
-use nigiri_testcontainers::BitcoinFixture;
+use nigiri_testcontainers::{Bitcoin, Fixture};
 
 # async fn example() -> Result<(), nigiri_testcontainers::FixtureError> {
-let fixture = BitcoinFixture::start().await?;
+let fixture = Fixture::<Bitcoin>::start().await?;
 let client = fixture.client();
 let electrum_host = fixture.electrum_endpoint().host();
 let electrum_port = fixture.electrum_endpoint().port();

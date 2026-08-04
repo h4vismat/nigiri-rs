@@ -1,8 +1,8 @@
-//! The public fixture: one funded, synchronized Bitcoin regtest stack per instance.
+//! The public fixture: one funded, synchronized regtest stack per instance, generic over chain.
 
-use std::{fmt, time::Duration};
+use std::{fmt, marker::PhantomData, time::Duration};
 
-use nigiri_rs::{Bitcoin, NigiriClient};
+use nigiri_rs::NigiriClient;
 use testcontainers::{ContainerAsync, GenericImage};
 use uuid::Uuid;
 
@@ -13,12 +13,12 @@ use crate::{
 
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// A running Bitcoin regtest stack with a funded wallet, ready to be queried.
+/// A running regtest stack with a funded wallet, ready to be queried.
 ///
 /// Dropping the fixture removes everything it created. The field order is deliberate: Electrs is
-/// dropped before Bitcoind, so the indexer is gone before the node it indexes disappears underneath
+/// dropped before the node, so the indexer is gone before the node it indexes disappears underneath
 /// it.
-pub struct BitcoinFixture {
+pub struct Fixture<C: FixtureChain> {
     #[cfg_attr(
         not(test),
         expect(
@@ -27,7 +27,7 @@ pub struct BitcoinFixture {
         )
     )]
     handles: ContainerHandles<ContainerAsync<GenericImage>, ContainerAsync<GenericImage>>,
-    client: NigiriClient<Bitcoin>,
+    client: NigiriClient<C>,
     electrum_endpoint: ElectrumEndpoint,
     /// Retained so the teardown test can name what must no longer exist once this is dropped.
     #[cfg_attr(
@@ -54,28 +54,30 @@ pub struct BitcoinFixture {
 )]
 struct ContainerHandles<Indexer, Node> {
     electrs: Indexer,
-    bitcoin: Node,
+    node: Node,
 }
 
 // Written by hand rather than derived: the held client's configuration carries the RPC password,
 // and the rest of the crate works to keep that out of any caller-visible text.
-impl fmt::Debug for BitcoinFixture {
+impl<C: FixtureChain> fmt::Debug for Fixture<C> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("BitcoinFixture")
+            .debug_struct("Fixture")
+            .field("chain", &C::CHAIN_NAME)
             .field("electrum_endpoint", &self.electrum_endpoint)
             .finish_non_exhaustive()
     }
 }
 
-impl BitcoinFixture {
+impl<C: FixtureChain> Fixture<C> {
     /// A builder carrying the pinned images and the 60-second startup budget.
     #[must_use]
-    pub fn builder() -> BitcoinFixtureBuilder {
-        BitcoinFixtureBuilder {
+    pub fn builder() -> FixtureBuilder<C> {
+        FixtureBuilder {
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
-            bitcoind_image: ContainerImage::bitcoind_default(),
-            electrs_image: ContainerImage::electrs_default(),
+            node_image: C::node_image_default(),
+            electrs_image: C::electrs_image_default(),
+            chain: PhantomData,
         }
     }
 
@@ -84,9 +86,9 @@ impl BitcoinFixture {
         Self::builder().start().await
     }
 
-    /// A client whose wallet already holds the proceeds of 101 mined blocks.
+    /// A client whose wallet already holds the proceeds of the chain's initial funding.
     #[must_use]
-    pub fn client(&self) -> &NigiriClient<Bitcoin> {
+    pub fn client(&self) -> &NigiriClient<C> {
         &self.client
     }
 
@@ -98,21 +100,34 @@ impl BitcoinFixture {
 }
 
 #[derive(Clone, Debug)]
-pub struct BitcoinFixtureBuilder {
+pub struct FixtureBuilder<C: FixtureChain> {
     startup_timeout: Duration,
-    bitcoind_image: ContainerImage,
+    node_image: ContainerImage,
     electrs_image: ContainerImage,
+    chain: PhantomData<C>,
 }
 
 /// The UUID-scoped names of one fixture's Docker resources.
 #[derive(Debug)]
 struct TopologyNames {
     network: String,
-    bitcoind: String,
+    node: String,
     electrs: String,
 }
 
-impl BitcoinFixtureBuilder {
+/// Scopes every Docker resource of one fixture to a single UUID, so concurrent fixtures cannot
+/// collide and a leaked resource is traceable to the fixture that made it.
+fn topology_names<C: FixtureChain>() -> TopologyNames {
+    let scope = Uuid::new_v4().simple().to_string();
+
+    TopologyNames {
+        network: format!("nigiri-rs-fixture-{scope}"),
+        node: format!("{}-{scope}", C::NODE_NAME_PREFIX),
+        electrs: format!("nigiri-rs-electrs-{scope}"),
+    }
+}
+
+impl<C: FixtureChain> FixtureBuilder<C> {
     /// Overrides the budget for the whole startup, not for any single step within it.
     #[must_use]
     pub fn startup_timeout(mut self, timeout: Duration) -> Self {
@@ -121,8 +136,8 @@ impl BitcoinFixtureBuilder {
     }
 
     #[must_use]
-    pub fn bitcoind_image(mut self, image: ContainerImage) -> Self {
-        self.bitcoind_image = image;
+    pub fn node_image(mut self, image: ContainerImage) -> Self {
+        self.node_image = image;
         self
     }
 
@@ -132,88 +147,61 @@ impl BitcoinFixtureBuilder {
         self
     }
 
-    /// Starts Bitcoind, funds a wallet, starts Electrs, and returns only once all three services
+    /// Starts the node, funds a wallet, starts Electrs, and returns only once all three services
     /// agree on the tip.
     ///
     /// One `Deadline` covers everything after validation, so a slow phase spends budget the later
     /// phases no longer have, rather than each phase getting a fresh clock.
-    pub async fn start(self) -> Result<BitcoinFixture, FixtureError> {
-        self.bitcoind_image.validate()?;
+    pub async fn start(self) -> Result<Fixture<C>, FixtureError> {
+        self.node_image.validate()?;
         self.electrs_image.validate()?;
 
-        let names = Self::topology_names();
+        let names = topology_names::<C>();
         let deadline = crate::deadline::Deadline::new(self.startup_timeout)?;
 
-        let bitcoin = node::start_node::<Bitcoin>(
-            &self.bitcoind_image,
-            &names.network,
-            &names.bitcoind,
-            &deadline,
-        )
-        .await?;
+        let node =
+            node::start_node::<C>(&self.node_image, &names.network, &names.node, &deadline).await?;
 
-        let electrs = match electrs::start_electrs::<Bitcoin>(
+        let electrs = match electrs::start_electrs::<C>(
             &self.electrs_image,
             &names.network,
             &names.electrs,
-            &names.bitcoind,
+            &names.node,
             &deadline,
         )
         .await
         {
             Ok(electrs) => electrs,
-            // Bitcoind is running and holds the only account of what Electrs was pointed at.
+            // The node is running and holds the only account of what Electrs was pointed at.
             Err(error) => {
-                return Err(attach_container_log(
-                    <Bitcoin as FixtureChain>::NODE_SERVICE,
-                    error,
-                    &bitcoin.container,
-                )
-                .await);
+                return Err(attach_container_log(C::NODE_SERVICE, error, &node.container).await);
             }
         };
 
         // The node client cannot be reconfigured in place, so the Esplora base URL Electrs just
         // published is applied to a copy of the wallet-scoped configuration.
-        let mut client_config = bitcoin.client_config.clone();
+        let mut client_config = node.client_config.clone();
         client_config.esplora_url = electrs.esplora_url.clone();
-        let client = node::fixture_client::<Bitcoin>(client_config)?;
+        let client = node::fixture_client::<C>(client_config)?;
 
         if let Err(not_ready) =
-            readiness::wait_for_sync(&client, &electrs.electrum_endpoint, &deadline).await
+            readiness::wait_for_sync::<C>(&client, &electrs.electrum_endpoint, &deadline).await
         {
             // Whichever service fell behind, its own log is what explains why.
             let with_electrs =
                 attach_container_log(electrs::SERVICE, not_ready, &electrs.container).await;
-            return Err(attach_container_log(
-                <Bitcoin as FixtureChain>::NODE_SERVICE,
-                with_electrs,
-                &bitcoin.container,
-            )
-            .await);
+            return Err(attach_container_log(C::NODE_SERVICE, with_electrs, &node.container).await);
         }
 
-        Ok(BitcoinFixture {
+        Ok(Fixture {
             handles: ContainerHandles {
                 electrs: electrs.container,
-                bitcoin: bitcoin.container,
+                node: node.container,
             },
             client,
             electrum_endpoint: electrs.electrum_endpoint,
             network: names.network,
         })
-    }
-
-    /// Scopes every Docker resource of one fixture to a single UUID, so concurrent fixtures cannot
-    /// collide and a leaked resource is traceable to the fixture that made it.
-    fn topology_names() -> TopologyNames {
-        let scope = Uuid::new_v4().simple().to_string();
-
-        TopologyNames {
-            network: format!("nigiri-rs-fixture-{scope}"),
-            bitcoind: format!("nigiri-rs-bitcoind-{scope}"),
-            electrs: format!("nigiri-rs-electrs-{scope}"),
-        }
     }
 }
 
@@ -221,7 +209,9 @@ impl BitcoinFixtureBuilder {
 mod tests {
     use std::time::Duration;
 
-    use super::{BitcoinFixture, BitcoinFixtureBuilder, ContainerHandles};
+    use nigiri_rs::Bitcoin;
+
+    use super::{ContainerHandles, Fixture};
     use crate::{ContainerImage, FixtureError};
 
     /// Reports the order in which the fixture released its handles.
@@ -250,7 +240,7 @@ mod tests {
                 name: "electrs",
                 order: std::sync::Arc::clone(&order),
             },
-            bitcoin: DropOrderRecorder {
+            node: DropOrderRecorder {
                 name: "bitcoind",
                 order: std::sync::Arc::clone(&order),
             },
@@ -266,10 +256,10 @@ mod tests {
     // images and the 60-second budget the whole design is bounded by.
     #[test]
     fn builder_defaults_are_pinned_and_sixty_seconds() {
-        let builder = BitcoinFixture::builder();
+        let builder = Fixture::<Bitcoin>::builder();
 
         assert_eq!(builder.startup_timeout, Duration::from_secs(60));
-        assert_eq!(builder.bitcoind_image, ContainerImage::bitcoind_default());
+        assert_eq!(builder.node_image, ContainerImage::bitcoind_default());
         assert_eq!(builder.electrs_image, ContainerImage::electrs_default());
     }
 
@@ -280,13 +270,13 @@ mod tests {
         let image = ContainerImage::new("registry.invalid/bitcoin", "30");
         let electrs = ContainerImage::new("registry.invalid/electrs", "latest");
 
-        let builder = BitcoinFixture::builder()
+        let builder = Fixture::<Bitcoin>::builder()
             .startup_timeout(Duration::from_secs(90))
-            .bitcoind_image(image.clone())
+            .node_image(image.clone())
             .electrs_image(electrs.clone());
 
         assert_eq!(builder.startup_timeout, Duration::from_secs(90));
-        assert_eq!(builder.bitcoind_image, image);
+        assert_eq!(builder.node_image, image);
         assert_eq!(builder.electrs_image, electrs);
     }
 
@@ -295,9 +285,10 @@ mod tests {
     #[tokio::test]
     async fn invalid_inputs_are_rejected_before_any_container_is_started() {
         let rejected = [
-            BitcoinFixture::builder().bitcoind_image(ContainerImage::new("", "v30.0")),
-            BitcoinFixture::builder().electrs_image(ContainerImage::new("registry.invalid/e", "")),
-            BitcoinFixture::builder().startup_timeout(Duration::ZERO),
+            Fixture::<Bitcoin>::builder().node_image(ContainerImage::new("", "v30.0")),
+            Fixture::<Bitcoin>::builder()
+                .electrs_image(ContainerImage::new("registry.invalid/e", "")),
+            Fixture::<Bitcoin>::builder().startup_timeout(Duration::ZERO),
         ];
 
         for builder in rejected {
@@ -326,10 +317,10 @@ mod tests {
     async fn dropping_a_fixture_removes_every_resource_it_created() {
         use testcontainers::bollard::{Docker, models::MountPointTypeEnum};
 
-        let fixture = BitcoinFixture::start()
+        let fixture = Fixture::<Bitcoin>::start()
             .await
             .expect("a pinned fixture must start against a real daemon");
-        let bitcoind = fixture.handles.bitcoin.id().to_owned();
+        let bitcoind = fixture.handles.node.id().to_owned();
         let electrs = fixture.handles.electrs.id().to_owned();
         let network = fixture.network.clone();
 
@@ -430,7 +421,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Docker and pulls pinned Bitcoin images"]
     async fn fixture_starts_ready() {
-        let fixture = BitcoinFixture::start()
+        let fixture = Fixture::<Bitcoin>::start()
             .await
             .expect("a pinned fixture must start against a real daemon");
 
@@ -459,24 +450,21 @@ mod tests {
     // concurrent fixtures collide on the host instead of running independently.
     #[test]
     fn every_fixture_scopes_its_own_topology_names() {
-        let first = BitcoinFixtureBuilder::topology_names();
-        let second = BitcoinFixtureBuilder::topology_names();
+        let first = super::topology_names::<Bitcoin>();
+        let second = super::topology_names::<Bitcoin>();
 
         assert_ne!(first.network, second.network);
-        assert_ne!(first.bitcoind, second.bitcoind);
+        assert_ne!(first.node, second.node);
         assert_ne!(first.electrs, second.electrs);
         assert!(first.network.starts_with("nigiri-rs-fixture-"), "{first:?}");
-        assert!(
-            first.bitcoind.starts_with("nigiri-rs-bitcoind-"),
-            "{first:?}"
-        );
+        assert!(first.node.starts_with("nigiri-rs-bitcoind-"), "{first:?}");
         assert!(first.electrs.starts_with("nigiri-rs-electrs-"), "{first:?}");
         // One UUID scopes the whole topology, so a leaked resource is traceable to one fixture.
         let suffix = first
             .network
             .strip_prefix("nigiri-rs-fixture-")
             .expect("the network name carries the topology suffix");
-        assert!(first.bitcoind.ends_with(suffix));
+        assert!(first.node.ends_with(suffix));
         assert!(first.electrs.ends_with(suffix));
     }
 }

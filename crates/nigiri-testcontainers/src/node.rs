@@ -128,7 +128,7 @@ pub(crate) fn fixture_client<C: FixtureChain>(
 /// The node RPC half of a fixture client's configuration.
 ///
 /// `esplora_url` is a self-pointing placeholder: only the node half is known here, and
-/// `BitcoinFixtureBuilder::start` replaces it with the Esplora base URL Electrs publishes.
+/// `FixtureBuilder::start` replaces it with the Esplora base URL Electrs publishes.
 fn fixture_rpc_config(node_rpc_url: Url, timeout: Duration) -> NigiriConfig {
     NigiriConfig {
         esplora_url: node_rpc_url.clone(),
