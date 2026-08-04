@@ -1,5 +1,18 @@
 # nigiri-rs
 
+## Crates
+
+| Crate | What it is |
+| --- | --- |
+| `nigiri-rs` | The facade. Depend on this. Re-exports the client, and the fixtures behind the `testcontainers` feature. |
+| `nigiri-rs-core` | The typed Bitcoin and Liquid clients. Re-exported in full by the facade. |
+| `nigiri-rs-testcontainers` | Ephemeral Docker-backed regtest fixtures: a node, an indexer, and a funded wallet per test. |
+| `nigiri-rs-macros` | Procedural macros for the above. |
+
+The bare `nigiri-*` names on crates.io are deliberately unused: Nigiri is
+[Vulpem Ventures'](https://github.com/vulpemventures/nigiri) project, and this is an unaffiliated
+Rust port.
+
 `nigiri-rs` is a typed asynchronous client for compatible Bitcoin and Liquid regtest services. A host-owned [Nigiri](https://github.com/vulpemventures/nigiri) environment is one compatible setup, not the only architecture.
 
 Version 0.3.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
@@ -16,7 +29,7 @@ The host owns the complete lifecycle of its regtest services. This library provi
 - removes containers or volumes;
 - performs cleanup from `Drop`.
 
-Host-owned Nigiri remains a compatible setup; start it before pointing a client at the default endpoints. The `nigiri-testcontainers` companion crate in this workspace provides fixture lifecycle separately, and this core crate does not depend on it: no Docker or Testcontainers dependency is added here. Nothing in this repository's own test suite needs a host Nigiri installation any more: both chains' integration tests run against ephemeral `nigiri-testcontainers` fixtures and require only Docker.
+Host-owned Nigiri remains a compatible setup; start it before pointing a client at the default endpoints. The `nigiri-rs-testcontainers` companion crate in this workspace provides fixture lifecycle separately, and this core crate does not depend on it: no Docker or Testcontainers dependency is added here. Nothing in this repository's own test suite needs a host Nigiri installation any more: both chains' integration tests run against ephemeral `nigiri-rs-testcontainers` fixtures and require only Docker.
 
 Start the required services before pointing a client at them:
 
@@ -34,12 +47,17 @@ The verified CLI and port contract is Nigiri v0.5.16, commit `39fd5891d093bfb8c2
 
 This crate does not start or stop anything. Two paths exist, and they can be used side by side.
 
-**Ephemeral fixtures.** The companion `nigiri-testcontainers` crate starts a throwaway Bitcoin or Liquid regtest stack for a test and removes it afterwards:
+**Ephemeral fixtures.** The companion `nigiri-rs-testcontainers` crate, reached through the facade's `testcontainers` feature, starts a throwaway Bitcoin or Liquid regtest stack for a test and removes it afterwards:
+
+```toml
+[dev-dependencies]
+nigiri-rs = { version = "0.4", features = ["testcontainers"] }
+```
 
 ```rust
-use nigiri_testcontainers::{Bitcoin, Fixture};
+use nigiri_rs::testcontainers::{Bitcoin, Fixture};
 
-# async fn example() -> Result<(), nigiri_testcontainers::FixtureError> {
+# async fn example() -> Result<(), nigiri_rs::testcontainers::FixtureError> {
 let fixture = Fixture::<Bitcoin>::start().await?;
 let client = fixture.client();
 let electrum_host = fixture.electrum_endpoint().host();
@@ -164,7 +182,7 @@ Arbitrary RPC methods may mutate node wallets or active chain state. Tests using
 Enable the optional re-export when the caller wants maintained Bitcoin Core response records:
 
 ```toml
-nigiri-rs = { version = "0.3.0", features = ["bitcoin-rpc-types"] }
+nigiri-rs = { version = "0.4", features = ["bitcoin-rpc-types"] }
 ```
 
 ```rust,no_run
@@ -285,11 +303,11 @@ cargo test
 cargo test --doc
 ```
 
-Bitcoin and Liquid integration tests need Docker but no Nigiri installation. Each one starts its own funded regtest stack through `nigiri-testcontainers`, owns its chain, and removes everything it created when it finishes:
+Bitcoin and Liquid integration tests need Docker but no Nigiri installation. Each one starts its own funded regtest stack through `nigiri-rs-testcontainers`, owns its chain, and removes everything it created when it finishes:
 
 ```sh
-cargo test -p nigiri-testcontainers --test bitcoin_fixture -- --ignored --test-threads=1
-cargo test -p nigiri-testcontainers --test liquid_fixture -- --ignored --test-threads=1
+cargo test -p nigiri-rs-testcontainers --test bitcoin_fixture -- --ignored --test-threads=1
+cargo test -p nigiri-rs-testcontainers --test liquid_fixture -- --ignored --test-threads=1
 ```
 
 Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other, and the two suites can run at once.

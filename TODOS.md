@@ -21,8 +21,8 @@ unverified. Make it idempotent so re-running a failed release does not error.
 
 Surfaced by the 0.3.0 specialist review:
 
-- `LiquidBlockchainInfo` is declared in both `tests/rpc_api.rs` and
-  `crates/nigiri-testcontainers/tests/liquid_fixture.rs` with the same three fields but
+- `LiquidBlockchainInfo` is declared in both `crates/nigiri-rs-core/tests/rpc_api.rs` and
+  `crates/nigiri-rs-testcontainers/tests/liquid_fixture.rs` with the same three fields but
   `blocks: i64` in one and `u64` in the other. The divergence is arbitrary.
 ## Completed
 
