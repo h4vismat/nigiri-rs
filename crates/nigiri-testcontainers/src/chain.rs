@@ -7,6 +7,7 @@ use nigiri_rs::{NigiriClient, NigiriNetwork};
 use crate::{ContainerImage, FixtureError, deadline::Deadline};
 
 mod bitcoin;
+mod liquid;
 
 /// A chain a fixture can start, and the six things that differ between chains.
 ///
@@ -95,6 +96,44 @@ mod tests {
             electrs
                 .iter()
                 .any(|argument| argument == "nigiri-rs-bitcoind-abc:18443")
+        );
+    }
+
+    // Catches a regression that changes the Liquid topology contract, and one that reintroduces a
+    // parameter this Elements build rejects. `-con_dyna_deploy_start`,
+    // `-con_nminerconfirmationwindow`, `-con_nrulechangeactivationthreshold`,
+    // `-con_taproot_signal_start`, and `-pchmessagestart` appear in Nigiri's elements.conf but are
+    // rejected outright on argv and are silently ignored in the conf; porting them makes the node
+    // refuse to start. Verified 2026-08-03.
+    #[test]
+    fn liquid_declares_its_topology_and_omits_the_parameters_elements_rejects() {
+        use nigiri_rs::Liquid;
+
+        assert_eq!(Liquid::NODE_SERVICE, "elements");
+        assert_eq!(Liquid::CHAIN_NAME, "Liquid");
+        assert_eq!(Liquid::NODE_RPC_PORT, 18_884);
+        assert_eq!(Liquid::ELECTRS_HTTP_PORT, 30_001);
+        assert_eq!(Liquid::ELECTRS_ELECTRUM_PORT, 50_001);
+        assert_eq!(Liquid::NODE_NAME_PREFIX, "nigiri-rs-elements");
+
+        let node = Liquid::node_cmd();
+        for rejected in [
+            "-con_dyna_deploy_start",
+            "-con_nminerconfirmationwindow",
+            "-con_nrulechangeactivationthreshold",
+            "-con_taproot_signal_start",
+            "-pchmessagestart",
+        ] {
+            assert!(
+                !node.iter().any(|argument| argument.starts_with(rejected)),
+                "{rejected} is rejected by elementsd and must not be passed"
+            );
+        }
+        // Without this the wallet cannot reach the genesis outputs and has no funds at all:
+        // Liquid has no block subsidy, so mining does not fund anything.
+        assert!(
+            node.iter()
+                .any(|argument| argument == "-con_connect_genesis_outputs=1")
         );
     }
 }

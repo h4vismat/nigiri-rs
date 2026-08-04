@@ -77,6 +77,16 @@ impl ContainerImage {
         Self::new("ghcr.io/vulpemventures/electrs", "latest")
             .with_digest("sha256:999a2218f423c0fb167ee53b282aa7929a9d4abba38ef16f67f407acd00589d4")
     }
+
+    pub(crate) fn elements_default() -> Self {
+        Self::new("ghcr.io/vulpemventures/elements", "latest")
+            .with_digest("sha256:8900acd1f8eb4bb9e3f66cd400419155b273137e4526cc5d670ea1a5a25018d8")
+    }
+
+    pub(crate) fn electrs_liquid_default() -> Self {
+        Self::new("ghcr.io/vulpemventures/electrs-liquid", "latest")
+            .with_digest("sha256:d801d1ab07e7a3379462b9d09cf5bb4fada1ced67b001a1a2de31e027c2f6055")
+    }
 }
 
 fn is_sha256_digest(digest: &str) -> bool {
@@ -141,6 +151,31 @@ mod tests {
         electrs
             .validate()
             .expect("the pinned electrs image descriptor is valid");
+
+        let elements = ContainerImage::elements_default();
+        assert_eq!(elements.name(), "ghcr.io/vulpemventures/elements");
+        assert_eq!(elements.tag(), "latest");
+        assert_eq!(
+            elements.digest(),
+            Some("sha256:8900acd1f8eb4bb9e3f66cd400419155b273137e4526cc5d670ea1a5a25018d8")
+        );
+        elements
+            .validate()
+            .expect("the pinned Elements image descriptor is valid");
+
+        let electrs_liquid = ContainerImage::electrs_liquid_default();
+        assert_eq!(
+            electrs_liquid.name(),
+            "ghcr.io/vulpemventures/electrs-liquid"
+        );
+        assert_eq!(electrs_liquid.tag(), "latest");
+        assert_eq!(
+            electrs_liquid.digest(),
+            Some("sha256:d801d1ab07e7a3379462b9d09cf5bb4fada1ced67b001a1a2de31e027c2f6055")
+        );
+        electrs_liquid
+            .validate()
+            .expect("the pinned Liquid Electrs image descriptor is valid");
     }
 
     // Catches a regression that forces caller-provided images to have a digest.
