@@ -37,6 +37,7 @@
 //! crate has not been tested against may not honour the same arguments.
 
 mod bitcoind;
+mod chain;
 mod deadline;
 mod diagnostics;
 mod electrs;
@@ -48,6 +49,7 @@ mod image;
 mod owned_start;
 mod readiness;
 
+pub use chain::FixtureChain;
 pub use endpoint::ElectrumEndpoint;
 pub use error::FixtureError;
 pub use fixture::{BitcoinFixture, BitcoinFixtureBuilder};
