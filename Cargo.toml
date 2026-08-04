@@ -23,5 +23,5 @@ tokio = { version = "1.50.0", features = ["io-util", "macros", "net", "process",
 url = "2.5.8"
 
 [workspace]
-members = [".", "crates/nigiri-testcontainers"]
+members = [".", "crates/nigiri-rs-testcontainers"]
 resolver = "2"

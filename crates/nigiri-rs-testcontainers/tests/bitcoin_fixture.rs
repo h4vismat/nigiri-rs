@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bitcoin::Amount;
 use nigiri_rs::NigiriClient;
-use nigiri_testcontainers::{Bitcoin, Fixture};
+use nigiri_rs_testcontainers::{Bitcoin, Fixture};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -176,7 +176,7 @@ async fn concurrent_fixtures_are_independent() -> Result<(), BoxError> {
     // Mining on one chain must not move the other. Both heights are read from the nodes rather than
     // through `block_height()`, which reports the indexer's view: a fixture guarantees the two agree
     // when it becomes ready, not that the indexer keeps pace with blocks mined afterwards.
-    async fn node_height<C: nigiri_testcontainers::FixtureChain>(
+    async fn node_height<C: nigiri_rs_testcontainers::FixtureChain>(
         fixture: &Fixture<C>,
     ) -> Result<u64, nigiri_rs::NigiriError> {
         fixture.client().rpc("getblockcount", ()).await

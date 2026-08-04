@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use bitcoin::Amount;
-use nigiri_testcontainers::{Fixture, Liquid};
+use nigiri_rs_testcontainers::{Fixture, Liquid};
 use serde::Deserialize;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;

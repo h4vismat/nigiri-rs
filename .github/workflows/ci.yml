@@ -104,7 +104,7 @@ jobs:
       - name: cargo package nigiri-rs
         run: cargo package -p nigiri-rs --all-features
 
-      # nigiri-testcontainers is deliberately not packaged here. Packaging resolves its
+      # nigiri-rs-testcontainers is deliberately not packaged here. Packaging resolves its
       # `nigiri-rs = "0.3.0"` requirement against crates.io even under --no-verify, and only 0.2.0
       # is published, so the step cannot pass until nigiri-rs is released. Its metadata is still
       # checked by the workspace build and by `cargo metadata` below.
@@ -130,13 +130,13 @@ jobs:
 
       # --test-threads=1 keeps image pulls and container starts sequential on a shared runner.
       - name: Bitcoin fixture suite
-        run: cargo test -p nigiri-testcontainers --test bitcoin_fixture --all-features -- --ignored --test-threads=1 --nocapture
+        run: cargo test -p nigiri-rs-testcontainers --test bitcoin_fixture --all-features -- --ignored --test-threads=1 --nocapture
 
       - name: Liquid fixture suite
-        run: cargo test -p nigiri-testcontainers --test liquid_fixture --all-features -- --ignored --test-threads=1 --nocapture
+        run: cargo test -p nigiri-rs-testcontainers --test liquid_fixture --all-features -- --ignored --test-threads=1 --nocapture
 
       # Proves the ephemeral promise for both chains, and runs every other ignored lib test (e.g.
       # the end-to-end Bitcoin readiness proof): these live inside the crate because the
       # identifiers of what a fixture created are deliberately not public.
       - name: Ignored lib tests (fixture teardown and readiness proofs)
-        run: cargo test -p nigiri-testcontainers --lib --all-features -- --ignored --test-threads=1 --nocapture
+        run: cargo test -p nigiri-rs-testcontainers --lib --all-features -- --ignored --test-threads=1 --nocapture

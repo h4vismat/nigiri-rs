@@ -3,7 +3,7 @@
 //! This lifecycle-neutral core crate does not provision services: point it at a
 //! Nigiri installation or any compatible endpoints you already run.
 //!
-//! To have the services provisioned for you, use the companion `nigiri-testcontainers`
+//! To have the services provisioned for you, use the companion `nigiri-rs-testcontainers`
 //! crate in this workspace. It starts a throwaway Bitcoin regtest stack per test,
 //! hands back a client already pointed at it, and removes everything on drop. It
 //! needs Docker and no Nigiri installation. This crate does not depend on it.

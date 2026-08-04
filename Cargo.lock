@@ -1317,7 +1317,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nigiri-testcontainers"
+name = "nigiri-rs-testcontainers"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
