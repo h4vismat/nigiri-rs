@@ -108,6 +108,9 @@ async fn signed_wallet_transaction(
     let signed: serde_json::Value = client
         .rpc("signrawtransactionwithwallet", (blinded,))
         .await?;
+    if signed["complete"] != serde_json::Value::Bool(true) {
+        return Err("wallet did not completely sign fixture transaction".into());
+    }
     Ok(signed["hex"]
         .as_str()
         .ok_or("signrawtransactionwithwallet returned no hex")?
