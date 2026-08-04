@@ -135,7 +135,7 @@ jobs:
       # Proves the ephemeral promise: this one lives inside the crate because the identifiers of what
       # a fixture created are deliberately not public.
       - name: Fixture teardown proof
-        run: cargo test -p nigiri-testcontainers --lib --all-features dropping_a_fixture_removes_every_resource_it_created -- --ignored --nocapture
+        run: cargo test -p nigiri-testcontainers --lib --all-features dropping_a -- --ignored --test-threads=1 --nocapture
 
   host-tests:
     name: Liquid host suite against live Nigiri

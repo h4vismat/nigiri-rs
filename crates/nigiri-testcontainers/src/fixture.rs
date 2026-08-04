@@ -209,10 +209,10 @@ impl<C: FixtureChain> FixtureBuilder<C> {
 mod tests {
     use std::time::Duration;
 
-    use nigiri_rs::Bitcoin;
+    use nigiri_rs::{Bitcoin, Liquid};
 
     use super::{ContainerHandles, Fixture};
-    use crate::{ContainerImage, FixtureError};
+    use crate::{ContainerImage, FixtureChain, FixtureError};
 
     /// Reports the order in which the fixture released its handles.
     struct DropOrderRecorder {
@@ -241,14 +241,14 @@ mod tests {
                 order: std::sync::Arc::clone(&order),
             },
             node: DropOrderRecorder {
-                name: "bitcoind",
+                name: "node",
                 order: std::sync::Arc::clone(&order),
             },
         });
 
         assert_eq!(
             *order.lock().expect("the recorded order is never poisoned"),
-            ["electrs", "bitcoind"]
+            ["electrs", "node"]
         );
     }
 
@@ -312,12 +312,10 @@ mod tests {
     //
     // Storage is asserted before the drop and absence after it, in one fixture, because starting a
     // second one to check the other half would double the slowest test in the suite.
-    #[tokio::test]
-    #[ignore = "requires Docker and pulls pinned Bitcoin images"]
-    async fn dropping_a_fixture_removes_every_resource_it_created() {
+    async fn assert_dropping_a_fixture_removes_every_resource_it_created<C: FixtureChain>() {
         use testcontainers::bollard::{Docker, models::MountPointTypeEnum};
 
-        let fixture = Fixture::<Bitcoin>::start()
+        let fixture = Fixture::<C>::start()
             .await
             .expect("a pinned fixture must start against a real daemon");
         let bitcoind = fixture.handles.node.id().to_owned();
@@ -414,6 +412,18 @@ mod tests {
             outstanding.is_empty(),
             "dropping the fixture left these behind: {outstanding:?}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker and pulls pinned Bitcoin images"]
+    async fn dropping_a_bitcoin_fixture_removes_every_resource_it_created() {
+        assert_dropping_a_fixture_removes_every_resource_it_created::<Bitcoin>().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker and pulls pinned Liquid images"]
+    async fn dropping_a_liquid_fixture_removes_every_resource_it_created() {
+        assert_dropping_a_fixture_removes_every_resource_it_created::<Liquid>().await;
     }
 
     // The one test that proves the whole assembly against a real daemon: a fixture that reports
