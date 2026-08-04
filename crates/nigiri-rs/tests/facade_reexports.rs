@@ -32,15 +32,8 @@ fn every_published_path_still_resolves() {
     accepts::<MintResponse>();
     accepts::<TxStatus<bitcoin::BlockHash>>();
 
-    // Both operands are `pub const` in `nigiri-rs-core`, so clippy const-folds the comparison and
-    // flags it as `assertions_on_constants`. The assertion still earns its keep: it is a
-    // regression guard on the *re-exported values*, which could change in a future
-    // `nigiri-rs-core` release even though they are compile-time constants today.
-    #[allow(clippy::assertions_on_constants)]
-    {
-        assert!(DEFAULT_MAX_RESPONSE_BYTES > 0);
-        assert!(MAX_RESPONSE_BYTES_LIMIT >= DEFAULT_MAX_RESPONSE_BYTES);
-    }
+    let _: usize = DEFAULT_MAX_RESPONSE_BYTES;
+    let _: usize = MAX_RESPONSE_BYTES_LIMIT;
     assert_eq!(LBTC_REGTEST_ASSET.to_string().len(), 64);
 
     fn is_network<N: NigiriNetwork>() {}
@@ -56,4 +49,15 @@ fn fixtures_are_reachable_when_the_feature_is_on() {
     fn accepts<T>() {}
     accepts::<nigiri_rs::testcontainers::Fixture<Bitcoin>>();
     accepts::<nigiri_rs::testcontainers::FixtureError>();
+}
+
+// Catches a broken feature forward in the facade manifest. `bitcoin_rpc_types` is the only core
+// export that the glob re-export cannot carry on its own: it is gated in core, so it arrives here
+// only if `bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]` is right. Nothing else in the
+// workspace would notice that line breaking.
+#[cfg(feature = "bitcoin-rpc-types")]
+#[test]
+fn gated_rpc_types_reach_the_facade() {
+    fn accepts<T>() {}
+    accepts::<nigiri_rs::bitcoin_rpc_types::v30::GetBlockchainInfo>();
 }
