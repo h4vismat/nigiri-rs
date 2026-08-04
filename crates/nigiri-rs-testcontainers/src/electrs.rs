@@ -105,7 +105,7 @@ mod tests {
     // that never reaches readiness.
     #[test]
     fn request_exposes_the_chains_indexer_ports() {
-        use nigiri_rs::Bitcoin;
+        use nigiri_rs_core::Bitcoin;
 
         let request = super::request::<Bitcoin>(
             &ContainerImage::electrs_default(),
@@ -135,7 +135,7 @@ mod tests {
     // Catches a regression that defers invalid image validation until Docker request startup.
     #[test]
     fn request_rejects_invalid_images_before_constructing_a_request() {
-        use nigiri_rs::Bitcoin;
+        use nigiri_rs_core::Bitcoin;
 
         let error = match request::<Bitcoin>(
             &ContainerImage::new("registry.example/electrs", ""),

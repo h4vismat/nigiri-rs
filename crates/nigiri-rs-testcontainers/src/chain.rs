@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use nigiri_rs::{NigiriClient, NigiriNetwork};
+use nigiri_rs_core::{NigiriClient, NigiriNetwork};
 
 use crate::{ContainerImage, FixtureError, deadline::Deadline};
 
@@ -50,13 +50,13 @@ pub trait FixtureChain: NigiriNetwork + Sized + private::Sealed + 'static {
 pub(crate) mod private {
     pub trait Sealed {}
 
-    impl Sealed for nigiri_rs::Bitcoin {}
-    impl Sealed for nigiri_rs::Liquid {}
+    impl Sealed for nigiri_rs_core::Bitcoin {}
+    impl Sealed for nigiri_rs_core::Liquid {}
 }
 
 #[cfg(test)]
 mod tests {
-    use nigiri_rs::Bitcoin;
+    use nigiri_rs_core::Bitcoin;
 
     use super::FixtureChain;
     use crate::ContainerImage;
@@ -107,7 +107,7 @@ mod tests {
     // refuse to start. Verified 2026-08-03.
     #[test]
     fn liquid_declares_its_topology_and_omits_the_parameters_elements_rejects() {
-        use nigiri_rs::Liquid;
+        use nigiri_rs_core::Liquid;
 
         assert_eq!(Liquid::NODE_SERVICE, "elements");
         assert_eq!(Liquid::CHAIN_NAME, "Liquid");

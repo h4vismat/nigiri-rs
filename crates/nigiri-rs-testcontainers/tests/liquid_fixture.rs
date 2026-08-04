@@ -92,7 +92,7 @@ struct LiquidBlockchainInfo {
 /// signed until its value and asset are blinded. Note also that Liquid's `createrawtransaction`
 /// takes an *array* of output objects where Bitcoin's takes a single object.
 async fn signed_wallet_transaction(
-    client: &nigiri_rs::NigiriClient<Liquid>,
+    client: &nigiri_rs_core::NigiriClient<Liquid>,
     destination: &str,
 ) -> Result<String, BoxError> {
     let outputs = serde_json::json!([{ destination: "0.00010000" }]);
@@ -187,7 +187,7 @@ async fn liquid_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
     let mutation = async {
         client.invalidate_block(&test_tip).await?;
         assert_ne!(client.best_block_hash().await?, test_tip);
-        Ok::<_, nigiri_rs::NigiriError>(())
+        Ok::<_, nigiri_rs_core::NigiriError>(())
     }
     .await;
     let cleanup = client.reconsider_block(&test_tip).await;

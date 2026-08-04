@@ -2,7 +2,7 @@
 
 use std::{fmt, marker::PhantomData, time::Duration};
 
-use nigiri_rs::NigiriClient;
+use nigiri_rs_core::NigiriClient;
 use testcontainers::{ContainerAsync, GenericImage};
 use uuid::Uuid;
 
@@ -209,7 +209,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
 mod tests {
     use std::time::Duration;
 
-    use nigiri_rs::{Bitcoin, Liquid};
+    use nigiri_rs_core::{Bitcoin, Liquid};
 
     use super::{ContainerHandles, Fixture};
     use crate::{ContainerImage, FixtureChain, FixtureError};

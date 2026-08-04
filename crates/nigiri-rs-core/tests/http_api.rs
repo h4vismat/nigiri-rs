@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bitcoin::Amount;
-use nigiri_rs::{
+use nigiri_rs_core::{
     Bitcoin, DEFAULT_MAX_RESPONSE_BYTES, Liquid, NigiriClient, NigiriConfig, NigiriError,
 };
 use serde_json::Value;

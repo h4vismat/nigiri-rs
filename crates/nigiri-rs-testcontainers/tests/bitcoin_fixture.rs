@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use bitcoin::Amount;
-use nigiri_rs::NigiriClient;
+use nigiri_rs_core::NigiriClient;
 use nigiri_rs_testcontainers::{Bitcoin, Fixture};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -103,7 +103,7 @@ async fn bitcoin_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
     let mutation = async {
         client.invalidate_block(&test_tip).await?;
         assert_ne!(client.best_block_hash().await?, test_tip);
-        Ok::<_, nigiri_rs::NigiriError>(())
+        Ok::<_, nigiri_rs_core::NigiriError>(())
     }
     .await;
     let cleanup = client.reconsider_block(&test_tip).await;
@@ -128,7 +128,7 @@ async fn bitcoin_public_rpc_deserializes_native_and_core_v30_types() -> Result<(
 
     #[cfg(feature = "bitcoin-rpc-types")]
     {
-        let info: nigiri_rs::bitcoin_rpc_types::v30::GetBlockchainInfo =
+        let info: nigiri_rs_core::bitcoin_rpc_types::v30::GetBlockchainInfo =
             client.rpc("getblockchaininfo", ()).await?;
         assert_eq!(info.chain, "regtest");
         assert!(!info.best_block_hash.is_empty());
@@ -178,7 +178,7 @@ async fn concurrent_fixtures_are_independent() -> Result<(), BoxError> {
     // when it becomes ready, not that the indexer keeps pace with blocks mined afterwards.
     async fn node_height<C: nigiri_rs_testcontainers::FixtureChain>(
         fixture: &Fixture<C>,
-    ) -> Result<u64, nigiri_rs::NigiriError> {
+    ) -> Result<u64, nigiri_rs_core::NigiriError> {
         fixture.client().rpc("getblockcount", ()).await
     }
 

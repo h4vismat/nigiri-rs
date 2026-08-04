@@ -1,7 +1,7 @@
 //! Ephemeral Bitcoin and Liquid regtest fixtures backed by Testcontainers.
 //!
 //! Each fixture is one throwaway regtest stack: a node with a funded wallet, an Electrs indexer
-//! following it, and a [`nigiri_rs::NigiriClient`] pointed at both. Nothing is shared, so tests can
+//! following it, and a [`nigiri_rs_core::NigiriClient`] pointed at both. Nothing is shared, so tests can
 //! run in parallel and mine or reorg freely without coordinating.
 //!
 //! ```no_run
@@ -71,7 +71,7 @@ pub use endpoint::ElectrumEndpoint;
 pub use error::FixtureError;
 pub use fixture::{Fixture, FixtureBuilder};
 pub use image::ContainerImage;
-pub use nigiri_rs::{Bitcoin, Liquid};
+pub use nigiri_rs_core::{Bitcoin, Liquid};
 
 /// The fixture's regtest RPC credentials.
 ///

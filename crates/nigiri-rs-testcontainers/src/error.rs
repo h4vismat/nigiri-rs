@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nigiri_rs::NigiriError;
+use nigiri_rs_core::NigiriError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FixtureError {

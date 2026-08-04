@@ -9,10 +9,10 @@ repository = "https://github.com/h4vismat/nigiri-rs"
 
 [features]
 default = []
-bitcoin-rpc-types = ["nigiri-rs/bitcoin-rpc-types"]
+bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]
 
 [dependencies]
-nigiri-rs = { version = "0.3.0", path = "../.." }
+nigiri-rs-core = { version = "0.3.0", path = "../nigiri-rs-core" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 testcontainers = "0.27.3"

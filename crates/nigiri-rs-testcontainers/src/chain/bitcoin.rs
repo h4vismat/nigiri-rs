@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use nigiri_rs::{Bitcoin, NigiriClient};
+use nigiri_rs_core::{Bitcoin, NigiriClient};
 
 use crate::{
     ContainerImage, FixtureError, RPC_PASSWORD, RPC_USER, chain::FixtureChain, deadline::Deadline,

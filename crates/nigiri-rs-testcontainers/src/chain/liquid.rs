@@ -1,4 +1,4 @@
-use nigiri_rs::{Liquid, NigiriClient};
+use nigiri_rs_core::{Liquid, NigiriClient};
 
 use crate::{
     ContainerImage, FixtureError, RPC_PASSWORD, RPC_USER, chain::FixtureChain, deadline::Deadline,

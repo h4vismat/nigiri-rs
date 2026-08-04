@@ -12,9 +12,9 @@
 //!
 //! ```no_run
 //! use bitcoin::Amount;
-//! use nigiri_rs::{Bitcoin, Liquid, NigiriClient};
+//! use nigiri_rs_core::{Bitcoin, Liquid, NigiriClient};
 //!
-//! # async fn example() -> Result<(), nigiri_rs::NigiriError> {
+//! # async fn example() -> Result<(), nigiri_rs_core::NigiriError> {
 //! let bitcoin = NigiriClient::<Bitcoin>::new();
 //! let liquid = NigiriClient::<Liquid>::new();
 //! bitcoin.wait_ready().await?;
@@ -34,9 +34,9 @@
 //! not coerced into the number or boolean types expected by a node method.
 //!
 //! ```no_run
-//! use nigiri_rs::{Bitcoin, NigiriClient};
+//! use nigiri_rs_core::{Bitcoin, NigiriClient};
 //!
-//! # async fn example() -> Result<(), nigiri_rs::NigiriError> {
+//! # async fn example() -> Result<(), nigiri_rs_core::NigiriError> {
 //! let client = NigiriClient::<Bitcoin>::new();
 //! let height: u64 = client.rpc("getblockcount", ()).await?;
 //! let hundredth_hash: bitcoin::BlockHash = client.rpc("getblockhash", (100_u64,)).await?;
@@ -52,7 +52,7 @@
 //! Liquid-only methods are absent from the Bitcoin client at compile time:
 //!
 //! ```compile_fail
-//! use nigiri_rs::{Bitcoin, NigiriClient};
+//! use nigiri_rs_core::{Bitcoin, NigiriClient};
 //!
 //! # async fn example() {
 //! let bitcoin = NigiriClient::<Bitcoin>::new();
@@ -62,7 +62,7 @@
 //!
 //! ```compile_fail
 //! use bitcoin::Amount;
-//! use nigiri_rs::{Bitcoin, NigiriClient};
+//! use nigiri_rs_core::{Bitcoin, NigiriClient};
 //!
 //! # async fn example(asset: elements::AssetId) {
 //! let bitcoin = NigiriClient::<Bitcoin>::new();

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bitcoin::address::NetworkChecked;
-use nigiri_rs::{
+use nigiri_rs_core::{
     Bitcoin, BitcoinAddressInfo, BitcoinTxInfo, BitcoinUtxo, DEFAULT_MAX_RESPONSE_BYTES, Liquid,
     LiquidAddressInfo, LiquidTxInfo, LiquidUtxo, NigiriClient, NigiriConfig, NigiriError,
     NigiriNetwork,

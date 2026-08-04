@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nigiri_rs::{NigiriClient, NigiriConfig, NigiriError};
+use nigiri_rs_core::{NigiriClient, NigiriConfig, NigiriError};
 use testcontainers::{
     ContainerAsync, ContainerRequest, GenericImage, ImageExt, core::IntoContainerPort,
     runners::AsyncRunner,
@@ -199,7 +199,7 @@ pub(crate) fn bootstrap_error(
 mod tests {
     use std::{error::Error, io, time::Duration};
 
-    use nigiri_rs::NigiriError;
+    use nigiri_rs_core::NigiriError;
     use testcontainers::{
         Image,
         core::{
@@ -221,7 +221,7 @@ mod tests {
     // containers are scoped to.
     #[test]
     fn request_exposes_the_chains_rpc_port_on_the_fixture_topology() {
-        use nigiri_rs::Bitcoin;
+        use nigiri_rs_core::Bitcoin;
 
         let request = super::request::<Bitcoin>(
             &ContainerImage::bitcoind_default(),
@@ -253,7 +253,7 @@ mod tests {
     // Catches a regression that defers invalid image validation until Docker request startup.
     #[test]
     fn request_rejects_invalid_images_before_constructing_a_request() {
-        use nigiri_rs::Bitcoin;
+        use nigiri_rs_core::Bitcoin;
 
         let error = match request::<Bitcoin>(
             &ContainerImage::new("", "v1"),
@@ -286,7 +286,7 @@ mod tests {
     // `FixtureError::Client`, whose transparent source chain would carry the raw configuration.
     #[test]
     fn a_rejected_client_configuration_is_reported_without_a_raw_source() {
-        use nigiri_rs::Bitcoin;
+        use nigiri_rs_core::Bitcoin;
 
         let url = Url::parse("http://127.0.0.1:18443/").expect("a static root URL is valid");
 
@@ -308,7 +308,7 @@ mod tests {
     // formatters expose fixture credentials or an unbounded body that bounded diagnostics hide.
     #[test]
     fn fixture_error_sources_are_bounded_and_redacted_across_the_whole_chain() {
-        use nigiri_rs::Bitcoin;
+        use nigiri_rs_core::Bitcoin;
 
         let secret_body = format!(
             "{} -rpcuser=admin1 -rpcpassword=123 admin1:123",

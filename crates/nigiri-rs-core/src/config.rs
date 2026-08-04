@@ -46,9 +46,9 @@ pub struct NigiriConfig {
     /// every Bitcoin Core and Elements response in a regtest environment.
     ///
     /// ```
-    /// use nigiri_rs::{Bitcoin, DEFAULT_MAX_RESPONSE_BYTES, NigiriClient, NigiriConfig};
+    /// use nigiri_rs_core::{Bitcoin, DEFAULT_MAX_RESPONSE_BYTES, NigiriClient, NigiriConfig};
     ///
-    /// # fn main() -> Result<(), nigiri_rs::NigiriError> {
+    /// # fn main() -> Result<(), nigiri_rs_core::NigiriError> {
     /// let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
     ///     esplora_url: "http://localhost:30000".parse().unwrap(),
     ///     timeout: std::time::Duration::from_secs(30),

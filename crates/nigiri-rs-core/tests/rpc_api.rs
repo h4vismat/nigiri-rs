@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nigiri_rs::{Bitcoin, Liquid, NigiriClient, NigiriConfig, NigiriError};
+use nigiri_rs_core::{Bitcoin, Liquid, NigiriClient, NigiriConfig, NigiriError};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -49,7 +49,7 @@ async fn one_shot_server(status: &str, body: String) -> (Url, tokio::task::JoinH
     (Url::parse(&format!("http://{address}/")).unwrap(), task)
 }
 
-fn client<N: nigiri_rs::NigiriNetwork>(node_rpc_url: Url) -> NigiriClient<N> {
+fn client<N: nigiri_rs_core::NigiriNetwork>(node_rpc_url: Url) -> NigiriClient<N> {
     NigiriClient::with_config(NigiriConfig {
         node_rpc_url,
         timeout: Duration::from_secs(2),
@@ -110,7 +110,7 @@ async fn bitcoin_rpc_uses_reexported_core_v30_response() {
     )
     .await;
     let client = client::<Bitcoin>(url);
-    let info: nigiri_rs::bitcoin_rpc_types::v30::GetBlockchainInfo =
+    let info: nigiri_rs_core::bitcoin_rpc_types::v30::GetBlockchainInfo =
         client.rpc("getblockchaininfo", ()).await.unwrap();
 
     assert_eq!(info.chain, "regtest");

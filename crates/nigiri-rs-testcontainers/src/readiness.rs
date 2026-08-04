@@ -1,6 +1,6 @@
 use std::{fmt, time::Duration};
 
-use nigiri_rs::NigiriClient;
+use nigiri_rs_core::NigiriClient;
 
 use crate::{
     ElectrumEndpoint, FixtureError,
@@ -126,7 +126,7 @@ mod tests {
         time::Duration,
     };
 
-    use nigiri_rs::{Bitcoin, NigiriClient, NigiriConfig, NigiriError};
+    use nigiri_rs_core::{Bitcoin, NigiriClient, NigiriConfig, NigiriError};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
