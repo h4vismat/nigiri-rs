@@ -5,10 +5,6 @@ use crate::{
     node::bootstrap_error,
 };
 
-/// The Elements peer-to-peer port. Never mapped: a fixture is a single node with no peers, but
-/// Elements still binds it.
-const P2P_PORT: u16 = 18_886;
-
 /// The OP_TRUE coins created in the genesis block, in satoshi. Reproduces Nigiri's value so the
 /// chain this fixture builds is bit-identical to the one Nigiri runs.
 const INITIAL_FREE_COINS: u64 = 2_100_000_000_000_000;
@@ -29,41 +25,47 @@ impl FixtureChain for Liquid {
         ContainerImage::electrs_liquid_default()
     }
 
-    /// Reproduces Nigiri's `liquidregtest` chain without its configuration file.
+    /// Reproduces Nigiri's `liquidregtest` chain without its configuration file, minimized to what
+    /// this fixture actually needs.
     ///
     /// Verified 2026-08-03: this vector produces the same genesis hash, `current_params_root`,
     /// `current_signblock_hex`, and `current_fedpeg_script` as the node Nigiri runs from a
     /// bind-mounted `elements.conf`. The five parameters in that conf which this omits are
     /// rejected on argv and silently ignored in the conf; they do nothing either way.
     ///
-    /// This is Nigiri's set, not a minimal one. Seven of these are provably droppable; see the
-    /// design document before removing any, and gate every removal on the genesis test plus a
-    /// real Electrs sync.
+    /// Also verified 2026-08-03: seven flags Nigiri sets could be dropped without changing the
+    /// genesis hash or breaking the Docker-gated suite (Electrs sync included) — `-listen=1` and
+    /// `-port=…` (a fixture is a single node with no peers), `-blockfilterindex=1`,
+    /// `-peerblockfilters=1`, and `-checkblockindex=0` (Electrs does not need them either),
+    /// `-anyonecanspendaremine=1` (already the default on custom chains), and
+    /// `-con_dyna_deploy_signal=1` (affects deployment signaling in later blocks, not present at
+    /// genesis or in anything the ported tests exercise). None of the survivors below are
+    /// speculative: each is load-bearing for something this fixture or its test suite does.
+    ///
+    /// - `-txindex=1`: the ported tests call `getrawtransaction` on arbitrary txids.
+    /// - `-fallbackfee=0.000001`: regtest has no fee-estimation history, so
+    ///   `fundrawtransaction` (used to build the wallet transaction in the ported tests) has
+    ///   nothing to estimate from without it.
+    /// - `-validatepegin=0`: peg-in validation would require a Bitcoin mainchain node this
+    ///   fixture does not run, which is also why `-mainchainrpc*` is omitted below: it is only
+    ///   read when this is 1.
+    /// - `-initialfreecoins=…` and `-con_connect_genesis_outputs=1`: the wallet's only funds.
+    ///   Liquid has no block subsidy, so without connecting the genesis outputs to the UTXO set
+    ///   the wallet stays empty no matter how much is mined.
     fn node_cmd() -> Vec<String> {
         vec![
             "-chain=liquidregtest".to_owned(),
             "-server=1".to_owned(),
-            "-listen=1".to_owned(),
             "-txindex=1".to_owned(),
             format!("-rpcbind=0.0.0.0:{}", Self::NODE_RPC_PORT),
             "-rpcallowip=0.0.0.0/0".to_owned(),
             format!("-rpcport={}", Self::NODE_RPC_PORT),
             format!("-rpcuser={RPC_USER}"),
             format!("-rpcpassword={RPC_PASSWORD}"),
-            format!("-port={P2P_PORT}"),
-            "-blockfilterindex=1".to_owned(),
-            "-peerblockfilters=1".to_owned(),
-            "-checkblockindex=0".to_owned(),
-            // Peg-in validation would require a Bitcoin mainchain node this fixture does not run,
-            // which is also why `-mainchainrpc*` is omitted: it is only read when this is 1.
             "-validatepegin=0".to_owned(),
             format!("-initialfreecoins={INITIAL_FREE_COINS}"),
             "-fallbackfee=0.000001".to_owned(),
-            "-con_dyna_deploy_signal=1".to_owned(),
-            // The wallet's only funds. Liquid has no block subsidy, so without connecting the
-            // genesis outputs to the UTXO set the wallet stays empty no matter how much is mined.
             "-con_connect_genesis_outputs=1".to_owned(),
-            "-anyonecanspendaremine=1".to_owned(),
             "-printtoconsole=1".to_owned(),
         ]
     }
