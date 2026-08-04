@@ -1,9 +1,10 @@
 use std::{fmt, time::Duration};
 
-use nigiri_rs::{Bitcoin, NigiriClient};
+use nigiri_rs::NigiriClient;
 
 use crate::{
     ElectrumEndpoint, FixtureError,
+    chain::FixtureChain,
     deadline::Deadline,
     diagnostics::{MAX_SOURCE_BYTES, redacted_head},
     electrum,
@@ -45,15 +46,15 @@ impl fmt::Display for Heights {
 /// Every operation and every pause is charged to the same shared budget, so readiness cannot outlive
 /// the deadline it was given. A service that is merely not up yet is retried rather than reported:
 /// only the budget running out ends this loop with an error.
-pub(crate) async fn wait_for_sync(
-    client: &NigiriClient<Bitcoin>,
+pub(crate) async fn wait_for_sync<C: FixtureChain>(
+    client: &NigiriClient<C>,
     endpoint: &ElectrumEndpoint,
     deadline: &Deadline,
 ) -> Result<(), FixtureError> {
     let mut observation = "waiting for node, Esplora, and Electrum tip synchronization".to_owned();
 
     loop {
-        match observe_heights(client, endpoint, deadline, &observation).await? {
+        match observe_heights::<C>(client, endpoint, deadline, &observation).await? {
             Ok(heights) if heights.agree() => return Ok(()),
             Ok(heights) => observation = heights.to_string(),
             Err(unavailable) => observation = unavailable,
@@ -69,8 +70,8 @@ pub(crate) async fn wait_for_sync(
 ///
 /// The outer error is only ever the shared deadline expiring; a service failure is an inner `Err`, so
 /// the loop above cannot mistake "not up yet" for "will never be ready".
-async fn observe_heights(
-    client: &NigiriClient<Bitcoin>,
+async fn observe_heights<C: FixtureChain>(
+    client: &NigiriClient<C>,
     endpoint: &ElectrumEndpoint,
     deadline: &Deadline,
     observation: &str,
