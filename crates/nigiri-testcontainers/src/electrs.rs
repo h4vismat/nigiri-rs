@@ -97,7 +97,10 @@ pub(crate) fn request(
                 "--db-dir".to_owned(),
                 "/tmp/electrs".to_owned(),
                 "--daemon-rpc-addr".to_owned(),
-                format!("{bitcoin_name}:{}", crate::bitcoind::RPC_PORT),
+                format!(
+                    "{bitcoin_name}:{}",
+                    <nigiri_rs::Bitcoin as crate::chain::FixtureChain>::NODE_RPC_PORT
+                ),
                 "--cookie".to_owned(),
                 format!("{RPC_USER}:{RPC_PASSWORD}"),
                 "--http-addr".to_owned(),

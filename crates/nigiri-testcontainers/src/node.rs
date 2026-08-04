@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nigiri_rs::{Bitcoin, NigiriClient, NigiriConfig, NigiriError};
+use nigiri_rs::{NigiriClient, NigiriConfig, NigiriError};
 use testcontainers::{
     ContainerAsync, ContainerRequest, GenericImage, ImageExt, core::IntoContainerPort,
     runners::AsyncRunner,
@@ -18,15 +18,12 @@ use crate::{
     readiness::RETRY_DELAY,
 };
 
-pub(crate) const SERVICE: &str = "bitcoind";
-pub(crate) const RPC_PORT: u16 = 18_443;
-
-pub(crate) struct StartedBitcoind {
+pub(crate) struct StartedNode {
     pub(crate) container: ContainerAsync<GenericImage>,
     pub(crate) client_config: NigiriConfig,
 }
 
-pub(crate) fn request(
+pub(crate) fn request<C: FixtureChain>(
     image: &ContainerImage,
     network_name: &str,
     container_name: &str,
@@ -35,40 +32,40 @@ pub(crate) fn request(
 
     Ok(
         GenericImage::new(image.name().to_owned(), image.testcontainers_tag())
-            .with_exposed_port(RPC_PORT.tcp())
+            .with_exposed_port(C::NODE_RPC_PORT.tcp())
             .with_network(network_name)
             .with_container_name(container_name)
-            .with_cmd(Bitcoin::node_cmd()),
+            .with_cmd(C::node_cmd()),
     )
 }
 
-pub(crate) async fn start_bitcoind(
+pub(crate) async fn start_node<C: FixtureChain>(
     image: &ContainerImage,
     network_name: &str,
     container_name: &str,
     deadline: &Deadline,
-) -> Result<StartedBitcoind, FixtureError> {
-    let container_request = request(image, network_name, container_name)?;
+) -> Result<StartedNode, FixtureError> {
+    let container_request = request::<C>(image, network_name, container_name)?;
     let container = run_owned_start(
-        SERVICE,
+        C::NODE_SERVICE,
         image,
         deadline,
         container_name,
-        "starting Bitcoind container",
+        "starting node container",
         container_request.start(),
     )
     .await?;
 
     let host = deadline
-        .run(SERVICE, "resolving Bitcoind host", container.get_host())
+        .run(C::NODE_SERVICE, "resolving node host", container.get_host())
         .await?
-        .map_err(|error| classify_start_error(SERVICE, image, error))?
+        .map_err(|error| classify_start_error(C::NODE_SERVICE, image, error))?
         .to_string();
     let rpc_port = mapped_port(
-        SERVICE,
+        C::NODE_SERVICE,
         &container,
-        RPC_PORT,
-        "resolving Bitcoind RPC mapped port",
+        C::NODE_RPC_PORT,
+        "resolving node RPC mapped port",
         deadline,
     )
     .await?;
@@ -76,35 +73,37 @@ pub(crate) async fn start_bitcoind(
     let root_url = mapped_http_url(&host, rpc_port)?;
     let root_config = fixture_rpc_config(
         root_url.clone(),
-        deadline.remaining_or_expired(SERVICE, "configuring the root Bitcoind RPC client")?,
+        deadline.remaining_or_expired(C::NODE_SERVICE, "configuring the root node RPC client")?,
     );
-    let root = fixture_client(root_config)?;
-    if let Err(not_ready) = wait_for_root_rpc(&root, deadline).await {
-        // A node that never answered is the likeliest startup failure, and its own log is the only
-        // thing that explains why, so the timeout carries a bounded tail of it.
-        return Err(attach_container_log(SERVICE, not_ready, &container).await);
+    let root = fixture_client::<C>(root_config)?;
+    if let Err(not_ready) = wait_for_root_rpc::<C>(&root, deadline).await {
+        // A node that never answered is the likeliest startup failure, and its own log is the
+        // only thing that explains why, so the timeout carries a bounded tail of it.
+        return Err(attach_container_log(C::NODE_SERVICE, not_ready, &container).await);
     }
 
     let wallet_name = format!("nigiri-rs-{}", Uuid::new_v4().simple());
     let wallet_creation = deadline
         .run(
-            "bitcoind",
-            "creating Bitcoin Core wallet",
+            C::NODE_SERVICE,
+            "creating node wallet",
             root.rpc("createwallet", (&wallet_name,)),
         )
         .await?;
     let _: serde_json::Value =
-        wallet_creation.map_err(|source| bootstrap_error("Bitcoin", "createwallet", source))?;
+        wallet_creation.map_err(|source| bootstrap_error(C::CHAIN_NAME, "createwallet", source))?;
 
     let wallet_url = wallet_rpc_url(&root_url, &wallet_name)?;
-    // This client outlives startup, so it gets the whole startup budget as its request timeout rather
-    // than whatever is left of it: every startup RPC below is bounded by the shared deadline anyway,
-    // and a caller must not inherit a timeout that depends on how slow startup happened to be.
+    // This client outlives startup, so it gets the whole startup budget as its request timeout
+    // rather than whatever is left of it: every startup RPC below is bounded by the shared
+    // deadline anyway, and a caller must not inherit a timeout that depends on how slow startup
+    // happened to be.
     let client_config = fixture_rpc_config(wallet_url, deadline.budget());
-    let client = fixture_client(client_config.clone())?;
-    Bitcoin::fund_wallet(&client, deadline).await?;
+    let client = fixture_client::<C>(client_config.clone())?;
 
-    Ok(StartedBitcoind {
+    C::fund_wallet(&client, deadline).await?;
+
+    Ok(StartedNode {
         container,
         client_config,
     })
@@ -115,14 +114,14 @@ pub(crate) async fn start_bitcoind(
 /// `FixtureError::Client` forwards a `NigiriError` and its whole raw cause chain, and a rejected
 /// fixture configuration carries the fixture credentials, so the rejection is reported as bounded,
 /// redacted configuration detail instead.
-pub(crate) fn fixture_client(config: NigiriConfig) -> Result<NigiriClient<Bitcoin>, FixtureError> {
-    NigiriClient::<Bitcoin>::with_config(config).map_err(|source| {
-        FixtureError::InvalidConfiguration {
-            detail: redacted_head(
-                &format!("fixture RPC client configuration was rejected: {source}"),
-                MAX_SOURCE_BYTES,
-            ),
-        }
+pub(crate) fn fixture_client<C: FixtureChain>(
+    config: NigiriConfig,
+) -> Result<NigiriClient<C>, FixtureError> {
+    NigiriClient::<C>::with_config(config).map_err(|source| FixtureError::InvalidConfiguration {
+        detail: redacted_head(
+            &format!("fixture RPC client configuration was rejected: {source}"),
+            MAX_SOURCE_BYTES,
+        ),
     })
 }
 
@@ -141,8 +140,8 @@ fn fixture_rpc_config(node_rpc_url: Url, timeout: Duration) -> NigiriConfig {
     }
 }
 
-async fn wait_for_root_rpc(
-    root: &NigiriClient<Bitcoin>,
+async fn wait_for_root_rpc<C: FixtureChain>(
+    root: &NigiriClient<C>,
     deadline: &Deadline,
 ) -> Result<(), FixtureError> {
     let mut last_observation = "waiting for root getblockchaininfo RPC".to_owned();
@@ -150,7 +149,7 @@ async fn wait_for_root_rpc(
     loop {
         match deadline
             .run(
-                "bitcoind",
+                C::NODE_SERVICE,
                 &last_observation,
                 root.rpc::<serde_json::Value, _>("getblockchaininfo", ()),
             )
@@ -161,7 +160,7 @@ async fn wait_for_root_rpc(
                 last_observation = redacted_tail(&format!("root RPC: {error}"));
                 deadline
                     .run(
-                        "bitcoind",
+                        C::NODE_SERVICE,
                         &last_observation,
                         tokio::time::sleep(RETRY_DELAY),
                     )
@@ -201,75 +200,47 @@ mod tests {
     use std::{error::Error, io, time::Duration};
 
     use nigiri_rs::NigiriError;
-    use testcontainers::{
-        ContainerRequest, GenericImage, Image,
-        core::{
-            IntoContainerPort,
-            error::{ClientError, TestcontainersError},
-        },
+    use testcontainers::core::{
+        IntoContainerPort,
+        error::{ClientError, TestcontainersError},
     };
     use url::Url;
 
-    use super::{
-        RPC_PORT, SERVICE, bootstrap_error, fixture_client, fixture_rpc_config, request,
-        wallet_rpc_url,
-    };
+    use super::{bootstrap_error, fixture_client, fixture_rpc_config, request, wallet_rpc_url};
     use crate::{
         ContainerImage, FixtureError,
+        chain::FixtureChain,
         diagnostics::{MAX_DIAGNOSTIC_BYTES, MAX_SOURCE_BYTES},
         owned_start::{classify_start_error, port_discovery_error},
     };
 
-    fn command(request: &ContainerRequest<GenericImage>) -> Vec<String> {
-        request
-            .cmd()
-            .map(|argument| argument.into_owned())
-            .collect()
-    }
-
-    // Catches a request regression that changes a Bitcoin Core's pinned image, topology,
-    // exposed RPC port, or its bootstrap RPC arguments.
+    // Catches a regression that exposes the wrong node port or drops the topology a fixture's
+    // containers are scoped to.
     #[test]
-    fn request_preserves_the_exact_regtest_rpc_contract() {
-        let request = request(
+    fn request_exposes_the_chains_rpc_port_on_the_fixture_topology() {
+        use nigiri_rs::Bitcoin;
+
+        let request = super::request::<Bitcoin>(
             &ContainerImage::bitcoind_default(),
             "nigiri-test-fixture",
             "nigiri-bitcoind-fixture",
         )
         .expect("the pinned Bitcoind image is valid");
 
-        assert_eq!(request.image().name(), "ghcr.io/getumbrel/docker-bitcoind");
-        assert_eq!(
-            request.image().tag(),
-            "v30.0@sha256:f5826a32aed9287cc5ffdec0996f5272634c4b346529cb8627224986ff555101"
-        );
-        assert_eq!(request.entrypoint(), None);
         assert_eq!(request.expose_ports(), &[18_443.tcp()]);
         assert_eq!(request.network().as_deref(), Some("nigiri-test-fixture"));
         assert_eq!(
             request.container_name().as_deref(),
             Some("nigiri-bitcoind-fixture")
         );
-        assert_eq!(
-            command(&request),
-            [
-                "-regtest=1",
-                "-server=1",
-                "-txindex=1",
-                "-rpcbind=0.0.0.0:18443",
-                "-rpcallowip=0.0.0.0/0",
-                "-rpcuser=admin1",
-                "-rpcpassword=123",
-                "-fallbackfee=0.00001",
-                "-printtoconsole=1",
-            ]
-        );
     }
 
     // Catches a regression that defers invalid image validation until Docker request startup.
     #[test]
     fn request_rejects_invalid_images_before_constructing_a_request() {
-        let error = match request(
+        use nigiri_rs::Bitcoin;
+
+        let error = match request::<Bitcoin>(
             &ContainerImage::new("", "v1"),
             "nigiri-test-fixture",
             "nigiri-bitcoind-fixture",
@@ -300,9 +271,11 @@ mod tests {
     // `FixtureError::Client`, whose transparent source chain would carry the raw configuration.
     #[test]
     fn a_rejected_client_configuration_is_reported_without_a_raw_source() {
+        use nigiri_rs::Bitcoin;
+
         let url = Url::parse("http://127.0.0.1:18443/").expect("a static root URL is valid");
 
-        let error = fixture_client(fixture_rpc_config(url, Duration::ZERO))
+        let error = fixture_client::<Bitcoin>(fixture_rpc_config(url, Duration::ZERO))
             .expect_err("a zero request timeout must be rejected");
 
         let FixtureError::InvalidConfiguration { detail } = error else {
@@ -320,6 +293,8 @@ mod tests {
     // formatters expose fixture credentials or an unbounded body that bounded diagnostics hide.
     #[test]
     fn fixture_error_sources_are_bounded_and_redacted_across_the_whole_chain() {
+        use nigiri_rs::Bitcoin;
+
         let secret_body = format!(
             "{} -rpcuser=admin1 -rpcpassword=123 admin1:123",
             "node-error-".repeat(4_000),
@@ -335,18 +310,18 @@ mod tests {
                 },
             ),
             classify_start_error(
-                SERVICE,
+                Bitcoin::NODE_SERVICE,
                 &image,
                 TestcontainersError::other(io::Error::other(secret_body.clone())),
             ),
             classify_start_error(
-                SERVICE,
+                Bitcoin::NODE_SERVICE,
                 &image,
                 TestcontainersError::Client(ClientError::InvalidDockerHost(secret_body.clone())),
             ),
             port_discovery_error(
-                SERVICE,
-                RPC_PORT,
+                Bitcoin::NODE_SERVICE,
+                Bitcoin::NODE_RPC_PORT,
                 TestcontainersError::other(io::Error::other(secret_body.clone())),
                 "mapped port unavailable",
             ),

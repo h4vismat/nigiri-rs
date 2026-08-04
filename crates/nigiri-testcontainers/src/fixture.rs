@@ -7,7 +7,7 @@ use testcontainers::{ContainerAsync, GenericImage};
 use uuid::Uuid;
 
 use crate::{
-    ContainerImage, ElectrumEndpoint, FixtureError, bitcoind, electrs,
+    ContainerImage, ElectrumEndpoint, FixtureError, chain::FixtureChain, electrs, node,
     owned_start::attach_container_log, readiness,
 };
 
@@ -144,7 +144,7 @@ impl BitcoinFixtureBuilder {
         let names = Self::topology_names();
         let deadline = crate::deadline::Deadline::new(self.startup_timeout)?;
 
-        let bitcoin = bitcoind::start_bitcoind(
+        let bitcoin = node::start_node::<Bitcoin>(
             &self.bitcoind_image,
             &names.network,
             &names.bitcoind,
@@ -164,9 +164,12 @@ impl BitcoinFixtureBuilder {
             Ok(electrs) => electrs,
             // Bitcoind is running and holds the only account of what Electrs was pointed at.
             Err(error) => {
-                return Err(
-                    attach_container_log(bitcoind::SERVICE, error, &bitcoin.container).await,
-                );
+                return Err(attach_container_log(
+                    <Bitcoin as FixtureChain>::NODE_SERVICE,
+                    error,
+                    &bitcoin.container,
+                )
+                .await);
             }
         };
 
@@ -174,7 +177,7 @@ impl BitcoinFixtureBuilder {
         // published is applied to a copy of the wallet-scoped configuration.
         let mut client_config = bitcoin.client_config.clone();
         client_config.esplora_url = electrs.esplora_url.clone();
-        let client = bitcoind::fixture_client(client_config)?;
+        let client = node::fixture_client::<Bitcoin>(client_config)?;
 
         if let Err(not_ready) =
             readiness::wait_for_sync(&client, &electrs.electrum_endpoint, &deadline).await
@@ -182,9 +185,12 @@ impl BitcoinFixtureBuilder {
             // Whichever service fell behind, its own log is what explains why.
             let with_electrs =
                 attach_container_log(electrs::SERVICE, not_ready, &electrs.container).await;
-            return Err(
-                attach_container_log(bitcoind::SERVICE, with_electrs, &bitcoin.container).await,
-            );
+            return Err(attach_container_log(
+                <Bitcoin as FixtureChain>::NODE_SERVICE,
+                with_electrs,
+                &bitcoin.container,
+            )
+            .await);
         }
 
         Ok(BitcoinFixture {

@@ -36,7 +36,6 @@
 //! The images are pinned by tag and digest. [`ContainerImage`] can replace them, but an image this
 //! crate has not been tested against may not honour the same arguments.
 
-mod bitcoind;
 mod chain;
 mod deadline;
 mod diagnostics;
@@ -46,6 +45,7 @@ mod endpoint;
 mod error;
 mod fixture;
 mod image;
+mod node;
 mod owned_start;
 mod readiness;
 

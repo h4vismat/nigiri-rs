@@ -3,8 +3,8 @@ use std::future::Future;
 use nigiri_rs::{Bitcoin, NigiriClient};
 
 use crate::{
-    ContainerImage, FixtureError, RPC_PASSWORD, RPC_USER, bitcoind::bootstrap_error,
-    chain::FixtureChain, deadline::Deadline,
+    ContainerImage, FixtureError, RPC_PASSWORD, RPC_USER, chain::FixtureChain, deadline::Deadline,
+    node::bootstrap_error,
 };
 
 /// Serializes the initial 101-block mine across concurrent fixtures.
