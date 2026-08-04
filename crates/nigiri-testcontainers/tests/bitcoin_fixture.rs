@@ -137,13 +137,17 @@ async fn bitcoin_public_rpc_deserializes_native_and_core_v30_types() -> Result<(
     Ok(())
 }
 
-/// What two fixtures starting at once need, measured rather than guessed.
+/// Headroom for two fixtures starting at once on a cold CI runner.
 ///
-/// One fixture is ready in about 6 seconds; two at once took 103. The cost is contention, not
-/// queueing: both nodes mine 101 blocks while both indexers follow them. This test is about
-/// independence, not speed, so it asks for a budget that covers that contention instead of the
-/// 60-second default, which is sized for the ordinary single-fixture case.
-const PARALLEL_STARTUP_BUDGET: Duration = Duration::from_secs(180);
+/// Parallelism itself is close to free: on an idle machine one fixture is ready in about 3 seconds
+/// and two at once in about 4.4, so the second costs roughly a second. An earlier note here claimed
+/// 103 seconds for two against 6 for one and blamed contention between the two 101-block mines.
+/// That measurement was taken while unrelated runaway processes were saturating every core; it says
+/// nothing about this crate. Re-measured on an idle host, twice: 4.46s and 4.37s.
+///
+/// The budget stays above the 60-second default anyway, because the first run on a CI runner pulls
+/// two images inside it and that, not mining, is what can actually take minutes.
+const PARALLEL_STARTUP_BUDGET: Duration = Duration::from_secs(120);
 
 // Two fixtures at once must be genuinely independent: distinct mapped endpoints, and a chain each
 // that the other cannot see. This is what the host suite could never test, because there was only

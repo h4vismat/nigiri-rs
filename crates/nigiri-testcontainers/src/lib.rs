@@ -34,9 +34,14 @@
 //! Funding a wallet differs by chain: Bitcoin has a block subsidy, so a Bitcoin fixture mines 101
 //! blocks until its coinbase matures. Liquid has none, so a Liquid fixture instead connects its
 //! genesis outputs; the single block it then mines is for neither funds nor the indexer, and exists
-//! only because callers reasonably expect a nonzero tip. Starting several Bitcoin fixtures at once
-//! costs more than starting one, because every node mines its own 101 blocks while every indexer
-//! follows it. Raise [`FixtureBuilder::startup_timeout`] when doing that.
+//! only because callers reasonably expect a nonzero tip.
+//!
+//! Fixtures are cheap to run in parallel. Measured on an idle machine with the images already
+//! pulled: one Bitcoin fixture is ready in about 3 seconds, one Liquid fixture in about 1.5, two
+//! Bitcoin fixtures at once in about 4.5, and two of each at once in about 5. The default
+//! 60-second budget covers all of those with room to spare; raise
+//! [`FixtureBuilder::startup_timeout`] for the first run on a machine that still has to pull the
+//! images, which is the slow part.
 //!
 //! The images are pinned by tag and digest. [`ContainerImage`] can replace them, but an image this
 //! crate has not been tested against may not honour the same arguments.
