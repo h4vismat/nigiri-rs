@@ -9,7 +9,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    ContainerImage, FixtureError, RPC_PASSWORD, RPC_USER,
+    ContainerImage, ElectrumEndpoint, FixtureError, RPC_PASSWORD, RPC_USER,
     chain::FixtureChain,
     deadline::Deadline,
     diagnostics::{MAX_SOURCE_BYTES, redacted_head, redacted_source, redacted_tail},
@@ -71,7 +71,7 @@ pub(crate) async fn start_node<C: FixtureChain>(
     .await?;
 
     let root_url = mapped_http_url(&host, rpc_port)?;
-    let root_config = fixture_rpc_config(
+    let root_config = fixture_rpc_config::<C>(
         root_url.clone(),
         deadline.remaining_or_expired(C::NODE_SERVICE, "configuring the root node RPC client")?,
     );
@@ -98,7 +98,7 @@ pub(crate) async fn start_node<C: FixtureChain>(
     // rather than whatever is left of it: every startup RPC below is bounded by the shared
     // deadline anyway, and a caller must not inherit a timeout that depends on how slow startup
     // happened to be.
-    let client_config = fixture_rpc_config(wallet_url, deadline.budget());
+    let client_config = fixture_rpc_config::<C>(wallet_url, deadline.budget());
     let client = fixture_client::<C>(client_config.clone())?;
 
     C::fund_wallet(&client, deadline).await?;
@@ -128,14 +128,22 @@ pub(crate) fn fixture_client<C: FixtureChain>(
 /// The node RPC half of a fixture client's configuration.
 ///
 /// `esplora_url` is a self-pointing placeholder: only the node half is known here, and
-/// `FixtureBuilder::start` replaces it with the Esplora base URL Electrs publishes.
-fn fixture_rpc_config(node_rpc_url: Url, timeout: Duration) -> NigiriConfig {
+/// `FixtureBuilder::start` replaces it with the Esplora base URL Electrs publishes. `electrum` is
+/// likewise a placeholder, but it must still be `C`'s own fixed port rather than whatever
+/// `NigiriConfig::default()` supplies: `Default` always returns the Bitcoin configuration
+/// regardless of `C`, so leaving this to `..Default::default()` would silently give a Liquid
+/// fixture Bitcoin's port (50000) until `FixtureBuilder::start` overwrites it. `start` always does
+/// overwrite it, but a config built here must not be wrong for whatever brief window it exists
+/// before that happens, and a future chain-dependent field would inherit the same silent mistake.
+fn fixture_rpc_config<C: FixtureChain>(node_rpc_url: Url, timeout: Duration) -> NigiriConfig {
     NigiriConfig {
         esplora_url: node_rpc_url.clone(),
         node_rpc_url,
         node_rpc_user: RPC_USER.to_owned(),
         node_rpc_password: RPC_PASSWORD.to_owned(),
         timeout,
+        electrum: ElectrumEndpoint::new("localhost", C::ELECTRS_ELECTRUM_PORT)
+            .expect("localhost with a chain's fixed Electrum port is always valid"),
         ..Default::default()
     }
 }
@@ -290,7 +298,7 @@ mod tests {
 
         let url = Url::parse("http://127.0.0.1:18443/").expect("a static root URL is valid");
 
-        let error = fixture_client::<Bitcoin>(fixture_rpc_config(url, Duration::ZERO))
+        let error = fixture_client::<Bitcoin>(fixture_rpc_config::<Bitcoin>(url, Duration::ZERO))
             .expect_err("a zero request timeout must be rejected");
 
         let FixtureError::InvalidConfiguration { detail } = error else {
