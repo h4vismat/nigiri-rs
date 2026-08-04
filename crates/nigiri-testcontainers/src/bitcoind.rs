@@ -137,7 +137,7 @@ pub(crate) async fn start_bitcoind(
         )
         .await?;
     let _: serde_json::Value =
-        wallet_creation.map_err(|source| bootstrap_error("createwallet", source))?;
+        wallet_creation.map_err(|source| bootstrap_error("Bitcoin", "createwallet", source))?;
 
     let wallet_url = wallet_rpc_url(&root_url, &wallet_name)?;
     // This client outlives startup, so it gets the whole startup budget as its request timeout rather
@@ -152,7 +152,7 @@ pub(crate) async fn start_bitcoind(
             client.new_address(),
         )
         .await?
-        .map_err(|source| bootstrap_error("getnewaddress", source))?
+        .map_err(|source| bootstrap_error("Bitcoin", "getnewaddress", source))?
         .to_string();
     INITIAL_MINING_GATE
         .run(
@@ -160,7 +160,7 @@ pub(crate) async fn start_bitcoind(
             client.generate_to_address(101, mining_address.as_str()),
         )
         .await?
-        .map_err(|source| bootstrap_error("generatetoaddress", source))?;
+        .map_err(|source| bootstrap_error("Bitcoin", "generatetoaddress", source))?;
 
     Ok(StartedBitcoind {
         container,
@@ -241,8 +241,13 @@ fn wallet_rpc_url(root_url: &Url, wallet_name: &str) -> Result<Url, FixtureError
     Ok(wallet_url)
 }
 
-fn bootstrap_error(operation: &'static str, source: NigiriError) -> FixtureError {
+fn bootstrap_error(
+    chain: &'static str,
+    operation: &'static str,
+    source: NigiriError,
+) -> FixtureError {
     FixtureError::Bootstrap {
+        chain,
         operation,
         diagnostics: redacted_tail(&source.to_string()),
         source: redacted_source(source),
@@ -408,6 +413,7 @@ mod tests {
         let image = ContainerImage::bitcoind_default();
         let errors = [
             bootstrap_error(
+                "Bitcoin",
                 "createwallet",
                 NigiriError::InvalidResponse {
                     operation: "bootstrap RPC".into(),
@@ -464,7 +470,7 @@ mod tests {
                 operation: "bootstrap RPC".into(),
                 detail: format!("{} admin1:123", "node-error-".repeat(2_000)),
             };
-            let error = bootstrap_error(operation, source);
+            let error = bootstrap_error("Bitcoin", operation, source);
 
             assert!(error.to_string().starts_with(&format!(
                 "Bitcoin wallet bootstrap failed during {operation}:"

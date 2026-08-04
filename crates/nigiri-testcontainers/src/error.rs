@@ -27,8 +27,9 @@ pub enum FixtureError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("Bitcoin wallet bootstrap failed during {operation}: {diagnostics}")]
+    #[error("{chain} wallet bootstrap failed during {operation}: {diagnostics}")]
     Bootstrap {
+        chain: &'static str,
         operation: &'static str,
         diagnostics: String,
         #[source]
@@ -129,5 +130,26 @@ mod tests {
             "electrs was not ready after 30s: TCP port still closed; container remains running"
         );
         assert!(Error::source(&error).is_none());
+    }
+
+    // Catches a regression that drops the chain from a bootstrap failure, which would make a
+    // two-chain test run unable to say which stack failed.
+    #[test]
+    fn bootstrap_names_the_chain_that_failed() {
+        let error = FixtureError::Bootstrap {
+            chain: "Liquid",
+            operation: "rescanblockchain",
+            diagnostics: "wallet not loaded".to_owned(),
+            source: Box::new(io::Error::other("wallet not loaded")),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "Liquid wallet bootstrap failed during rescanblockchain: wallet not loaded"
+        );
+        assert_eq!(
+            Error::source(&error).map(ToString::to_string).as_deref(),
+            Some("wallet not loaded")
+        );
     }
 }
