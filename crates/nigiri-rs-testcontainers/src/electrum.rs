@@ -12,7 +12,10 @@ use crate::{
 };
 
 use crate::electrs::SERVICE;
-const PROBE_ID: &str = "nigiri-rs-testcontainers";
+// Wire content sent to Electrs as the JSON-RPC `id`, not a reference to this crate. Electrs never
+// validates it, but it is transmitted over a live TcpStream, so the crate rename deliberately left
+// its spelling alone: renaming it would be a wire change, not a rename.
+const PROBE_ID: &str = "nigiri-testcontainers";
 const PROBE_OPERATION: &str = "blockchain.headers.subscribe";
 /// The largest response line accepted before parsing. Electrs answers this method in well under a
 /// kilobyte, so anything larger is a misbehaving or wrong service rather than a tip.
@@ -232,7 +235,7 @@ mod tests {
     fn the_probe_request_is_exactly_one_headers_subscribe_line() {
         assert_eq!(
             request_line(),
-            "{\"id\":\"nigiri-rs-testcontainers\",\"method\":\"blockchain.headers.subscribe\",\"params\":[]}\n"
+            "{\"id\":\"nigiri-testcontainers\",\"method\":\"blockchain.headers.subscribe\",\"params\":[]}\n"
         );
     }
 
@@ -241,7 +244,7 @@ mod tests {
     #[tokio::test]
     async fn a_well_formed_result_yields_its_tip_height() {
         let (endpoint, served) = electrum_stub(
-            b"{\"result\":{\"height\":101},\"id\":\"nigiri-rs-testcontainers\"}\n".to_vec(),
+            b"{\"result\":{\"height\":101},\"id\":\"nigiri-testcontainers\"}\n".to_vec(),
         )
         .await;
 
