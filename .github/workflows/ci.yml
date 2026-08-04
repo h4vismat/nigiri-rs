@@ -100,14 +100,17 @@ jobs:
           key: packaging
 
       # Catches missing files, bad metadata, and anything excluded from the published tarball that
-      # the crate actually needs to build. Only nigiri-rs-core can be packaged today: it has no
-      # path dependencies. The facade, the fixtures, and the macros all depend on unpublished
-      # crates, and `cargo package` resolves those requirements against crates.io even under
-      # --no-verify. They become packageable in publish order: core, then macros and fixtures,
-      # then the facade. Their metadata is still checked by the workspace build and by
-      # `cargo metadata` below.
+      # the crate actually needs to build. nigiri-rs-core and nigiri-rs-macros can be packaged
+      # today: neither has a path dependency. The facade and the fixtures both depend on
+      # unpublished nigiri-rs-core, and `cargo package` resolves that requirement against
+      # crates.io even under --no-verify. They become packageable in publish order: core, then
+      # macros and fixtures, then the facade. Their metadata is still checked by the workspace
+      # build and by `cargo metadata` below.
       - name: cargo package nigiri-rs-core
         run: cargo package -p nigiri-rs-core --all-features
+
+      - name: cargo package nigiri-rs-macros
+        run: cargo package -p nigiri-rs-macros --all-features
 
       - name: cargo metadata
         run: cargo metadata --no-deps --format-version 1 > /dev/null

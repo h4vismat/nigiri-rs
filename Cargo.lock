@@ -1307,6 +1307,7 @@ version = "0.4.0"
 dependencies = [
  "bitcoin",
  "nigiri-rs-core",
+ "nigiri-rs-macros",
  "nigiri-rs-testcontainers",
 ]
 
@@ -1323,6 +1324,15 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "nigiri-rs-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
