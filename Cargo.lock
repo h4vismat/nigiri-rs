@@ -1302,6 +1302,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nigiri-rs"
+version = "0.4.0"
+dependencies = [
+ "bitcoin",
+ "nigiri-rs-core",
+ "nigiri-rs-testcontainers",
+]
+
+[[package]]
 name = "nigiri-rs-core"
 version = "0.3.0"
 dependencies = [
