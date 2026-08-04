@@ -152,7 +152,7 @@ impl BitcoinFixtureBuilder {
         )
         .await?;
 
-        let electrs = match electrs::start_electrs(
+        let electrs = match electrs::start_electrs::<Bitcoin>(
             &self.electrs_image,
             &names.network,
             &names.electrs,
