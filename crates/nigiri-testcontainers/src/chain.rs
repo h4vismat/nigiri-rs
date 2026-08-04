@@ -115,8 +115,27 @@ mod tests {
         assert_eq!(Liquid::ELECTRS_HTTP_PORT, 30_001);
         assert_eq!(Liquid::ELECTRS_ELECTRUM_PORT, 50_001);
         assert_eq!(Liquid::NODE_NAME_PREFIX, "nigiri-rs-elements");
+        assert_eq!(
+            Liquid::node_image_default(),
+            ContainerImage::elements_default()
+        );
+        assert_eq!(
+            Liquid::electrs_image_default(),
+            ContainerImage::electrs_liquid_default()
+        );
 
         let node = Liquid::node_cmd();
+        assert!(node.iter().any(|argument| argument == "-rpcuser=admin1"));
+        assert!(node.iter().any(|argument| argument == "-rpcpassword=123"));
+
+        let electrs = Liquid::electrs_cmd("nigiri-rs-elements-abc");
+        assert!(electrs.iter().any(|argument| argument == "admin1:123"));
+        assert!(
+            electrs
+                .iter()
+                .any(|argument| argument == "nigiri-rs-elements-abc:18884")
+        );
+
         for rejected in [
             "-con_dyna_deploy_start",
             "-con_nminerconfirmationwindow",

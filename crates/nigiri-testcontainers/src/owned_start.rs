@@ -6,7 +6,7 @@
 //! than detached, natural Testcontainers ownership is preserved wherever a handle exists, and only a
 //! container created inside that unowned window is removed explicitly, by exact name.
 //!
-//! Every entry point takes the service it is starting, so Bitcoind and Electrs share one
+//! Every entry point takes the service it is starting, so Bitcoind, Elements, and Electrs share one
 //! implementation and report failures under their own name.
 
 use std::{future::Future, io, pin::Pin, sync::Arc, time::Duration};

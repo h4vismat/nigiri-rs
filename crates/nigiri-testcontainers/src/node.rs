@@ -200,9 +200,12 @@ mod tests {
     use std::{error::Error, io, time::Duration};
 
     use nigiri_rs::NigiriError;
-    use testcontainers::core::{
-        IntoContainerPort,
-        error::{ClientError, TestcontainersError},
+    use testcontainers::{
+        Image,
+        core::{
+            IntoContainerPort,
+            error::{ClientError, TestcontainersError},
+        },
     };
     use url::Url;
 
@@ -232,6 +235,18 @@ mod tests {
         assert_eq!(
             request.container_name().as_deref(),
             Some("nigiri-bitcoind-fixture")
+        );
+        // Guards against a regression that passes `image.tag()` instead of
+        // `image.testcontainers_tag()`: both compile and every other assertion here would still
+        // pass, but the container would pull a floating `latest` instead of the pinned
+        // `tag@digest`, silently unpinning the image the crate's docs promise is pinned.
+        assert_eq!(
+            request.image().name(),
+            ContainerImage::bitcoind_default().name()
+        );
+        assert_eq!(
+            request.image().tag(),
+            ContainerImage::bitcoind_default().testcontainers_tag()
         );
     }
 

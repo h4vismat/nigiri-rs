@@ -1323,7 +1323,6 @@ dependencies = [
  "bitcoin",
  "elements",
  "nigiri-rs",
- "reqwest",
  "serde",
  "serde_json",
  "testcontainers",

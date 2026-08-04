@@ -73,6 +73,8 @@ async fn fixture_starts_ready_and_funded() {
         port, 50_001,
         "the Electrum endpoint must be the mapped port, not the fixed container port"
     );
+    // The mapped port is whatever the runtime chose, never the fixed container port.
+    assert_ne!(fixture.client().esplora_url().port(), Some(30_001));
 
     drop(fixture);
 }

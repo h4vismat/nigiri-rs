@@ -77,7 +77,7 @@ jobs:
         run: cargo build --workspace --all-targets ${{ steps.flags.outputs.cargo_features }}
 
       # Fixture suites are #[ignore] and start their own Docker containers, so they stay out of
-      # this job. The bitcoin-fixture job below covers them.
+      # this job. The fixture-suites job below covers them.
       - name: cargo test
         run: cargo test --workspace --all-targets ${{ steps.flags.outputs.cargo_features }}
 
@@ -111,8 +111,8 @@ jobs:
       - name: cargo metadata
         run: cargo metadata --no-deps --format-version 1 > /dev/null
 
-  bitcoin-fixture:
-    name: Bitcoin fixture suite
+  fixture-suites:
+    name: Fixture suites (Docker)
     runs-on: ubuntu-latest
     # Docker is preinstalled on the runner and is the only external service needed: each test starts
     # its own regtest stack, so there is no Nigiri to install and no Compose file to bring up.
@@ -126,7 +126,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: bitcoin-fixture
+          key: fixture-suites
 
       # --test-threads=1 keeps image pulls and container starts sequential on a shared runner.
       - name: Bitcoin fixture suite
@@ -135,7 +135,8 @@ jobs:
       - name: Liquid fixture suite
         run: cargo test -p nigiri-testcontainers --test liquid_fixture --all-features -- --ignored --test-threads=1 --nocapture
 
-      # Proves the ephemeral promise: this one lives inside the crate because the identifiers of what
-      # a fixture created are deliberately not public.
-      - name: Fixture teardown proof
-        run: cargo test -p nigiri-testcontainers --lib --all-features dropping_a -- --ignored --test-threads=1 --nocapture
+      # Proves the ephemeral promise for both chains, and runs every other ignored lib test (e.g.
+      # the end-to-end Bitcoin readiness proof): these live inside the crate because the
+      # identifiers of what a fixture created are deliberately not public.
+      - name: Ignored lib tests (fixture teardown and readiness proofs)
+        run: cargo test -p nigiri-testcontainers --lib --all-features -- --ignored --test-threads=1 --nocapture

@@ -33,9 +33,10 @@
 //!
 //! Funding a wallet differs by chain: Bitcoin has a block subsidy, so a Bitcoin fixture mines 101
 //! blocks until its coinbase matures. Liquid has none, so a Liquid fixture instead connects its
-//! genesis outputs and mines a single block to bring the indexer up to date. Starting several
-//! Bitcoin fixtures at once costs more than starting one, because every node mines its own 101
-//! blocks while every indexer follows it. Raise [`FixtureBuilder::startup_timeout`] when doing that.
+//! genesis outputs; the single block it then mines is for neither funds nor the indexer, and exists
+//! only because callers reasonably expect a nonzero tip. Starting several Bitcoin fixtures at once
+//! costs more than starting one, because every node mines its own 101 blocks while every indexer
+//! follows it. Raise [`FixtureBuilder::startup_timeout`] when doing that.
 //!
 //! The images are pinned by tag and digest. [`ContainerImage`] can replace them, but an image this
 //! crate has not been tested against may not honour the same arguments.
@@ -74,7 +75,7 @@ pub use nigiri_rs::{Bitcoin, Liquid};
 pub(crate) const RPC_USER: &str = "admin1";
 pub(crate) const RPC_PASSWORD: &str = "123";
 
-/// The Nigiri release whose Bitcoin topology the pinned images reproduce.
+/// The Nigiri release whose topology the pinned images reproduce.
 ///
 /// Recorded so a future divergence can be traced to a version rather than guessed at. It is
 /// documentation, not a runtime check: nothing here talks to Nigiri.

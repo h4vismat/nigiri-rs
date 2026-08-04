@@ -52,6 +52,11 @@ impl FixtureChain for Liquid {
     /// - `-initialfreecoins=…` and `-con_connect_genesis_outputs=1`: the wallet's only funds.
     ///   Liquid has no block subsidy, so without connecting the genesis outputs to the UTXO set
     ///   the wallet stays empty no matter how much is mined.
+    ///
+    /// `-rpcport` is also given explicitly alongside `-rpcbind`, unlike Bitcoin, which pins its
+    /// RPC port through `-rpcbind` alone: Elements' chain-section config model resolves the RPC
+    /// port separately from the bind address, and this flag was part of the empirically verified
+    /// minimal set above.
     fn node_cmd() -> Vec<String> {
         vec![
             "-chain=liquidregtest".to_owned(),

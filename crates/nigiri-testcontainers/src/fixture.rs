@@ -318,7 +318,7 @@ mod tests {
         let fixture = Fixture::<C>::start()
             .await
             .expect("a pinned fixture must start against a real daemon");
-        let bitcoind = fixture.handles.node.id().to_owned();
+        let node = fixture.handles.node.id().to_owned();
         let electrs = fixture.handles.electrs.id().to_owned();
         let network = fixture.network.clone();
 
@@ -328,7 +328,7 @@ mod tests {
         // Every mount must be a volume Docker created for this container alone. A bind, a named
         // volume, or a host path would outlive the fixture or be shared with something else.
         let mut volumes = Vec::new();
-        for container in [&bitcoind, &electrs] {
+        for container in [&node, &electrs] {
             let inspected = docker
                 .inspect_container(container, None)
                 .await
@@ -377,10 +377,12 @@ mod tests {
         }
         assert!(
             !volumes.is_empty(),
-            "the pinned Bitcoind image declares an anonymous volume, so at least one is expected"
+            "the pinned {} image declares an anonymous volume, so at least one is expected",
+            C::CHAIN_NAME
         );
         println!(
-            "created bitcoind={bitcoind} electrs={electrs} network={network} volumes={volumes:?}"
+            "created {}={node} electrs={electrs} network={network} volumes={volumes:?}",
+            C::CHAIN_NAME
         );
 
         drop(fixture);
@@ -389,7 +391,7 @@ mod tests {
         let mut outstanding = Vec::new();
         for _ in 0..100 {
             outstanding.clear();
-            for container in [&bitcoind, &electrs] {
+            for container in [&node, &electrs] {
                 if docker.inspect_container(container, None).await.is_ok() {
                     outstanding.push(container.clone());
                 }

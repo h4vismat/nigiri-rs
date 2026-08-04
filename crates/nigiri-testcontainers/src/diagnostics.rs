@@ -1,6 +1,6 @@
 //! Bounded, credential-free rendering of everything this crate reports.
 //!
-//! Fixture text comes from Docker, Bitcoin Core, and Electrs, so every message that can reach a
+//! Fixture text comes from Docker, Bitcoin Core, Elements, and Electrs, so every message that can reach a
 //! caller passes through here: redaction happens before truncation so no boundary can expose a
 //! partial credential, and every result is byte-bounded on a UTF-8 boundary.
 

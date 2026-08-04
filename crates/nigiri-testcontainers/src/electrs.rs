@@ -93,7 +93,7 @@ pub(crate) fn request<C: FixtureChain>(
 
 #[cfg(test)]
 mod tests {
-    use testcontainers::core::IntoContainerPort;
+    use testcontainers::{Image, core::IntoContainerPort};
 
     use super::request;
     use crate::{ContainerImage, FixtureError};
@@ -118,6 +118,18 @@ mod tests {
         assert_eq!(request.entrypoint(), Some("/build/electrs"));
         assert_eq!(request.expose_ports(), &[30_000.tcp(), 50_000.tcp()]);
         assert_eq!(request.network().as_deref(), Some("nigiri-test-fixture"));
+        // Guards against a regression that passes `image.tag()` instead of
+        // `image.testcontainers_tag()`: both compile and every other assertion here would still
+        // pass, but the container would pull a floating `latest` instead of the pinned
+        // `tag@digest`, silently unpinning the image the crate's docs promise is pinned.
+        assert_eq!(
+            request.image().name(),
+            ContainerImage::electrs_default().name()
+        );
+        assert_eq!(
+            request.image().tag(),
+            ContainerImage::electrs_default().testcontainers_tag()
+        );
     }
 
     // Catches a regression that defers invalid image validation until Docker request startup.
