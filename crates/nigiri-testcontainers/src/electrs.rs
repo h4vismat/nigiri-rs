@@ -21,7 +21,7 @@ pub(crate) struct StartedElectrs {
     pub(crate) electrum_endpoint: ElectrumEndpoint,
 }
 
-/// Starts Electrs against an already-running Bitcoind and resolves both of its mapped ports.
+/// Starts Electrs against an already-running node and resolves both of its mapped ports.
 ///
 /// Electrs is reached only through mapped ports, never the fixed container ports, so concurrent
 /// fixtures cannot collide on the host.
@@ -99,7 +99,10 @@ mod tests {
     use crate::{ContainerImage, FixtureError};
 
     // Catches a regression that exposes the wrong indexer ports or drops the fixture topology.
-    // The argument vector itself is the chain's business and is covered in `chain::tests`.
+    // The argument vector itself is the chain's business and is not asserted here or in
+    // `chain::tests`; it is exercised end-to-end by the Docker-gated fixture suites, which start a
+    // real indexer against a real node — a dropped or mistyped flag surfaces there as a fixture
+    // that never reaches readiness.
     #[test]
     fn request_exposes_the_chains_indexer_ports() {
         use nigiri_rs::Bitcoin;
