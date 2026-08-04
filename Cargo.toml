@@ -22,9 +22,6 @@ thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["io-util", "macros", "net", "process", "rt", "test-util", "time"] }
 url = "2.5.8"
 
-[dev-dependencies]
-fs2 = "0.4.3"
-
 [workspace]
 members = [".", "crates/nigiri-testcontainers"]
 resolver = "2"

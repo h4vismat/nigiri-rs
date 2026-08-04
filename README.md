@@ -16,9 +16,9 @@ The host owns the complete lifecycle of its regtest services. This library provi
 - removes containers or volumes;
 - performs cleanup from `Drop`.
 
-Host-owned Nigiri remains a compatible setup; start it before using the default endpoints or an explicitly ignored host test. The `nigiri-testcontainers` companion crate in this workspace provides fixture lifecycle separately, and this core crate does not depend on it: no Docker or Testcontainers dependency is added here.
+Host-owned Nigiri remains a compatible setup; start it before pointing a client at the default endpoints. The `nigiri-testcontainers` companion crate in this workspace provides fixture lifecycle separately, and this core crate does not depend on it: no Docker or Testcontainers dependency is added here. Nothing in this repository's own test suite needs a host Nigiri installation any more: both chains' integration tests run against ephemeral `nigiri-testcontainers` fixtures and require only Docker.
 
-Start the required services before running a client or an explicitly ignored host test:
+Start the required services before pointing a client at them:
 
 ```sh
 # Bitcoin only
@@ -34,7 +34,7 @@ The verified CLI and port contract is Nigiri v0.5.16, commit `39fd5891d093bfb8c2
 
 This crate does not start or stop anything. Two paths exist, and they can be used side by side.
 
-**Ephemeral fixtures.** The companion `nigiri-testcontainers` crate starts a throwaway Bitcoin regtest stack for a test and removes it afterwards:
+**Ephemeral fixtures.** The companion `nigiri-testcontainers` crate starts a throwaway Bitcoin or Liquid regtest stack for a test and removes it afterwards:
 
 ```rust
 use nigiri_testcontainers::{Bitcoin, Fixture};
@@ -49,7 +49,7 @@ let electrum_port = fixture.electrum_endpoint().port();
 # }
 ```
 
-Docker must be running; no Nigiri installation is needed. Containers, their anonymous volumes, and the network are removed when the fixture is dropped. Ports are assigned by the runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a machine pulls two pinned images and is slow; later starts are ready in a few seconds. Bitcoin only: there is no Liquid fixture, and Podman is untested.
+Docker must be running; no Nigiri installation is needed. Containers, their anonymous volumes, and the network are removed when the fixture is dropped. Ports are assigned by the runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a machine pulls two pinned images per chain and is slow; later starts are ready in a few seconds. `Fixture::<Liquid>::start` starts the same way; swap the type parameter. Podman is untested.
 
 **Services you run yourself.** Point `NigiriClient` at a host-owned Nigiri installation or any compatible endpoints, as the quick start below does. Nothing in this crate starts, stops, or deletes them.
 
@@ -285,23 +285,16 @@ cargo test
 cargo test --doc
 ```
 
-Bitcoin integration tests need Docker but no Nigiri installation. Each one starts its own funded regtest stack through `nigiri-testcontainers`, owns its chain, and removes everything it created when it finishes:
+Bitcoin and Liquid integration tests need Docker but no Nigiri installation. Each one starts its own funded regtest stack through `nigiri-testcontainers`, owns its chain, and removes everything it created when it finishes:
 
 ```sh
 cargo test -p nigiri-testcontainers --test bitcoin_fixture -- --ignored --test-threads=1
+cargo test -p nigiri-testcontainers --test liquid_fixture -- --ignored --test-threads=1
 ```
 
-Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other.
+Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other, and the two suites can run at once.
 
-One fixture is ready in about 6 seconds, well inside the 60-second default startup budget. Two started at once measured 103 seconds: the cost is contention, not queueing, because both nodes mine 101 blocks while both indexers follow them. Raise `startup_timeout` when starting fixtures in parallel.
-
-Liquid has no fixture yet, so its integration tests still reuse a host Nigiri chain and do acquire an exclusive cross-process mutation lock. They never stop or delete Nigiri:
-
-```sh
-cargo test --test host_liquid -- --ignored --test-threads=1
-```
-
-The Liquid Esplora endpoint must be ready first. When reusing a stale regtest chain, the host may need to mine a fresh block so the node leaves initial block download and electrs begins serving requests. The Liquid reorg test records its baseline, invalidates only a tip it created, reconsiders it before releasing the lock, and leaves a valid active chain.
+One Bitcoin fixture is ready in about 6 seconds, well inside the 60-second default startup budget. Two started at once measured 103 seconds: the cost is contention, not queueing, because both nodes mine 101 blocks while both indexers follow them. Raise `startup_timeout` when starting fixtures in parallel. A Liquid fixture mines a single block instead of 101: Liquid has no block subsidy, so it funds its wallet by connecting the genesis outputs rather than by mining one.
 
 ## License
 

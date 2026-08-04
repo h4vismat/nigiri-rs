@@ -4,7 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
-  # Lets the host suites be run on demand against a branch without waiting for a
+  # Lets any job be rerun on demand against a branch without waiting for a
   # merge to master.
   workflow_dispatch:
 
@@ -76,8 +76,8 @@ jobs:
       - name: cargo build
         run: cargo build --workspace --all-targets ${{ steps.flags.outputs.cargo_features }}
 
-      # Host suites are #[ignore] and need a running Nigiri, so they stay out of
-      # this job. The host-tests job below covers them.
+      # Fixture suites are #[ignore] and start their own Docker containers, so they stay out of
+      # this job. The bitcoin-fixture job below covers them.
       - name: cargo test
         run: cargo test --workspace --all-targets ${{ steps.flags.outputs.cargo_features }}
 
@@ -132,54 +132,10 @@ jobs:
       - name: Bitcoin fixture suite
         run: cargo test -p nigiri-testcontainers --test bitcoin_fixture --all-features -- --ignored --test-threads=1 --nocapture
 
+      - name: Liquid fixture suite
+        run: cargo test -p nigiri-testcontainers --test liquid_fixture --all-features -- --ignored --test-threads=1 --nocapture
+
       # Proves the ephemeral promise: this one lives inside the crate because the identifiers of what
       # a fixture created are deliberately not public.
       - name: Fixture teardown proof
         run: cargo test -p nigiri-testcontainers --lib --all-features dropping_a -- --ignored --test-threads=1 --nocapture
-
-  host-tests:
-    name: Liquid host suite against live Nigiri
-    runs-on: ubuntu-latest
-    # Only on master and on demand: booting Nigiri pulls several container images and the Liquid
-    # suite needs exclusive access to one chain. Bitcoin no longer runs here.
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: host-tests
-
-      - name: Install Nigiri
-        run: |
-          curl https://getnigiri.vulpem.com | bash
-          echo "$HOME/.nigiri" >> "$GITHUB_PATH"
-
-      - name: Start Nigiri with Liquid
-        run: nigiri start --liquid
-
-      - name: Wait for Esplora endpoints
-        run: |
-          for port in 30000 30001; do
-            for _ in $(seq 1 60); do
-              if curl -fsS "http://localhost:$port/blocks/tip/height" >/dev/null 2>&1; then
-                echo "port $port ready"
-                break
-              fi
-              sleep 5
-            done
-            curl -fsS "http://localhost:$port/blocks/tip/height" >/dev/null
-          done
-
-      # --test-threads=1 is mandatory: the Liquid suite still reorgs a shared chain.
-      - name: Liquid host suite
-        run: cargo test --test host_liquid --all-features -- --ignored --test-threads=1
-
-      - name: Stop Nigiri
-        if: always()
-        run: nigiri stop --delete
