@@ -4,7 +4,7 @@ use bitcoin::Denomination;
 use url::Url;
 
 use crate::{
-    Bitcoin, Liquid, NigiriConfig, NigiriError, NigiriNetwork, TxStatus,
+    Bitcoin, ElectrumEndpoint, Liquid, NigiriConfig, NigiriError, NigiriNetwork, TxStatus,
     http::{endpoint, send_bounded},
 };
 
@@ -63,6 +63,14 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     /// Returns the normalized Esplora base URL.
     pub fn esplora_url(&self) -> &Url {
         &self.config.esplora_url
+    }
+
+    /// Returns the Electrum host and port.
+    ///
+    /// A fixture reports its runtime-mapped port here, not the fixed container port, so a caller
+    /// building an Electrum connection string must read it rather than assume 50000 or 50001.
+    pub fn electrum_endpoint(&self) -> &ElectrumEndpoint {
+        &self.config.electrum
     }
 
     /// Waits until the configured Esplora endpoint responds successfully.
@@ -242,5 +250,20 @@ fn invalid(operation: &'static str, expected: &'static str) -> NigiriError {
     NigiriError::InvalidResponse {
         operation: operation.into(),
         detail: format!("expected {expected}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Bitcoin, NigiriClient};
+
+    // Catches a regression that stops surfacing the Electrum endpoint from the client. A consumer
+    // pointing a BDK or LWK wallet at the stack reaches it only through here.
+    #[test]
+    fn client_surfaces_its_electrum_endpoint() {
+        let client = NigiriClient::<Bitcoin>::new();
+
+        assert_eq!(client.electrum_endpoint().host(), "localhost");
+        assert_eq!(client.electrum_endpoint().port(), 50_000);
     }
 }

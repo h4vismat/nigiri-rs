@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::NigiriError;
+use crate::{ElectrumEndpoint, NigiriError};
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -26,6 +26,11 @@ pub struct NigiriConfig {
     /// The path is preserved exactly so callers can target a wallet-specific Bitcoin Core RPC
     /// endpoint such as `/wallet/name`.
     pub node_rpc_url: Url,
+    /// Electrum host and TCP port.
+    ///
+    /// Bitcoin defaults to port 50000; Liquid to 50001. A fixture replaces this with its
+    /// runtime-mapped port, so read it from the client rather than assuming the default.
+    pub electrum: ElectrumEndpoint,
     /// Node JSON-RPC username. The default is Nigiri's public regtest user `admin1`.
     pub node_rpc_user: String,
     /// Node JSON-RPC password. The default is Nigiri's public regtest password `123`.
@@ -64,17 +69,19 @@ pub struct NigiriConfig {
 
 impl NigiriConfig {
     pub(crate) fn bitcoin() -> Self {
-        Self::defaults("http://localhost:30000", "http://localhost:18443/")
+        Self::defaults("http://localhost:30000", "http://localhost:18443/", 50_000)
     }
 
     pub(crate) fn liquid() -> Self {
-        Self::defaults("http://localhost:30001", "http://localhost:18884/")
+        Self::defaults("http://localhost:30001", "http://localhost:18884/", 50_001)
     }
 
-    fn defaults(esplora_url: &str, node_rpc_url: &str) -> Self {
+    fn defaults(esplora_url: &str, node_rpc_url: &str, electrum_port: u16) -> Self {
         Self {
             esplora_url: Url::parse(esplora_url).expect("static Nigiri URL is valid"),
             node_rpc_url: Url::parse(node_rpc_url).expect("static Nigiri URL is valid"),
+            electrum: ElectrumEndpoint::new("localhost", electrum_port)
+                .expect("static Nigiri Electrum endpoint is valid"),
             node_rpc_user: "admin1".to_owned(),
             node_rpc_password: "123".to_owned(),
             timeout: DEFAULT_TIMEOUT,
@@ -222,5 +229,22 @@ mod tests {
         };
 
         assert!(config.validate_and_normalize().is_err());
+    }
+
+    // Catches a regression that points a client at the wrong Electrum port, or drops the endpoint
+    // from a default constructor. Nigiri publishes these as fixed regtest ports: 50000 for Bitcoin
+    // and 50001 for Liquid, the same values the fixture uses as container ports.
+    #[test]
+    fn defaults_carry_the_documented_electrum_ports() {
+        let bitcoin = NigiriConfig::bitcoin();
+        assert_eq!(bitcoin.electrum.host(), "localhost");
+        assert_eq!(bitcoin.electrum.port(), 50_000);
+
+        let liquid = NigiriConfig::liquid();
+        assert_eq!(liquid.electrum.host(), "localhost");
+        assert_eq!(liquid.electrum.port(), 50_001);
+
+        // Default is the Bitcoin configuration.
+        assert_eq!(NigiriConfig::default().electrum.port(), 50_000);
     }
 }
