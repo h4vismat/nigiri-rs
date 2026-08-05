@@ -76,6 +76,7 @@ impl<C: FixtureChain> Fixture<C> {
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
             node_image: C::node_image_default(),
             electrs_image: C::electrs_image_default(),
+            extra_node_args: Vec::new(),
             chain: PhantomData,
         }
     }
@@ -103,6 +104,10 @@ pub struct FixtureBuilder<C: FixtureChain> {
     startup_timeout: Duration,
     node_image: ContainerImage,
     electrs_image: ContainerImage,
+    /// Appended to `C::node_cmd()` by a composite that needs arguments the standalone chain does
+    /// not set. Crate-private: a composite in this crate supplies them, and a caller who wants a
+    /// differently-configured node replaces the image instead.
+    extra_node_args: Vec<String>,
     chain: PhantomData<C>,
 }
 
@@ -146,6 +151,23 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         self
     }
 
+    /// Arguments appended to the chain's own node command.
+    ///
+    /// Crate-private, and deliberately additive: a composite extends the chain's flag vector and
+    /// must not have to restate the flags the chain owns.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the composites that call this — PegPair, LightningStack — land after it"
+        )
+    )]
+    pub(crate) fn extra_node_args(mut self, args: Vec<String>) -> Self {
+        self.extra_node_args = args;
+        self
+    }
+
     /// Starts the node, funds a wallet, starts Electrs, and returns only once all three services
     /// agree on the tip.
     ///
@@ -158,8 +180,14 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         let names = topology_names::<C>();
         let deadline = crate::deadline::Deadline::new(self.startup_timeout)?;
 
-        let node =
-            node::start_node::<C>(&self.node_image, &names.network, &names.node, &deadline).await?;
+        let node = node::start_node::<C>(
+            &self.node_image,
+            &names.network,
+            &names.node,
+            &self.extra_node_args,
+            &deadline,
+        )
+        .await?;
 
         let electrs = match electrs::start_electrs::<C>(
             &self.electrs_image,
@@ -275,6 +303,21 @@ mod tests {
         assert_eq!(builder.startup_timeout, Duration::from_secs(90));
         assert_eq!(builder.node_image, image);
         assert_eq!(builder.electrs_image, electrs);
+    }
+
+    // Catches a regression that drops a composite's extra node arguments between the builder and the
+    // container request, which would start a node silently missing the flags the composite needs.
+    #[test]
+    fn extra_node_args_reach_the_builder_and_default_to_none() {
+        let default = Fixture::<Bitcoin>::builder();
+        assert!(default.extra_node_args.is_empty());
+
+        let extended = Fixture::<Bitcoin>::builder()
+            .extra_node_args(vec!["-zmqpubrawblock=tcp://0.0.0.0:28332".to_owned()]);
+        assert_eq!(
+            extended.extra_node_args,
+            vec!["-zmqpubrawblock=tcp://0.0.0.0:28332".to_owned()]
+        );
     }
 
     // Catches a regression that defers image validation until Docker has already been asked to start

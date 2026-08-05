@@ -27,6 +27,7 @@ pub(crate) fn request<C: FixtureChain>(
     image: &ContainerImage,
     network_name: &str,
     container_name: &str,
+    extra_args: &[String],
 ) -> Result<ContainerRequest<GenericImage>, FixtureError> {
     image.validate()?;
 
@@ -38,20 +39,26 @@ pub(crate) fn request<C: FixtureChain>(
         generic = generic.with_entrypoint(entrypoint);
     }
 
+    // Appended, never substituted: a composite extends the chain's flag vector rather than
+    // restating it. `LightningStack` adds ZMQ publishers, `PegPair` adds the peg parameters.
+    let mut cmd = C::node_cmd();
+    cmd.extend_from_slice(extra_args);
+
     Ok(generic
         .with_exposed_port(C::NODE_RPC_PORT.tcp())
         .with_network(network_name)
         .with_container_name(container_name)
-        .with_cmd(C::node_cmd()))
+        .with_cmd(cmd))
 }
 
 pub(crate) async fn start_node<C: FixtureChain>(
     image: &ContainerImage,
     network_name: &str,
     container_name: &str,
+    extra_args: &[String],
     deadline: &Deadline,
 ) -> Result<StartedNode, FixtureError> {
-    let container_request = request::<C>(image, network_name, container_name)?;
+    let container_request = request::<C>(image, network_name, container_name, extra_args)?;
     let container = run_owned_start(
         C::NODE_SERVICE,
         image,
@@ -241,6 +248,7 @@ mod tests {
             &ContainerImage::bitcoind_default(),
             "nigiri-test-fixture",
             "nigiri-bitcoind-fixture",
+            &[],
         )
         .expect("the pinned Bitcoind image is valid");
 
@@ -277,6 +285,7 @@ mod tests {
             &ContainerImage::elements_default(),
             "nigiri-test-fixture",
             "nigiri-elements-fixture",
+            &[],
         )
         .expect("the pinned Elements image is valid");
 
@@ -293,6 +302,7 @@ mod tests {
             &ContainerImage::new("", "v1"),
             "nigiri-test-fixture",
             "nigiri-bitcoind-fixture",
+            &[],
         ) {
             Err(error) => error,
             Ok(_) => panic!("an image without a name must be rejected"),
@@ -430,5 +440,61 @@ mod tests {
             assert!(diagnostics.len() <= MAX_DIAGNOSTIC_BYTES);
             assert!(!diagnostics.contains("admin1:123"));
         }
+    }
+
+    // Catches a regression that replaces the chain's own flag vector instead of extending it, or
+    // that drops a composite's extra arguments. A composite adds to what the chain declares — ZMQ
+    // publishers, peg parameters — and must never have to restate the flags it does not own.
+    #[test]
+    fn request_appends_extra_arguments_after_the_chains_own() {
+        use nigiri_rs_core::Bitcoin;
+
+        let extra = [
+            "-zmqpubrawblock=tcp://0.0.0.0:28332".to_owned(),
+            "-zmqpubrawtx=tcp://0.0.0.0:28333".to_owned(),
+        ];
+
+        let request = super::request::<Bitcoin>(
+            &ContainerImage::bitcoind_default(),
+            "nigiri-test-fixture",
+            "nigiri-bitcoind-fixture",
+            &extra,
+        )
+        .expect("the pinned Bitcoind image is valid");
+
+        // `cmd()` yields `Cow<'_, str>`; `into_owned` is what produces `String`, where
+        // `to_owned` would clone the `Cow` and leave the comparison against `Vec<String>` failing
+        // to compile.
+        let cmd: Vec<String> = request.cmd().map(std::borrow::Cow::into_owned).collect();
+        let own = Bitcoin::node_cmd();
+
+        assert_eq!(
+            cmd.len(),
+            own.len() + extra.len(),
+            "the request must carry the chain's arguments and the extras, nothing else: {cmd:?}"
+        );
+        assert_eq!(&cmd[..own.len()], own.as_slice());
+        assert_eq!(&cmd[own.len()..], extra.as_slice());
+    }
+
+    // Catches a regression that makes extra arguments mandatory, which would force every existing
+    // call site to pass an empty slice for a feature it does not use.
+    #[test]
+    fn request_without_extra_arguments_is_exactly_the_chains_own() {
+        use nigiri_rs_core::Bitcoin;
+
+        let request = super::request::<Bitcoin>(
+            &ContainerImage::bitcoind_default(),
+            "nigiri-test-fixture",
+            "nigiri-bitcoind-fixture",
+            &[],
+        )
+        .expect("the pinned Bitcoind image is valid");
+
+        // `cmd()` yields `Cow<'_, str>`; `into_owned` is what produces `String`, where
+        // `to_owned` would clone the `Cow` and leave the comparison against `Vec<String>` failing
+        // to compile.
+        let cmd: Vec<String> = request.cmd().map(std::borrow::Cow::into_owned).collect();
+        assert_eq!(cmd, Bitcoin::node_cmd());
     }
 }
