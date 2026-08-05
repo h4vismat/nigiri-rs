@@ -3,4 +3,5 @@
 
 # Local design notes and implementation plans. Kept out of the repository
 # deliberately: they are working documents, not published documentation.
-/docs/
+# The rest of docs/ is published documentation and is tracked.
+/docs/superpowers/

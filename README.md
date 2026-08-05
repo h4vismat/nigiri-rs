@@ -19,6 +19,35 @@ Version 0.4.0 sends node requests directly over JSON-RPC. It retains the public,
 
 Version 0.2.0 was the breaking release that introduced network marker types selecting native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
 
+## Documentation
+
+This README is the tour. [`docs/`](docs/README.md) is the depth behind it, organized by what you are
+trying to do.
+
+**New here?** [Tutorial: your first fixture-backed test](docs/tutorial-first-test.md) takes you from
+an empty crate to a passing test against a throwaway chain.
+
+| Guide | For |
+| --- | --- |
+| [Run a throwaway regtest stack](docs/how-to-run-a-fixture.md) | Starting a fixture by hand, tuning its budget, swapping images |
+| [Point a wallet at a fixture](docs/how-to-connect-a-wallet.md) | Wiring BDK or LWK to the runtime-mapped endpoints |
+| [Point at services you run](docs/how-to-point-at-your-own-services.md) | Custom endpoints, credentials, timeouts, response limits |
+| [Call any node RPC](docs/how-to-call-any-node-rpc.md) | Methods the curated API does not wrap |
+| [Work with Liquid assets](docs/how-to-work-with-liquid-assets.md) | Minting, sending, and reading confidential UTXOs |
+
+| Reference | Covers |
+| --- | --- |
+| [Client API](docs/reference-client.md) | `NigiriClient`, `NigiriConfig`, response records, network markers |
+| [Fixture API](docs/reference-fixtures.md) | `Fixture`, `FixtureBuilder`, `ContainerImage`, `FixtureChain` |
+| [`#[nigiri_rs::test]`](docs/reference-test-macro.md) | Arguments, accepted signatures, every rejection message |
+| [Errors](docs/reference-errors.md) | `NigiriError` and `FixtureError`, variant by variant |
+
+| Explanation | Question it answers |
+| --- | --- |
+| [Lifecycle ownership](docs/explanation-lifecycle-ownership.md) | Why the client crate never starts or stops anything |
+| [Typed networks](docs/explanation-typed-networks.md) | Why `Bitcoin` and `Liquid` are type parameters |
+| [What "ready" means](docs/explanation-fixture-readiness.md) | Why a fixture waits for three services to agree |
+
 ## Lifecycle ownership
 
 The host owns the complete lifecycle of its regtest services. This library provides readiness checks but never:
