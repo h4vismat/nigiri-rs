@@ -1312,9 +1312,12 @@ name = "nigiri-rs"
 version = "0.4.0"
 dependencies = [
  "bitcoin",
+ "elements",
  "nigiri-rs-core",
  "nigiri-rs-macros",
  "nigiri-rs-testcontainers",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

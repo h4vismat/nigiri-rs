@@ -69,6 +69,26 @@ let electrum_port = fixture.electrum_endpoint().port();
 
 Docker must be running; no Nigiri installation is needed. Containers, their anonymous volumes, and the network are removed when the fixture is dropped. Ports are assigned by the runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a machine pulls two pinned images per chain and is slow; later starts are ready in a few seconds. `Fixture::<Liquid>::start` starts the same way; swap the type parameter. Podman is untested.
 
+**One attribute instead of a preamble.** The same feature provides `#[nigiri_rs::test]`, which starts a fixture per parameter and hands the body a ready client. It needs the `testcontainers` feature and Docker; nothing else:
+
+```rust,ignore
+use nigiri_rs::{Bitcoin, NigiriClient};
+
+#[nigiri_rs::test]
+async fn my_wallet_sees_its_funding(client: NigiriClient<Bitcoin>) -> Result<(), Box<dyn std::error::Error>> {
+    // `client` is already pointed at a funded, synchronized stack.
+    let address = client.new_address().await?;
+    client.faucet(&address.to_string(), None).await?;
+
+    // Point a wallet library at either endpoint; both report runtime-mapped ports.
+    let _esplora = client.esplora_url();
+    let _electrum = client.electrum_endpoint();
+    Ok(())
+}
+```
+
+One fixture is started per parameter, so a cross-chain test takes two: add a `NigiriClient<Liquid>` alongside the Bitcoin one. The chain comes from the parameter type, never an attribute argument, so the two cannot disagree. `startup_timeout = <seconds>` and `flavor = "multi_thread"` are accepted. Tests are not `#[ignore]`d — if Docker is unavailable they fail loudly rather than reporting green having run nothing.
+
 The Electrum endpoint above is `fixture.electrum_endpoint()`, which delegates to the client. Any `NigiriClient<N>`, fixture-backed or not, exposes both endpoints a BDK or LWK wallet needs directly:
 
 ```rust,no_run
