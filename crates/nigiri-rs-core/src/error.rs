@@ -2,12 +2,17 @@ use std::{borrow::Cow, time::Duration};
 
 use reqwest::StatusCode;
 
-/// Closed error model for Nigiri HTTP and node JSON-RPC operations.
+/// Error model for Nigiri HTTP and node JSON-RPC operations.
+///
+/// `#[non_exhaustive]`: variants are added as the crate grows — peg operations, Lightning channel
+/// state, Ark — and a downstream match must carry a wildcard arm rather than being broken by each
+/// addition.
 ///
 /// Operation and method labels are [`Cow<'static, str>`] so that a
 /// runtime-determined RPC method name passed to [`crate::NigiriClient::rpc`] is
 /// reported accurately. Crate-owned labels stay borrowed and allocate nothing.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum NigiriError {
     #[error("HTTP transport failed during {operation}")]
     HttpTransport {
