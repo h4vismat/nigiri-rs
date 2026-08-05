@@ -22,10 +22,9 @@
 //!
 //! # Testing a wallet against a throwaway chain
 //!
-//! The same feature provides [`macro@test`], an attribute that provisions the stack and hands the
-//! test a ready client, so a wallet test writes one attribute instead of a preamble. See its
-//! documentation for the shape; the example lives there because it only compiles with the feature
-//! enabled.
+//! The same feature provides [`macro@test`], which lets a wallet test skip the preamble above
+//! entirely. See its documentation for the shape; the example lives there because it only
+//! compiles with the feature enabled.
 
 pub use nigiri_rs_core::*;
 

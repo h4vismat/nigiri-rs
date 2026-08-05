@@ -1,4 +1,10 @@
-//! Docker-gated Liquid fixture tests. Each starts its own throwaway regtest stack.
+//! Liquid fixture tests. Each starts its own throwaway regtest stack.
+//!
+//! Two tests that used to live here now run through `#[nigiri_rs::test]` in
+//! `crates/nigiri-rs/tests/macro_smoke.rs`: the `getblockchaininfo` deserialization check, and
+//! the asset contract covering `mint` and `faucet_asset`. They had to move crates, not just
+//! files — this crate cannot depend on the facade the macro expands into. If you change
+//! `mint`, `faucet_asset`, or the typed RPC shapes, their proof is over there.
 
 use nigiri_rs_testcontainers::{Fixture, Liquid};
 

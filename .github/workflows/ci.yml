@@ -46,13 +46,38 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 1.88 is the rust-version floor declared in Cargo.toml. stable catches
-        # regressions from newer compilers.
-        toolchain: ["1.88", stable]
-        # Default features alone never compile tests/rpc_types_feature.rs or the
-        # gated test in tests/rpc_api.rs, so both columns are required to know the
-        # optional feature still works.
-        features: [default, all]
+        # 1.88 is the rust-version floor declared in Cargo.toml; stable catches regressions
+        # from newer compilers. Default features alone never compile
+        # tests/rpc_types_feature.rs or the gated test in tests/rpc_api.rs, so both feature
+        # columns are required to know the optional feature still works.
+        #
+        # Each cell states its own test scope instead of deriving it from the toolchain and
+        # feature names. A derived condition re-scopes every cell the moment a matrix value
+        # is renamed, and does it silently; stated data cannot drift out from under itself.
+        #
+        # Scoping by package, never by test name: a wrong package name is a hard error,
+        # whereas a name filter that stops matching selects nothing and exits 0.
+        # nigiri-rs-macros is in the cheap cells because its trybuild suite is pure rustc
+        # compile-fail checking with no Docker in it, and macro diagnostics are exactly the
+        # thing worth checking against the 1.88 floor as well as stable.
+        include:
+          - toolchain: "1.88"
+            features: default
+            cargo_features: ""
+            scope: -p nigiri-rs-core -p nigiri-rs-macros
+          - toolchain: "1.88"
+            features: all
+            cargo_features: --all-features
+            scope: -p nigiri-rs-core -p nigiri-rs-macros
+          - toolchain: stable
+            features: default
+            cargo_features: ""
+            scope: -p nigiri-rs-core -p nigiri-rs-macros
+          # The only cell that runs the Docker-backed tests.
+          - toolchain: stable
+            features: all
+            cargo_features: --all-features
+            scope: --workspace
     steps:
       - uses: actions/checkout@v4
 
@@ -65,38 +90,18 @@ jobs:
         with:
           key: ${{ matrix.toolchain }}-${{ matrix.features }}
 
-      - name: Set feature and scope flags
-        id: flags
-        run: |
-          if [ "${{ matrix.features }}" = "all" ]; then
-            echo "cargo_features=--all-features" >> "$GITHUB_OUTPUT"
-          else
-            echo "cargo_features=" >> "$GITHUB_OUTPUT"
-          fi
-          # Exactly one cell runs the Docker-backed tests. The others are scoped to the core
-          # crate, which is where both things this matrix exists for live: the 1.88 floor and
-          # the bitcoin-rpc-types feature. Scoping by package rather than by test name is
-          # deliberate — a name filter that stops matching exits 0 and reports green.
-          #
-          # The full workspace suite is the default. Only the cheap cells are narrowed, so a
-          # matrix value that stops matching over-covers loudly instead of under-covering
-          # silently.
-          if [ "${{ matrix.toolchain }}" != "stable" ] || [ "${{ matrix.features }}" != "all" ]; then
-            echo "test_scope=-p nigiri-rs-core" >> "$GITHUB_OUTPUT"
-          else
-            echo "test_scope=--workspace" >> "$GITHUB_OUTPUT"
-          fi
-
+      # --workspace here even on the narrowed cells: every toolchain should still prove the
+      # whole workspace compiles, which is most of what the 1.88 floor is guarding.
       - name: cargo build
-        run: cargo build --workspace --all-targets ${{ steps.flags.outputs.cargo_features }}
+        run: cargo build --workspace --all-targets ${{ matrix.cargo_features }}
 
-      # Nothing is #[ignore]d any more, so whichever scope this cell got decides whether it
-      # starts containers. Only stable+all is --workspace, and only that cell needs Docker.
+      # Nothing is #[ignore]d any more, so this cell's scope is what decides whether it
+      # starts containers.
       - name: cargo test
-        run: cargo test ${{ steps.flags.outputs.test_scope }} --all-targets ${{ steps.flags.outputs.cargo_features }}
+        run: cargo test ${{ matrix.scope }} --all-targets ${{ matrix.cargo_features }}
 
       - name: cargo test --doc
-        run: cargo test --workspace --doc ${{ steps.flags.outputs.cargo_features }}
+        run: cargo test --workspace --doc ${{ matrix.cargo_features }}
 
   packaging:
     name: Package for crates.io

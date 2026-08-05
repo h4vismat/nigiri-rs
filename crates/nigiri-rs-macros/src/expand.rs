@@ -21,9 +21,14 @@ pub(crate) fn expand(parsed: TestFn) -> TokenStream {
     inner.sig.ident = inner_name.clone();
     inner.vis = syn::Visibility::Inherited;
 
-    let starts = fixtures.iter().enumerate().map(|(index, fixture)| {
+    // One pass per fixture, emitting its start and its binding together. Deriving the handle
+    // identifier in two separate passes would leave the two `format_ident!` calls having to
+    // agree by coincidence; a divergence would surface as an unresolved name deep inside
+    // generated code, pointing at nothing the author wrote.
+    let stacks = fixtures.iter().enumerate().map(|(index, fixture)| {
         let handle = quote::format_ident!("__nigiri_rs_fixture_{index}");
         let chain = &fixture.chain;
+        let binding = &fixture.ident;
         let builder = match args.startup_timeout {
             Some(secs) => quote! {
                 ::nigiri_rs::__private::testcontainers::Fixture::<#chain>::builder()
@@ -40,15 +45,10 @@ pub(crate) fn expand(parsed: TestFn) -> TokenStream {
             let #handle = #builder
                 .await
                 .expect("nigiri-rs: the fixture could not start; is Docker running?");
+            // The client is cloned so the fixture stays owned by the wrapper and outlives the
+            // body, which is what keeps the containers alive for the test's duration.
+            let #binding = #handle.client().clone();
         }
-    });
-
-    let bindings = fixtures.iter().enumerate().map(|(index, fixture)| {
-        let handle = quote::format_ident!("__nigiri_rs_fixture_{index}");
-        let binding = &fixture.ident;
-        // The client is cloned so the fixture stays owned by the wrapper and outlives the body,
-        // which is what keeps the containers alive for the test's duration.
-        quote! { let #binding = #handle.client().clone(); }
     });
 
     let call_args = fixtures.iter().map(|fixture| &fixture.ident);
@@ -64,8 +64,7 @@ pub(crate) fn expand(parsed: TestFn) -> TokenStream {
         #vis async fn #name() #output {
             #inner
 
-            #(#starts)*
-            #(#bindings)*
+            #(#stacks)*
 
             #inner_name(#(#call_args),*).await
         }
