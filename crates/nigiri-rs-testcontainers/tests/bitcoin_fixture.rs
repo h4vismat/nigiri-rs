@@ -49,7 +49,6 @@ async fn signed_wallet_transaction(
 // owns. Both writes are confirmed through Esplora, which is what proves the indexer is genuinely
 // following the node rather than merely being reachable.
 #[tokio::test]
-#[ignore = "requires Docker and pulls pinned Bitcoin images"]
 async fn bitcoin_complete_shared_contract() -> Result<(), BoxError> {
     let fixture = Fixture::<Bitcoin>::start().await?;
     let client = fixture.client();
@@ -89,7 +88,6 @@ async fn bitcoin_complete_shared_contract() -> Result<(), BoxError> {
 // Invalidate and reconsider, with no lock: the fixture owns its chain, so the reorg this test
 // performs is invisible to every other test. That isolation is the point of the migration.
 #[tokio::test]
-#[ignore = "requires Docker and pulls pinned Bitcoin images"]
 async fn bitcoin_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
     let fixture = Fixture::<Bitcoin>::start().await?;
     let client = fixture.client();
@@ -116,7 +114,6 @@ async fn bitcoin_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
 
 // The public generic RPC, including the typed Core v30 responses behind `bitcoin-rpc-types`.
 #[tokio::test]
-#[ignore = "requires Docker and pulls pinned Bitcoin images"]
 async fn bitcoin_public_rpc_deserializes_native_and_core_v30_types() -> Result<(), BoxError> {
     let fixture = Fixture::<Bitcoin>::start().await?;
     let client = fixture.client();
@@ -153,7 +150,6 @@ const PARALLEL_STARTUP_BUDGET: Duration = Duration::from_secs(120);
 // that the other cannot see. This is what the host suite could never test, because there was only
 // ever one node.
 #[tokio::test]
-#[ignore = "requires Docker and pulls pinned Bitcoin images"]
 async fn concurrent_fixtures_are_independent() -> Result<(), BoxError> {
     let (left, right) = tokio::try_join!(
         Fixture::<Bitcoin>::builder()
@@ -202,7 +198,6 @@ async fn concurrent_fixtures_are_independent() -> Result<(), BoxError> {
 // their Electrum connection string from the client, so a stale default here is unreachable in
 // practice and fails only at connect time.
 #[tokio::test]
-#[ignore = "requires Docker and pulls pinned Bitcoin images"]
 async fn client_reports_the_mapped_electrum_port() {
     let fixture = Fixture::<Bitcoin>::start()
         .await

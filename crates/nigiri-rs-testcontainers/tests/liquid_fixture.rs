@@ -15,7 +15,6 @@ const NIGIRI_LIQUIDREGTEST_GENESIS: &str =
     "00902a6b70c2ca83b5d9c815d96a0e2f4202179316970d14ea1847dae5b1ca21";
 
 #[tokio::test]
-#[ignore = "requires Docker and pulls pinned Liquid images"]
 async fn fixture_reproduces_the_nigiri_liquid_chain() {
     let fixture = Fixture::<Liquid>::start()
         .await
@@ -34,7 +33,6 @@ async fn fixture_reproduces_the_nigiri_liquid_chain() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and pulls pinned Liquid images"]
 async fn fixture_starts_ready_and_funded() {
     let fixture = Fixture::<Liquid>::start()
         .await
@@ -75,7 +73,6 @@ async fn fixture_starts_ready_and_funded() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and pulls pinned Liquid images"]
 async fn liquid_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
     let fixture = Fixture::<Liquid>::start().await?;
     let client = fixture.client();
@@ -100,7 +97,6 @@ async fn liquid_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
 
 // Catches a fixture that leaves the client reporting the fixed container port.
 #[tokio::test]
-#[ignore = "requires Docker and pulls pinned Liquid images"]
 async fn client_reports_the_mapped_electrum_port() {
     let fixture = Fixture::<Liquid>::start()
         .await

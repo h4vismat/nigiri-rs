@@ -414,13 +414,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker and pulls pinned Bitcoin images"]
     async fn dropping_a_bitcoin_fixture_removes_every_resource_it_created() {
         assert_dropping_a_fixture_removes_every_resource_it_created::<Bitcoin>().await;
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker and pulls pinned Liquid images"]
     async fn dropping_a_liquid_fixture_removes_every_resource_it_created() {
         assert_dropping_a_fixture_removes_every_resource_it_created::<Liquid>().await;
     }
@@ -428,7 +426,6 @@ mod tests {
     // The one test that proves the whole assembly against a real daemon: a fixture that reports
     // itself ready must already be funded and reachable through its mapped Electrum port.
     #[tokio::test]
-    #[ignore = "requires Docker and pulls pinned Bitcoin images"]
     async fn fixture_starts_ready() {
         let fixture = Fixture::<Bitcoin>::start()
             .await
