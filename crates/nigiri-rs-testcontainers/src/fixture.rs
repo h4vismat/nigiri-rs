@@ -19,13 +19,6 @@ const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// dropped before the node, so the indexer is gone before the node it indexes disappears underneath
 /// it.
 pub struct Fixture<C: FixtureChain> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the handles exist only to reap their containers when the fixture is dropped"
-        )
-    )]
     handles: ContainerHandles<ContainerAsync<GenericImage>, ContainerAsync<GenericImage>>,
     client: NigiriClient<C>,
     /// The UUID-scoped names of everything this fixture created.
@@ -41,13 +34,6 @@ pub struct Fixture<C: FixtureChain> {
 /// Declaring them in one place makes the order a property of a type a test can drop, rather than of
 /// two adjacent fields nothing checks. Rust drops fields in declaration order, so the indexer goes
 /// first and is never left pointed at a node that has already disappeared.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "these handles exist only to reap their containers when the fixture is dropped"
-    )
-)]
 struct ContainerHandles<Indexer, Node> {
     electrs: Indexer,
     node: Node,
@@ -120,6 +106,25 @@ impl<C: FixtureChain> Fixture<C> {
     )]
     pub(crate) fn node_container_name(&self) -> &str {
         &self.names.node
+    }
+
+    /// Adds the inner stack's container logs to a composite's failure.
+    ///
+    /// A composite's own daemon can only be explained together with the node it followed and the
+    /// indexer beside it, and those handles are private to this type. The order matches `start`'s
+    /// own failure path: the indexer first, then the node, so the node's log — the service most
+    /// failures come back to — ends up nearest the error text.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the composites that call this — PegPair, LightningStack — land after it"
+        )
+    )]
+    pub(crate) async fn attach_inner_logs(&self, error: FixtureError) -> FixtureError {
+        let with_electrs =
+            attach_container_log(electrs::SERVICE, error, &self.handles.electrs).await;
+        attach_container_log(C::NODE_SERVICE, with_electrs, &self.handles.node).await
     }
 }
 
@@ -620,5 +625,43 @@ mod tests {
             Duration::from_secs(30),
             "the reported budget must be the caller's 30s, not the builder's own 60s default"
         );
+    }
+
+    // Catches a regression that leaves a composite's failure without the inner stack's evidence. A
+    // daemon that never syncs is explained by the node it was following, whose log lives behind a
+    // handle only the fixture owns.
+    #[tokio::test]
+    async fn inner_logs_are_attached_to_a_composites_error() {
+        let fixture = Fixture::<Bitcoin>::start()
+            .await
+            .expect("a pinned fixture must start against a real daemon");
+
+        let bare = FixtureError::ReadinessTimeout {
+            service: "lnd",
+            duration: Duration::from_secs(180),
+            last_observation: "waiting for synced_to_chain".to_owned(),
+            diagnostics: String::new(),
+        };
+        let enriched = fixture.attach_inner_logs(bare).await;
+
+        let FixtureError::ReadinessTimeout {
+            service,
+            diagnostics,
+            ..
+        } = enriched
+        else {
+            panic!("attaching logs must not change which error it is");
+        };
+        assert_eq!(service, "lnd", "the failing service must stay named");
+        assert!(
+            diagnostics.contains("bitcoind"),
+            "the node's log must be attached: {diagnostics:.256}"
+        );
+        assert!(
+            !diagnostics.contains("admin1:123"),
+            "attached logs must stay redacted"
+        );
+
+        drop(fixture);
     }
 }
