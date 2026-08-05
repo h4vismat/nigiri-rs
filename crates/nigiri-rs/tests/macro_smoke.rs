@@ -43,11 +43,10 @@ async fn one_bitcoin_client_is_funded_and_reachable(
 // Catches a regression in the multi-fixture path. Two chains in one test is the shape a
 // cross-chain consumer needs, and it must produce two genuinely independent stacks.
 //
-// This test takes about 5s, measured twice in isolation on 2026-08-05. The generated wrapper
-// starts one fixture per parameter and awaits each before starting the next, so a two-parameter
-// test pays both startups end to end rather than overlapping them. Starting them concurrently
-// would save a second or two here; it is not done yet because it changes what happens when one
-// fixture fails while another is still starting.
+// This test is also the only measurement of the concurrent-start path. Five runs each on
+// 2026-08-05, warm-up discarded: 4.47s mean starting the pair together against 6.30s awaiting
+// them one after the other, with no overlap between the two ranges. Bitcoin mines 101 blocks
+// while Liquid mines one, so overlapping the wait is worth roughly the whole Liquid startup.
 #[nigiri_rs::test]
 async fn two_chains_are_independent(
     bitcoin: NigiriClient<Bitcoin>,
