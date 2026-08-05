@@ -66,7 +66,7 @@ dependency:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.4", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["testcontainers"] }
 ```
 
 `dev-dependencies` is usually the right section: fixtures are a testing tool, and it keeps the Docker

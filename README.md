@@ -80,7 +80,7 @@ This crate does not start or stop anything. Two paths exist, and they can be use
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.4", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["testcontainers"] }
 ```
 
 ```rust
@@ -247,7 +247,7 @@ Arbitrary RPC methods may mutate node wallets or active chain state. Tests using
 Enable the optional re-export when the caller wants maintained Bitcoin Core response records:
 
 ```toml
-nigiri-rs = { version = "0.4", features = ["bitcoin-rpc-types"] }
+nigiri-rs = { version = "0.5", features = ["bitcoin-rpc-types"] }
 ```
 
 ```rust,no_run

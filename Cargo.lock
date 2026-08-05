@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "nigiri-rs"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "elements",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "nigiri-rs-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bitcoin",
  "corepc-types",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "nigiri-rs-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "nigiri-rs-testcontainers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitcoin",
  "elements",

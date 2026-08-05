@@ -26,7 +26,7 @@ Open `Cargo.toml` and add:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.4", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["testcontainers"] }
 ```
 
 One dependency. `nigiri-rs` is a facade that re-exports the client, the fixtures, and the test

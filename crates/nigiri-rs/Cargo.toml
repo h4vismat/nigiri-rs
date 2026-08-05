@@ -1,6 +1,6 @@
 [package]
 name = "nigiri-rs"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -16,9 +16,9 @@ bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]
 testcontainers = ["dep:nigiri-rs-testcontainers", "dep:nigiri-rs-macros", "dep:tokio"]
 
 [dependencies]
-nigiri-rs-core = { version = "0.3.0", path = "../nigiri-rs-core" }
-nigiri-rs-testcontainers = { version = "0.1.0", path = "../nigiri-rs-testcontainers", optional = true }
-nigiri-rs-macros = { version = "0.1.0", path = "../nigiri-rs-macros", optional = true }
+nigiri-rs-core = { version = "0.4.0", path = "../nigiri-rs-core" }
+nigiri-rs-testcontainers = { version = "0.2.0", path = "../nigiri-rs-testcontainers", optional = true }
+nigiri-rs-macros = { version = "0.2.0", path = "../nigiri-rs-macros", optional = true }
 # Re-exported through `__private` so generated code can annotate its wrapper with `#[tokio::test]`
 # without the consumer adding tokio themselves. `macros` supplies the attribute; `rt` and
 # `rt-multi-thread` supply the runtimes it selects between.

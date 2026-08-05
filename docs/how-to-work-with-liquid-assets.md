@@ -12,7 +12,7 @@ A `NigiriClient<Liquid>`, from a fixture or from a running Elements node. Plus:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.4", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["testcontainers"] }
 bitcoin = "0.32"     # for Amount
 elements = "0.25"    # for AssetId
 ```
