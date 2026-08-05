@@ -26,11 +26,11 @@ Open `Cargo.toml` and add:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", branch = "master", features = ["testcontainers"] }
+nigiri-rs = { version = "0.4", features = ["testcontainers"] }
 ```
 
-A git dependency, not a version. Only `nigiri-rs` 0.2.0 is on crates.io; the 0.4.0 facade and its
-three sibling crates have not been published yet, so `version = "0.4"` will not resolve.
+One dependency. `nigiri-rs` is a facade that re-exports the client, the fixtures, and the test
+attribute, so you never name the three crates behind it.
 
 `dev-dependencies` is the right section: fixtures are a testing tool, and this keeps the Docker
 client libraries out of your release build.

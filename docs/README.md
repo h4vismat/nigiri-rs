@@ -61,22 +61,29 @@ Rust edition 2024, MSRV 1.88.
 
 ## Installing
 
-**Only `nigiri-rs` 0.2.0 is on crates.io.** `nigiri-rs-core`, `nigiri-rs-testcontainers`, and
-`nigiri-rs-macros` have never been published, and the 0.4.0 facade has not been either. A
-`version = "0.4"` dependency will not resolve. Until a release lands, depend on git:
+Depend on the facade. It re-exports everything the other three crates provide, so you name one
+dependency:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", branch = "master", features = ["testcontainers"] }
+nigiri-rs = { version = "0.4", features = ["testcontainers"] }
 ```
 
-Pin a commit instead of a branch if you want reproducible builds:
+`dev-dependencies` is usually the right section: fixtures are a testing tool, and it keeps the Docker
+client libraries out of your release build. Use `[dependencies]` only if you talk to a regtest
+environment from the application itself, and then you probably want the feature off.
 
-```toml
-nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", rev = "7bafe3c", features = ["testcontainers"] }
-```
+Note the version line: **`nigiri-rs` is 0.4, `nigiri-rs-core` is 0.3.** Separate crates, separate
+version numbers. The facade went 0.2.0 → 0.4.0 and never had a 0.3.0; that number belongs to the
+core crate, which you do not name.
 
 Every snippet in these pages assumes that dependency.
+
+Working against unreleased changes instead? Point at git and pin a commit for reproducibility:
+
+```toml
+nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", rev = "8579e78", features = ["testcontainers"] }
+```
 
 ## Feature flags
 

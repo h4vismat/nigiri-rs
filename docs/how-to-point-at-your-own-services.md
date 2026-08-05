@@ -22,7 +22,7 @@ Nothing here starts, stops, or deletes anything. See
 
   ```toml
   [dependencies]
-  nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", branch = "master" }
+  nigiri-rs = "0.4"
   url = "2"
   ```
 
