@@ -80,6 +80,7 @@ mod http;
 mod liquid;
 mod network;
 mod node_rpc;
+mod peg;
 mod rpc;
 mod types;
 
