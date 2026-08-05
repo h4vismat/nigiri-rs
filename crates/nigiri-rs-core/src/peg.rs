@@ -28,8 +28,6 @@
 
 mod output;
 
-use std::str::FromStr;
-
 use bitcoin::{Amount, Denomination, hex::FromHex};
 use serde::Deserialize;
 
@@ -271,12 +269,10 @@ impl Peg {
         destination: &str,
         amount: Amount,
     ) -> Result<elements::Txid, NigiriError> {
-        let amount_text = amount.to_string_in(Denomination::Bitcoin);
-        let amount = serde_json::Number::from_str(&amount_text).map_err(|_| {
-            NigiriError::InvalidRequest {
-                detail: "peg-out amount could not be represented as JSON".into(),
-            }
-        })?;
+        let (amount_text, amount) = crate::client::amount_as_json_number(
+            amount,
+            "peg-out amount could not be represented as JSON",
+        )?;
 
         crate::node_rpc::call_sensitive(
             &self.liquid,

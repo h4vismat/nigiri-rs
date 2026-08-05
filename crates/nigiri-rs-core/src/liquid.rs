@@ -1,6 +1,4 @@
-use std::str::FromStr;
-
-use bitcoin::{Amount, Denomination};
+use bitcoin::Amount;
 
 use crate::{IssuanceTxIn, Liquid, MintResponse, NigiriClient, NigiriError};
 
@@ -66,10 +64,10 @@ impl NigiriClient<Liquid> {
         amount: Amount,
         asset: &elements::AssetId,
     ) -> Result<elements::Txid, NigiriError> {
-        let amount = serde_json::Number::from_str(&amount.to_string_in(Denomination::Bitcoin))
-            .map_err(|_| NigiriError::InvalidRequest {
-                detail: "asset amount could not be represented as JSON".into(),
-            })?;
+        let (_, amount) = crate::client::amount_as_json_number(
+            amount,
+            "asset amount could not be represented as JSON",
+        )?;
         crate::node_rpc::call(
             self,
             "sendtoaddress",
