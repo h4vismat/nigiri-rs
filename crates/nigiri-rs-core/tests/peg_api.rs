@@ -13,7 +13,55 @@ use url::Url;
 
 const REGTEST_GENESIS: &str = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
 
+/// Reads one HTTP request off a stream and returns its JSON body.
+///
+/// Shared by [`scripted_server`] and [`scripted_server_allowing_shortfall`], which differ only
+/// in how long they wait for the connection to arrive in the first place.
+async fn read_scripted_request(stream: &mut tokio::net::TcpStream) -> Value {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = stream.read(&mut buffer).await.unwrap();
+        if count == 0 {
+            panic!("connection closed before a full scripted request arrived");
+        }
+        request.extend_from_slice(&buffer[..count]);
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4);
+        if let Some(header_end) = header_end {
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + content_length {
+                let payload = &request[header_end..header_end + content_length];
+                return serde_json::from_slice(payload).unwrap();
+            }
+        }
+    }
+}
+
+/// Writes a scripted status and body as an HTTP response.
+async fn write_scripted_response(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await.unwrap();
+}
+
 /// Serves one scripted response per connection and returns every request body it parsed.
+///
+/// Panics if a connection does not arrive within 3 seconds of the previous one completing: an
+/// under-provisioned test almost always means an assertion is wired to the wrong request, and a
+/// loud failure here is more useful than a silent, truncated request list.
 async fn scripted_server(
     responses: Vec<(&'static str, String)>,
 ) -> (Url, tokio::task::JoinHandle<Vec<Value>>) {
@@ -26,40 +74,39 @@ async fn scripted_server(
                 .await
                 .expect("a scripted request arrives")
                 .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 8192];
-            loop {
-                let count = stream.read(&mut buffer).await.unwrap();
-                if count == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..count]);
-                let header_end = request
-                    .windows(4)
-                    .position(|window| window == b"\r\n\r\n")
-                    .map(|index| index + 4);
-                if let Some(header_end) = header_end {
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length: ")
-                                .and_then(|value| value.parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= header_end + content_length {
-                        let payload = &request[header_end..header_end + content_length];
-                        requests.push(serde_json::from_slice(payload).unwrap());
-                        break;
-                    }
-                }
-            }
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
+            requests.push(read_scripted_request(&mut stream).await);
+            write_scripted_response(&mut stream, status, &body).await;
+        }
+        requests
+    });
+    (Url::parse(&format!("http://{address}/")).unwrap(), task)
+}
+
+/// Like [`scripted_server`], but a scripted response that never gets a matching connection
+/// within `grace` is simply left unserved, returning whatever requests arrived before then,
+/// rather than panicking.
+///
+/// Exists for one purpose: proving a scripted response is deliberately left *unconsumed* by
+/// correct code. [`scripted_server`]'s exact-count panic cannot express that — a test that
+/// scripts one more response than a correct implementation ever asks for would otherwise hang
+/// for the full 3-second accept timeout and then fail with a spurious `JoinError::Panic`, not
+/// the assertion the test is actually about. A short, deliberate grace period here converts that
+/// from "hangs and fails for the wrong reason" into "resolves quickly with the right answer".
+async fn scripted_server_allowing_shortfall(
+    responses: Vec<(&'static str, String)>,
+    grace: Duration,
+) -> (Url, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut requests = Vec::with_capacity(responses.len());
+        for (status, body) in responses {
+            let Ok(Ok((mut stream, _))) = tokio::time::timeout(grace, listener.accept()).await
+            else {
+                break;
+            };
+            requests.push(read_scripted_request(&mut stream).await);
+            write_scripted_response(&mut stream, status, &body).await;
         }
         requests
     });
@@ -372,15 +419,35 @@ async fn complete_peg_in_retries_while_the_node_lags_the_chain() {
 // Catches a regression that retries a permanent failure — a transport error or a malformed
 // response — as though it were the "not deep enough yet" case, burning the whole retry budget
 // before the real error surfaces.
+//
+// This scripts one more bitcoin response than a correct implementation will ever ask for, so
+// that a wrongly-retrying implementation both issues and gets served an extra `generatetoaddress`
+// call, changing the count below from 2 to 3. Without that extra response, a wrongly-issued call
+// would just be refused by an exhausted mock — indistinguishable, from the test's point of view,
+// from a correct implementation that never made the call at all — which is exactly the gap the
+// review round that added this test found. It uses `scripted_server_allowing_shortfall` instead
+// of `scripted_server` (and so builds the pair directly rather than through `connected_peg`)
+// because a correct implementation deliberately leaves that extra response unconsumed, and
+// `scripted_server` treats an unconsumed response as a bug worth a panic.
 #[tokio::test]
 async fn complete_peg_in_does_not_retry_a_permanent_failure() {
     let mining_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
-    let (peg, liquid_requests, bitcoin_requests) = connected_peg(
-        vec![ok(json!({
-            "mainchain_address": MAINCHAIN_ADDRESS,
-            "claim_script": CLAIM_SCRIPT,
-        }))],
+    let grace = Duration::from_millis(300);
+
+    let (liquid_url, liquid_requests) = scripted_server_allowing_shortfall(
         vec![
+            ok(sidechain_info(REGTEST_GENESIS, 8)),
+            ok(json!({
+                "mainchain_address": MAINCHAIN_ADDRESS,
+                "claim_script": CLAIM_SCRIPT,
+            })),
+        ],
+        grace,
+    )
+    .await;
+    let (bitcoin_url, bitcoin_requests) = scripted_server_allowing_shortfall(
+        vec![
+            ok(Value::String(REGTEST_GENESIS.to_owned())),
             // faucet: sendtoaddress, then getnewaddress + generatetoaddress for its own block.
             ok(Value::String(MAINCHAIN_TXID.to_owned())),
             ok(Value::String(mining_address.to_owned())),
@@ -391,9 +458,18 @@ async fn complete_peg_in_does_not_retry_a_permanent_failure() {
             // claim_peg_in: a deposit lookup that comes back malformed, not "not deep enough" —
             // a non-envelope body with a success status maps to NigiriError::InvalidResponse.
             ("200 OK", "not JSON".to_owned()),
+            // Deliberately scripted to be consumed only by a wrongly-retrying implementation. Do
+            // not remove this thinking it is dead: without it, this test cannot tell a correct
+            // fail-fast from the pre-fix bug, per the block comment above.
+            ok(json!([format!("{}", "1a".repeat(32))])),
         ],
+        grace,
     )
     .await;
+
+    let peg = Peg::connect(client::<Bitcoin>(bitcoin_url), client::<Liquid>(liquid_url))
+        .await
+        .expect("the scripted pair connects");
 
     peg.complete_peg_in(bitcoin::Amount::from_sat(100_000))
         .await

@@ -164,7 +164,9 @@ impl Peg {
     ///
     /// The node's view of the mainchain lags the mainchain, so reaching the reported depth is
     /// necessary but not sufficient. This mines one more block per rejected attempt rather than
-    /// guessing a margin. See [`CLAIM_RETRY_BLOCKS`].
+    /// guessing a margin. See [`CLAIM_RETRY_BLOCKS`]. A claim failure that another block cannot
+    /// plausibly fix — see [`worth_retrying`] — returns immediately instead of spending the
+    /// retry budget on it.
     pub async fn complete_peg_in(&self, amount: bitcoin::Amount) -> Result<PegIn, NigiriError> {
         let request = self.peg_in_request().await?;
         let mainchain_txid = self
