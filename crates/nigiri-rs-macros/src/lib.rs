@@ -1,5 +1,6 @@
 //! Procedural macros for `nigiri-rs`.
 
+mod expand;
 mod parse;
 
 use proc_macro::TokenStream;
@@ -10,7 +11,7 @@ use proc_macro::TokenStream;
 #[proc_macro_attribute]
 pub fn test(args: TokenStream, item: TokenStream) -> TokenStream {
     match parse::parse(args.into(), item.into()) {
-        Ok(_parsed) => TokenStream::new(),
+        Ok(parsed) => expand::expand(parsed).into(),
         Err(error) => error.to_compile_error().into(),
     }
 }

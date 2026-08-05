@@ -28,6 +28,12 @@ pub use nigiri_rs_core::*;
 #[cfg(feature = "testcontainers")]
 pub use nigiri_rs_testcontainers as testcontainers;
 
+/// Provisions a regtest stack for a test and injects a ready [`NigiriClient`].
+///
+/// Requires the `testcontainers` feature.
+#[cfg(feature = "testcontainers")]
+pub use nigiri_rs_macros::test;
+
 /// Implementation detail of `#[nigiri_rs::test]`. Not public API.
 ///
 /// Generated code reaches every item it needs through this module, so a consumer depends only on

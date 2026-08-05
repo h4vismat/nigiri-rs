@@ -6,10 +6,6 @@ use syn::{
 };
 
 /// One fixture the generated wrapper must start, derived from one function parameter.
-// The expander does not exist yet, so nothing reads these. `expect` rather than `allow`: once the
-// expander lands the expectation goes unfulfilled and `-D warnings` fails, which forces the
-// attribute out instead of letting it linger and mask a genuinely dead field later.
-#[expect(dead_code)]
 pub(crate) struct FixtureParam {
     pub(crate) ident: syn::Ident,
     /// The chain marker, e.g. `Bitcoin`, taken from `NigiriClient<Bitcoin>`.
@@ -83,8 +79,6 @@ impl Parse for MacroArgs {
     }
 }
 
-// See the note on `FixtureParam`: read by the expander, which arrives in the next task.
-#[expect(dead_code)]
 pub(crate) struct TestFn {
     pub(crate) item: ItemFn,
     pub(crate) fixtures: Vec<FixtureParam>,

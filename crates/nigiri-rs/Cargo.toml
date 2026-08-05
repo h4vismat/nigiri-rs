@@ -26,3 +26,6 @@ tokio = { version = "1.50.0", features = ["macros", "rt", "rt-multi-thread"], op
 
 [dev-dependencies]
 bitcoin = { version = "0.32.7", features = ["serde"] }
+# The macro's own generated code reaches tokio through `__private`; this entry is for test bodies
+# that call tokio directly, which a consumer would get from their own dev-dependencies.
+tokio = { version = "1.50.0", features = ["macros", "rt", "rt-multi-thread"] }
