@@ -1,8 +1,11 @@
 //! The Bitcoin contracts, proven against a fixture instead of a host Nigiri installation.
 //!
 //! Each test owns its own chain, so nothing here needs the exclusive mutation lock the host suite
-//! required: a reorg in one test cannot be observed by another. Every test is ignored because it
-//! pulls pinned images and talks to a real daemon.
+//! required: a reorg in one test cannot be observed by another.
+//!
+//! Nothing here is `#[ignore]`d. These pull pinned images and talk to a real daemon, and they run
+//! anyway: a Docker test that is skipped by default reports green having verified nothing, which
+//! this project has shipped twice. If Docker is absent they fail loudly instead.
 
 use std::time::Duration;
 

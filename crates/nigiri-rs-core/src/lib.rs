@@ -4,7 +4,7 @@
 //! Nigiri installation or any compatible endpoints you already run.
 //!
 //! To have the services provisioned for you, use the companion `nigiri-rs-testcontainers`
-//! crate in this workspace. It starts a throwaway Bitcoin regtest stack per test,
+//! crate in this workspace. It starts a throwaway Bitcoin or Liquid regtest stack per test,
 //! hands back a client already pointed at it, and removes everything on drop. It
 //! needs Docker and no Nigiri installation. This crate does not depend on it.
 //!

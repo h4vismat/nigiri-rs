@@ -5,6 +5,12 @@ use syn::{
     spanned::Spanned,
 };
 
+/// Prefix every identifier the expander invents carries.
+///
+/// Declared here rather than in `expand.rs` because the parser rejects parameters that would
+/// collide with it. The two have to agree, so they read the same constant.
+pub(crate) const RESERVED_PREFIX: &str = "__nigiri_rs_";
+
 /// One fixture the generated wrapper must start, derived from one function parameter.
 pub(crate) struct FixtureParam {
     pub(crate) ident: syn::Ident,
@@ -93,6 +99,7 @@ pub(crate) fn parse(
     let item: ItemFn = syn::parse2(item)?;
 
     check_async(&item.sig)?;
+    check_not_generic(&item.sig)?;
 
     let mut fixtures = Vec::new();
     for arg in &item.sig.inputs {
@@ -119,6 +126,31 @@ fn check_async(sig: &Signature) -> Result<()> {
     Ok(())
 }
 
+/// Rejects a generic signature before the expander can produce a worse error than this one.
+///
+/// The wrapper is emitted parameterless and without generics, so it would call a still-generic
+/// inner fn with nothing to infer from. rustc then reports "type annotations needed" against the
+/// attribute rather than against the signature, which says nothing about what to change. A test
+/// harness cannot supply a type argument anyway, so there is no shape to support here — only a
+/// diagnostic to get right.
+fn check_not_generic(sig: &Signature) -> Result<()> {
+    if let Some(param) = sig.generics.params.first() {
+        return Err(Error::new(
+            param.span(),
+            "`#[nigiri_rs::test]` cannot be applied to a generic function: the test harness has \
+             no way to choose the type arguments",
+        ));
+    }
+    if let Some(clause) = &sig.generics.where_clause {
+        return Err(Error::new(
+            clause.span(),
+            "`#[nigiri_rs::test]` cannot be applied to a function with a `where` clause: the \
+             test harness has no way to satisfy it",
+        ));
+    }
+    Ok(())
+}
+
 /// Reads one parameter as a fixture request, or explains why it cannot be one.
 fn fixture_param(arg: &FnArg) -> Result<FixtureParam> {
     let FnArg::Typed(typed) = arg else {
@@ -134,6 +166,21 @@ fn fixture_param(arg: &FnArg) -> Result<FixtureParam> {
             "each parameter must be a plain name, so the generated wrapper can bind it",
         ));
     };
+
+    // The wrapper binds each parameter as a local beside its own `__nigiri_rs_*` items. A
+    // parameter spelling one of those shadows it, and the failure lands on generated code the
+    // author never wrote: naming a parameter `__nigiri_rs_inner` shadows the inner fn, so calling
+    // it reports `expected function, found struct NigiriClient`. Reserving the prefix costs a
+    // consumer nothing and turns that into a sentence about their own signature.
+    if pat.ident.to_string().starts_with(RESERVED_PREFIX) {
+        return Err(Error::new(
+            pat.ident.span(),
+            format!(
+                "parameter names beginning `{RESERVED_PREFIX}` are reserved for the code \
+                 `#[nigiri_rs::test]` generates; rename this parameter"
+            ),
+        ));
+    }
 
     let chain = chain_of(&typed.ty)?;
 

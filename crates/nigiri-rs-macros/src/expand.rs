@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::parse::{FixtureParam, MacroArgs, TestFn};
+use crate::parse::{FixtureParam, MacroArgs, RESERVED_PREFIX, TestFn};
 
 pub(crate) fn expand(parsed: TestFn) -> TokenStream {
     let TestFn {
@@ -16,7 +16,7 @@ pub(crate) fn expand(parsed: TestFn) -> TokenStream {
     let output = item.sig.output.clone();
 
     // The body becomes an inner async fn keeping the original parameters; the wrapper takes none.
-    let inner_name = quote::format_ident!("__nigiri_rs_inner");
+    let inner_name = quote::format_ident!("{RESERVED_PREFIX}inner");
     let mut inner = item;
     inner.sig.ident = inner_name.clone();
     inner.vis = syn::Visibility::Inherited;
@@ -95,11 +95,11 @@ fn start_stacks(fixtures: &[FixtureParam], args: &MacroArgs) -> TokenStream {
 }
 
 fn handle_ident(index: usize) -> syn::Ident {
-    quote::format_ident!("__nigiri_rs_fixture_{index}")
+    quote::format_ident!("{RESERVED_PREFIX}fixture_{index}")
 }
 
 fn started_ident(index: usize) -> syn::Ident {
-    quote::format_ident!("__nigiri_rs_started_{index}")
+    quote::format_ident!("{RESERVED_PREFIX}started_{index}")
 }
 
 /// The client is cloned so the fixture stays owned by the wrapper and outlives the body, which is

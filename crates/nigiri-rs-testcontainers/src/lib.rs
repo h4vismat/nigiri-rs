@@ -84,4 +84,9 @@ pub(crate) const RPC_PASSWORD: &str = "123";
 ///
 /// Recorded so a future divergence can be traced to a version rather than guessed at. It is
 /// documentation, not a runtime check: nothing here talks to Nigiri.
-pub const REPRODUCED_NIGIRI_VERSION: &str = "nigiri-v0.5.17";
+///
+/// The source is `nigiri --version` on the machine the topology was captured from, which is the
+/// same release the README names as the verified CLI and port contract. Keep the two in step: this
+/// constant read `v0.5.17` for a while against a README saying `v0.5.16`, with nothing recording
+/// where either number came from, so neither could be checked.
+pub const REPRODUCED_NIGIRI_VERSION: &str = "nigiri-v0.5.16";

@@ -108,6 +108,10 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     /// Funds an address through the node wallet RPC, mines exactly one block, and
     /// returns the native funding transaction identifier.
     ///
+    /// `None` sends exactly 1 BTC. That default is chosen here rather than by the
+    /// service: earlier versions routed this through Chopsticks, which omitted the
+    /// amount and let the server decide.
+    ///
     /// If the wallet funding transaction commits but the subsequent mining fails,
     /// returns [`NigiriError::PostTransactionMiningFailed`] with the committed
     /// transaction identifier. Inspect node state before retrying.

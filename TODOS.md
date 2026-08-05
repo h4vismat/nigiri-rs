@@ -14,10 +14,11 @@ Each of the four workspace manifests (`nigiri-rs-core`, `nigiri-rs-macros`,
 every crate is shaped for publication, but nothing automates `cargo publish` on a tag. Releases
 are manual and unverified. Make it idempotent so re-running a failed release does not error.
 
-Publish order, worked out for CI dependency resolution: `nigiri-rs-core` first (no workspace
-dependencies); then `nigiri-rs-macros` and `nigiri-rs-testcontainers`, which depend only on
-`nigiri-rs-core` and can publish in either order relative to each other; then `nigiri-rs`, the
-facade, which depends on all three.
+Publish order, worked out for CI dependency resolution. `nigiri-rs-macros` has no workspace
+dependency at all — only `proc-macro2`, `quote`, and `syn` — because it emits
+`::nigiri_rs::__private::…` as tokens and never compiles against the types, so it can publish at
+any point. The constraint is `nigiri-rs-core` first, then `nigiri-rs-testcontainers`, which does
+depend on it, then `nigiri-rs`, the facade, which depends on all three.
 
 ## Test suite hygiene
 
@@ -39,8 +40,10 @@ Surfaced by the 0.3.0 specialist review:
 `.github/workflows/ci.yml` runs formatting, Clippy with warnings denied, default- and
 all-feature target tests on Rust 1.88 and stable, all-feature doctests, and packaging checks.
 Exactly one matrix cell (stable, all-features) runs the full workspace, including the
-Docker-backed `nigiri-rs-testcontainers` suite; the other three cells scope to
-`nigiri-rs-core`, which needs no Docker.
+Docker-backed `nigiri-rs-testcontainers` suite; the other three scope to `nigiri-rs-core` and
+`nigiri-rs-macros`, neither of which needs Docker. The macro crate is in the narrow cells
+deliberately: its `trybuild` suite is pure compile-fail checking, and macro diagnostics are worth
+checking against the 1.88 floor as well as stable.
 
 ### Bound `max_rpc_response_bytes` from above
 

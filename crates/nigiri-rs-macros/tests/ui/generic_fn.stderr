@@ -1,0 +1,5 @@
+error: `#[nigiri_rs::test]` cannot be applied to a generic function: the test harness has no way to choose the type arguments
+ --> tests/ui/generic_fn.rs:2:33
+  |
+2 | async fn takes_a_type_parameter<T: Default>() {
+  |                                 ^
