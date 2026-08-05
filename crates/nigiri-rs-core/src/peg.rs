@@ -2,8 +2,12 @@
 
 mod output;
 
+use std::str::FromStr;
+
+use bitcoin::{Amount, Denomination, hex::FromHex};
 use serde::Deserialize;
 
+use crate::peg::output::decode_peg_out_script;
 use crate::{Bitcoin, Liquid, NigiriClient, NigiriError};
 
 /// A Bitcoin and Liquid pair that can move value across the peg.
@@ -15,7 +19,6 @@ use crate::{Bitcoin, Liquid, NigiriClient, NigiriError};
 pub struct Peg {
     bitcoin: NigiriClient<Bitcoin>,
     liquid: NigiriClient<Liquid>,
-    #[allow(dead_code, reason = "read by release_peg_out in a later task")]
     parent_genesis: bitcoin::BlockHash,
     pegin_confirmation_depth: u64,
 }
@@ -211,6 +214,141 @@ impl Peg {
 
         Err(last)
     }
+
+    /// Burns L-BTC and records a Bitcoin destination in the resulting Liquid transaction.
+    ///
+    /// This is a genuine Elements RPC. Nothing releases the BTC: on regtest there is no
+    /// federation. Follow it with [`Peg::release_peg_out`].
+    ///
+    /// No peg-out wallet setup is needed. `initpegoutwallet` is rejected on this chain — PAK
+    /// enforcement is off, so there is no PAK entry to register — and `sendtomainchain` does not
+    /// require one.
+    pub async fn send_to_mainchain(
+        &self,
+        destination: &str,
+        amount: Amount,
+    ) -> Result<elements::Txid, NigiriError> {
+        let amount = serde_json::Number::from_str(&amount.to_string_in(Denomination::Bitcoin))
+            .map_err(|_| NigiriError::InvalidRequest {
+                detail: "peg-out amount could not be represented as JSON".into(),
+            })?;
+
+        self.liquid
+            .rpc("sendtomainchain", (destination, amount))
+            .await
+    }
+
+    /// Plays federation: decodes the peg-out and pays its destination on Bitcoin.
+    ///
+    /// **This is a simulation.** The released BTC comes from the Bitcoin node's own wallet, not
+    /// from a locked reserve, so total BTC on the mainchain side grows with every release. The
+    /// Liquid side stays honest — `sendtomainchain` genuinely burned — but no 1:1 invariant holds
+    /// across the pair.
+    ///
+    /// The destination is read out of the transaction rather than taken as an argument, so a
+    /// consumer who encodes it wrongly gets no payout, exactly as on liquidv1.
+    pub async fn release_peg_out(
+        &self,
+        liquid_txid: &elements::Txid,
+    ) -> Result<PegOut, NigiriError> {
+        let txid = liquid_txid.to_string();
+        let transaction: LiquidTransaction =
+            self.liquid.rpc("getrawtransaction", (&txid, 1_u64)).await?;
+
+        let (destination, amount) = self.decode_peg_out(&transaction, &txid)?;
+
+        let bitcoin_txid = self
+            .bitcoin
+            .faucet(&destination.to_string(), Some(amount))
+            .await?;
+
+        Ok(PegOut {
+            liquid_txid: *liquid_txid,
+            destination,
+            amount,
+            bitcoin_txid,
+        })
+    }
+
+    /// Finds and reads the one peg-out output, or explains what was wrong with it.
+    fn decode_peg_out(
+        &self,
+        transaction: &LiquidTransaction,
+        txid: &str,
+    ) -> Result<(bitcoin::Address, Amount), NigiriError> {
+        let malformed = |detail: String| NigiriError::PegOutputMalformed {
+            liquid_txid: txid.to_owned(),
+            detail,
+        };
+
+        for output in &transaction.vout {
+            let Ok(raw) = Vec::<u8>::from_hex(&output.script_pub_key.hex) else {
+                continue;
+            };
+            let script = bitcoin::ScriptBuf::from_bytes(raw);
+            let Ok(target) = decode_peg_out_script(&script) else {
+                continue;
+            };
+
+            if target.parent_genesis != self.parent_genesis {
+                return Err(malformed(format!(
+                    "peg-out names parent chain {} but this pair's parent is {}",
+                    target.parent_genesis, self.parent_genesis
+                )));
+            }
+
+            let destination =
+                bitcoin::Address::from_script(&target.destination, bitcoin::Network::Regtest)
+                    .map_err(|_| {
+                        malformed("destination script is not a standard address".to_owned())
+                    })?;
+
+            let value = output
+                .value
+                .as_ref()
+                .ok_or_else(|| malformed("peg-out output has no explicit value".to_owned()))?;
+            let amount = Amount::from_str_in(&value.to_string(), Denomination::Bitcoin)
+                .map_err(|_| malformed(format!("peg-out value {value} is not an amount")))?;
+
+            return Ok((destination, amount));
+        }
+
+        Err(NigiriError::PegOutputNotFound {
+            liquid_txid: txid.to_owned(),
+        })
+    }
+}
+
+/// A peg-out that the simulated federation has released.
+#[derive(Debug, Clone)]
+pub struct PegOut {
+    /// The Liquid transaction that burned the L-BTC.
+    pub liquid_txid: elements::Txid,
+    /// The destination decoded out of the peg-out output, not supplied by the caller.
+    pub destination: bitcoin::Address,
+    /// The value decoded out of the peg-out output.
+    pub amount: Amount,
+    /// The Bitcoin transaction this crate sent to simulate the federation's release.
+    pub bitcoin_txid: bitcoin::Txid,
+}
+
+#[derive(Deserialize)]
+struct LiquidTransaction {
+    vout: Vec<LiquidOutput>,
+}
+
+#[derive(Deserialize)]
+struct LiquidOutput {
+    /// Deserialized as a `Number`, never `f64`: `arbitrary_precision` keeps it exact.
+    #[serde(default)]
+    value: Option<serde_json::Number>,
+    #[serde(rename = "scriptPubKey")]
+    script_pub_key: OutputScript,
+}
+
+#[derive(Deserialize)]
+struct OutputScript {
+    hex: String,
 }
 
 /// A peg-in address and the script that will claim it.

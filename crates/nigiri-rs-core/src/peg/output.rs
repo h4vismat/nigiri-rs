@@ -17,9 +17,6 @@ use bitcoin::{
 /// What a peg-out output names: which parent chain, and where on it.
 // `Debug` is required by the tests' `expect_err` on `Result<PegOutTarget, _>`.
 #[derive(Debug)]
-// Not called from production code until a later task wires it to the peg-out lookup; only this
-// module's tests exercise it for now.
-#[allow(dead_code)]
 pub(crate) struct PegOutTarget {
     pub(crate) parent_genesis: bitcoin::BlockHash,
     pub(crate) destination: ScriptBuf,
@@ -29,9 +26,6 @@ pub(crate) struct PegOutTarget {
 ///
 /// Returns `String` rather than [`crate::NigiriError`] so this stays free of transaction context:
 /// the caller knows the txid and wraps the detail with it.
-// Not called from production code until a later task wires it to the peg-out lookup; only this
-// module's tests exercise it for now.
-#[allow(dead_code)]
 pub(crate) fn decode_peg_out_script(script: &Script) -> Result<PegOutTarget, String> {
     let mut instructions = script.instructions();
 

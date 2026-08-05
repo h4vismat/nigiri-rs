@@ -518,3 +518,114 @@ async fn complete_peg_in_does_not_retry_a_permanent_failure() {
         "a permanent failure at the deposit lookup must never reach claimpegin"
     );
 }
+
+const PEG_OUT_TXID: &str = "abababababababababababababababababababababababababababababababab";
+const RELEASE_TXID: &str = "babababababababababababababababababababababababababababababababa";
+/// Recorded during the Task 1 spike's golden peg-out vector: the peg-out output's
+/// `scriptPubKey.hex`, captured from a live Elements node and re-verified against the current
+/// pinned image.
+const GOLDEN_PEG_OUT_SCRIPT: &str = "6a2006226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f160014153a100bf13cf08f49d13163e49df5a51d186626";
+/// The destination Bitcoin address that script pays, also recorded in the spike.
+const GOLDEN_DESTINATION: &str = "bcrt1qz5apqzl38ncg7jw3x937f80455w3se3xfhd0f5";
+
+/// Built by parsing rather than by `json!`, so the peg-out value stays an exact decimal literal.
+/// `arbitrary_precision` preserves it; writing it as a Rust float would not.
+fn peg_out_transaction(script_hex: &str, value_btc: &str) -> Value {
+    let ordinary = "0014389ffce9cd9ae88dcc0631e88a821ffdbe9bfe26";
+    serde_json::from_str(&format!(
+        r#"{{"vout":[
+            {{"value":0.5,"scriptPubKey":{{"hex":"{ordinary}"}}}},
+            {{"value":{value_btc},"scriptPubKey":{{"hex":"{script_hex}"}}}}
+        ]}}"#
+    ))
+    .expect("the scripted transaction is valid JSON")
+}
+
+// Catches a regression in the simulated federation: reading the destination out of the peg-out
+// output is what makes a consumer's sendtomainchain genuinely verified. Take the destination from
+// the caller instead and a malformed peg-out still pays.
+#[tokio::test]
+async fn release_peg_out_pays_the_decoded_destination() {
+    let (peg, liquid_requests, bitcoin_requests) = connected_peg(
+        vec![ok(peg_out_transaction(GOLDEN_PEG_OUT_SCRIPT, "0.00010000"))],
+        vec![
+            ok(Value::String(RELEASE_TXID.to_owned())),
+            ok(Value::String(
+                "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080".to_owned(),
+            )),
+            ok(json!([format!("{}", "cd".repeat(32))])),
+        ],
+    )
+    .await;
+
+    let liquid_txid: elements::Txid = PEG_OUT_TXID.parse().unwrap();
+    let released = peg
+        .release_peg_out(&liquid_txid)
+        .await
+        .expect("a valid peg-out is released");
+
+    assert_eq!(released.destination.to_string(), GOLDEN_DESTINATION);
+    assert_eq!(released.amount, bitcoin::Amount::from_sat(10_000));
+    assert_eq!(released.bitcoin_txid.to_string(), RELEASE_TXID);
+
+    let liquid_requests = liquid_requests.await.unwrap();
+    assert_eq!(liquid_requests[1]["method"], "getrawtransaction");
+    assert_eq!(liquid_requests[1]["params"], json!([PEG_OUT_TXID, 1]));
+
+    let bitcoin_requests = bitcoin_requests.await.unwrap();
+    assert_eq!(bitcoin_requests[1]["method"], "sendtoaddress");
+    assert_eq!(bitcoin_requests[1]["params"][0], json!(GOLDEN_DESTINATION));
+}
+
+// Catches a regression that pays out against a transaction that never pegged out.
+#[tokio::test]
+async fn release_peg_out_rejects_a_transaction_with_no_peg_out() {
+    let (peg, _liquid, _bitcoin) = connected_peg(
+        vec![ok(json!({
+            "vout": [
+                { "value": 1.0, "scriptPubKey": { "hex": "0014389ffce9cd9ae88dcc0631e88a821ffdbe9bfe26" } }
+            ]
+        }))],
+        vec![],
+    )
+    .await;
+
+    let liquid_txid: elements::Txid = PEG_OUT_TXID.parse().unwrap();
+    let error = peg
+        .release_peg_out(&liquid_txid)
+        .await
+        .expect_err("a transaction with no peg-out must be rejected");
+
+    let NigiriError::PegOutputNotFound { liquid_txid } = &error else {
+        panic!("expected PegOutputNotFound, got {error}");
+    };
+    assert_eq!(liquid_txid, PEG_OUT_TXID);
+}
+
+// Catches a regression that sends the wrong sendtomainchain vector. A live node rejects it; this
+// pins the shape so the mistake surfaces without Docker.
+#[tokio::test]
+async fn send_to_mainchain_sends_an_exact_decimal_amount() {
+    let (peg, liquid_requests, _bitcoin) =
+        connected_peg(vec![ok(Value::String(PEG_OUT_TXID.to_owned()))], vec![]).await;
+
+    let sent = peg
+        .send_to_mainchain(
+            "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+            bitcoin::Amount::from_sat(1),
+        )
+        .await
+        .expect("a peg-out is sent");
+
+    assert_eq!(sent.to_string(), PEG_OUT_TXID);
+
+    let liquid_requests = liquid_requests.await.unwrap();
+    assert_eq!(liquid_requests[1]["method"], "sendtomainchain");
+    assert_eq!(
+        liquid_requests[1]["params"],
+        serde_json::from_str::<Value>(
+            r#"["bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",0.00000001]"#
+        )
+        .unwrap()
+    );
+}
