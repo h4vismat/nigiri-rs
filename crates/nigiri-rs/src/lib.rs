@@ -27,3 +27,15 @@ pub use nigiri_rs_core::*;
 /// Requires the `testcontainers` feature.
 #[cfg(feature = "testcontainers")]
 pub use nigiri_rs_testcontainers as testcontainers;
+
+/// Implementation detail of `#[nigiri_rs::test]`. Not public API.
+///
+/// Generated code reaches every item it needs through this module, so a consumer depends only on
+/// `nigiri-rs` and never has to add `tokio` or the fixtures crate to make an expansion compile.
+/// Nothing here is covered by semver; do not reference it directly.
+#[cfg(feature = "testcontainers")]
+#[doc(hidden)]
+pub mod __private {
+    pub use nigiri_rs_testcontainers as testcontainers;
+    pub use tokio;
+}

@@ -13,12 +13,16 @@ all-features = true
 [features]
 default = []
 bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]
-testcontainers = ["dep:nigiri-rs-testcontainers", "dep:nigiri-rs-macros"]
+testcontainers = ["dep:nigiri-rs-testcontainers", "dep:nigiri-rs-macros", "dep:tokio"]
 
 [dependencies]
 nigiri-rs-core = { version = "0.3.0", path = "../nigiri-rs-core" }
 nigiri-rs-testcontainers = { version = "0.1.0", path = "../nigiri-rs-testcontainers", optional = true }
 nigiri-rs-macros = { version = "0.1.0", path = "../nigiri-rs-macros", optional = true }
+# Re-exported through `__private` so generated code can annotate its wrapper with `#[tokio::test]`
+# without the consumer adding tokio themselves. `macros` supplies the attribute; `rt` and
+# `rt-multi-thread` supply the runtimes it selects between.
+tokio = { version = "1.50.0", features = ["macros", "rt", "rt-multi-thread"], optional = true }
 
 [dev-dependencies]
 bitcoin = { version = "0.32.7", features = ["serde"] }

@@ -1309,6 +1309,7 @@ dependencies = [
  "nigiri-rs-core",
  "nigiri-rs-macros",
  "nigiri-rs-testcontainers",
+ "tokio",
 ]
 
 [[package]]
