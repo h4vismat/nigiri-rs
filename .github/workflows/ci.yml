@@ -64,7 +64,7 @@ jobs:
         with:
           key: ${{ matrix.toolchain }}-${{ matrix.features }}
 
-      - name: Set feature flag
+      - name: Set feature and scope flags
         id: flags
         run: |
           if [ "${{ matrix.features }}" = "all" ]; then
@@ -72,14 +72,23 @@ jobs:
           else
             echo "cargo_features=" >> "$GITHUB_OUTPUT"
           fi
+          # Exactly one cell runs the Docker-backed tests. The others are scoped to the core
+          # crate, which is where both things this matrix exists for live: the 1.88 floor and
+          # the bitcoin-rpc-types feature. Scoping by package rather than by test name is
+          # deliberate — a name filter that stops matching exits 0 and reports green.
+          if [ "${{ matrix.toolchain }}" = "stable" ] && [ "${{ matrix.features }}" = "all" ]; then
+            echo "test_scope=--workspace" >> "$GITHUB_OUTPUT"
+          else
+            echo "test_scope=-p nigiri-rs-core" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: cargo build
         run: cargo build --workspace --all-targets ${{ steps.flags.outputs.cargo_features }}
 
-      # Fixture suites are #[ignore] and start their own Docker containers, so they stay out of
-      # this job. The fixture-suites job below covers them.
+      # Nothing is #[ignore]d any more, so whichever scope this cell got decides whether it
+      # starts containers. Only stable+all is --workspace, and only that cell needs Docker.
       - name: cargo test
-        run: cargo test --workspace --all-targets ${{ steps.flags.outputs.cargo_features }}
+        run: cargo test ${{ steps.flags.outputs.test_scope }} --all-targets ${{ steps.flags.outputs.cargo_features }}
 
       - name: cargo test --doc
         run: cargo test --workspace --doc ${{ steps.flags.outputs.cargo_features }}
@@ -114,33 +123,3 @@ jobs:
 
       - name: cargo metadata
         run: cargo metadata --no-deps --format-version 1 > /dev/null
-
-  fixture-suites:
-    name: Fixture suites (Docker)
-    runs-on: ubuntu-latest
-    # Docker is preinstalled on the runner and is the only external service needed: each test starts
-    # its own regtest stack, so there is no Nigiri to install and no Compose file to bring up.
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: fixture-suites
-
-      # --test-threads=1 keeps image pulls and container starts sequential on a shared runner.
-      - name: Bitcoin fixture suite
-        run: cargo test -p nigiri-rs-testcontainers --test bitcoin_fixture --all-features -- --ignored --test-threads=1 --nocapture
-
-      - name: Liquid fixture suite
-        run: cargo test -p nigiri-rs-testcontainers --test liquid_fixture --all-features -- --ignored --test-threads=1 --nocapture
-
-      # Proves the ephemeral promise for both chains, and runs every other ignored lib test (e.g.
-      # the end-to-end Bitcoin readiness proof): these live inside the crate because the
-      # identifiers of what a fixture created are deliberately not public.
-      - name: Ignored lib tests (fixture teardown and readiness proofs)
-        run: cargo test -p nigiri-rs-testcontainers --lib --all-features -- --ignored --test-threads=1 --nocapture
