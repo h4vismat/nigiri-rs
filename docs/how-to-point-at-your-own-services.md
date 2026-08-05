@@ -22,7 +22,7 @@ Nothing here starts, stops, or deletes anything. See
 
   ```toml
   [dependencies]
-  nigiri-rs = "0.4"
+  nigiri-rs = "0.5"
   url = "2"
   ```
 

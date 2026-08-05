@@ -5,6 +5,28 @@ Completed items move to the bottom with the version that shipped them.
 
 ## CI / Distribution
 
+### Reconcile the install snippets with what is actually published
+
+**Priority:** P2
+
+Every install snippet in `README.md` and under `docs/` names `version = "0.5"`, and
+`docs/README.md:78-79` states plainly that 0.5.0 is not installable from crates.io. Both are true and
+they contradict each other: only the facade's 0.2.0 was ever published, so a reader who copies the
+snippet gets a version Cargo cannot resolve.
+
+This predates the 0.5.0 release rather than being caused by it — the snippets said `0.4` while 0.4.0
+was equally unpublished. Marking the release simply made the mismatch explicit, since the page now
+says out loud what the snippet was already getting wrong.
+
+Two ways out, and they are alternatives rather than steps: publish the four crates, which makes every
+existing snippet true and depends on the publish workflow below; or make the git-plus-pinned-rev form
+the primary snippet everywhere and keep the version table as a record of what the workspace contains,
+which is honest immediately and needs no release. Deliberately left as-is until that choice is made,
+because rewriting the snippets twice is worse than rewriting them once.
+
+Held to be low-severity on the grounds that the crate has no external consumers. That reasoning
+expires the moment it acquires one.
+
 ### Add a crates.io publish workflow
 
 **Priority:** P2

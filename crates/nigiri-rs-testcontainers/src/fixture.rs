@@ -7,8 +7,8 @@ use testcontainers::{ContainerAsync, GenericImage};
 use uuid::Uuid;
 
 use crate::{
-    ContainerImage, ElectrumEndpoint, FixtureError, chain::FixtureChain, electrs, node,
-    owned_start::attach_container_log, readiness,
+    ContainerImage, ElectrumEndpoint, FixtureError, chain::FixtureChain, deadline::Deadline,
+    electrs, node, owned_start::attach_container_log, readiness,
 };
 
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -19,24 +19,14 @@ const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// dropped before the node, so the indexer is gone before the node it indexes disappears underneath
 /// it.
 pub struct Fixture<C: FixtureChain> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the handles exist only to reap their containers when the fixture is dropped"
-        )
-    )]
     handles: ContainerHandles<ContainerAsync<GenericImage>, ContainerAsync<GenericImage>>,
     client: NigiriClient<C>,
-    /// Retained so the teardown test can name what must no longer exist once this is dropped.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the network is reaped by Testcontainers; its name is only read when proving that"
-        )
-    )]
-    network: String,
+    /// The UUID-scoped names of everything this fixture created.
+    ///
+    /// Retained for two callers: the teardown test names what must no longer exist once this is
+    /// dropped, and a composite reads the network and node names to attach its own containers and
+    /// point them at the node.
+    names: TopologyNames,
 }
 
 /// The fixture's container handles, held only for their `Drop`.
@@ -44,13 +34,6 @@ pub struct Fixture<C: FixtureChain> {
 /// Declaring them in one place makes the order a property of a type a test can drop, rather than of
 /// two adjacent fields nothing checks. Rust drops fields in declaration order, so the indexer goes
 /// first and is never left pointed at a node that has already disappeared.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "these handles exist only to reap their containers when the fixture is dropped"
-    )
-)]
 struct ContainerHandles<Indexer, Node> {
     electrs: Indexer,
     node: Node,
@@ -76,6 +59,7 @@ impl<C: FixtureChain> Fixture<C> {
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
             node_image: C::node_image_default(),
             electrs_image: C::electrs_image_default(),
+            extra_node_args: Vec::new(),
             chain: PhantomData,
         }
     }
@@ -96,6 +80,52 @@ impl<C: FixtureChain> Fixture<C> {
     pub fn electrum_endpoint(&self) -> &ElectrumEndpoint {
         self.client.electrum_endpoint()
     }
+
+    /// The Docker network every container of this fixture is attached to.
+    ///
+    /// Crate-private: a composite attaches its own containers to it. The name is an implementation
+    /// detail of this crate's topology and is deliberately not public.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the composites that call this — PegPair, LightningStack — land after it"
+        )
+    )]
+    pub(crate) fn network_name(&self) -> &str {
+        &self.names.network
+    }
+
+    /// The node's container name, which sibling containers dial it by on the fixture network.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the composites that call this — PegPair, LightningStack — land after it"
+        )
+    )]
+    pub(crate) fn node_container_name(&self) -> &str {
+        &self.names.node
+    }
+
+    /// Adds the inner stack's container logs to a composite's failure.
+    ///
+    /// A composite's own daemon can only be explained together with the node it followed and the
+    /// indexer beside it, and those handles are private to this type. The order matches `start`'s
+    /// own failure path: the indexer first, then the node, so the node's log — the service most
+    /// failures come back to — ends up nearest the error text.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the composites that call this — PegPair, LightningStack — land after it"
+        )
+    )]
+    pub(crate) async fn attach_inner_logs(&self, error: FixtureError) -> FixtureError {
+        let with_electrs =
+            attach_container_log(electrs::SERVICE, error, &self.handles.electrs).await;
+        attach_container_log(C::NODE_SERVICE, with_electrs, &self.handles.node).await
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +133,10 @@ pub struct FixtureBuilder<C: FixtureChain> {
     startup_timeout: Duration,
     node_image: ContainerImage,
     electrs_image: ContainerImage,
+    /// Appended to `C::node_cmd()` by a composite that needs arguments the standalone chain does
+    /// not set. Crate-private: a composite in this crate supplies them, and a caller who wants a
+    /// differently-configured node replaces the image instead.
+    extra_node_args: Vec<String>,
     chain: PhantomData<C>,
 }
 
@@ -146,27 +180,59 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         self
     }
 
+    /// Arguments appended to the chain's own node command.
+    ///
+    /// Crate-private, and deliberately additive: a composite extends the chain's flag vector and
+    /// must not have to restate the flags the chain owns.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the composites that call this — PegPair, LightningStack — land after it"
+        )
+    )]
+    pub(crate) fn extra_node_args(mut self, args: Vec<String>) -> Self {
+        self.extra_node_args = args;
+        self
+    }
+
     /// Starts the node, funds a wallet, starts Electrs, and returns only once all three services
     /// agree on the tip.
     ///
     /// One `Deadline` covers everything after validation, so a slow phase spends budget the later
     /// phases no longer have, rather than each phase getting a fresh clock.
     pub async fn start(self) -> Result<Fixture<C>, FixtureError> {
+        let deadline = Deadline::new(self.startup_timeout)?;
+        self.start_under(&deadline).await
+    }
+
+    /// Starts under a clock the caller already owns.
+    ///
+    /// A composite bounds its whole stack with one `Deadline` and passes it here, so the inner
+    /// fixture spends the same budget rather than running a second one beside it. `startup_timeout`
+    /// is ignored on this path: the caller's clock is the only one.
+    pub(crate) async fn start_under(self, deadline: &Deadline) -> Result<Fixture<C>, FixtureError> {
         self.node_image.validate()?;
         self.electrs_image.validate()?;
 
         let names = topology_names::<C>();
-        let deadline = crate::deadline::Deadline::new(self.startup_timeout)?;
 
-        let node =
-            node::start_node::<C>(&self.node_image, &names.network, &names.node, &deadline).await?;
+        let node = node::start_node::<C>(
+            &self.node_image,
+            &names.network,
+            &names.node,
+            &self.extra_node_args,
+            deadline,
+        )
+        .await?;
 
         let electrs = match electrs::start_electrs::<C>(
             &self.electrs_image,
             &names.network,
             &names.electrs,
             &names.node,
-            &deadline,
+            deadline,
         )
         .await
         {
@@ -184,7 +250,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         client_config.electrum = electrs.electrum_endpoint.clone();
         let client = node::fixture_client::<C>(client_config)?;
 
-        if let Err(not_ready) = readiness::wait_for_sync::<C>(&client, &deadline).await {
+        if let Err(not_ready) = readiness::wait_for_sync::<C>(&client, deadline).await {
             // Whichever service fell behind, its own log is what explains why.
             let with_electrs =
                 attach_container_log(electrs::SERVICE, not_ready, &electrs.container).await;
@@ -197,7 +263,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
                 node: node.container,
             },
             client,
-            network: names.network,
+            names,
         })
     }
 }
@@ -277,6 +343,21 @@ mod tests {
         assert_eq!(builder.electrs_image, electrs);
     }
 
+    // Catches a regression that drops a composite's extra node arguments between the builder and the
+    // container request, which would start a node silently missing the flags the composite needs.
+    #[test]
+    fn extra_node_args_reach_the_builder_and_default_to_none() {
+        let default = Fixture::<Bitcoin>::builder();
+        assert!(default.extra_node_args.is_empty());
+
+        let extended = Fixture::<Bitcoin>::builder()
+            .extra_node_args(vec!["-zmqpubrawblock=tcp://0.0.0.0:28332".to_owned()]);
+        assert_eq!(
+            extended.extra_node_args,
+            vec!["-zmqpubrawblock=tcp://0.0.0.0:28332".to_owned()]
+        );
+    }
+
     // Catches a regression that defers image validation until Docker has already been asked to start
     // something, or that starts a fixture whose budget cannot bound anything.
     #[tokio::test]
@@ -317,7 +398,7 @@ mod tests {
             .expect("a pinned fixture must start against a real daemon");
         let node = fixture.handles.node.id().to_owned();
         let electrs = fixture.handles.electrs.id().to_owned();
-        let network = fixture.network.clone();
+        let network = fixture.names.network.clone();
 
         let docker = Docker::connect_with_local_defaults()
             .expect("the daemon that just served the fixture is reachable");
@@ -489,5 +570,98 @@ mod tests {
             .expect("the network name carries the topology suffix");
         assert!(first.node.ends_with(suffix));
         assert!(first.electrs.ends_with(suffix));
+    }
+
+    // Catches a regression that discards the node's container name, which a composite needs to point
+    // its own daemons at the node over the fixture network. The mapped host port is not a substitute:
+    // sibling containers dial the node by name on the user-defined network, not through the host.
+    #[tokio::test]
+    async fn a_started_fixture_reports_the_topology_names_a_composite_must_dial() {
+        let fixture = Fixture::<Bitcoin>::start()
+            .await
+            .expect("a pinned fixture must start against a real daemon");
+
+        assert!(
+            fixture.network_name().starts_with("nigiri-rs-fixture-"),
+            "{}",
+            fixture.network_name()
+        );
+        assert!(
+            fixture
+                .node_container_name()
+                .starts_with("nigiri-rs-bitcoind-"),
+            "{}",
+            fixture.node_container_name()
+        );
+        // One UUID scopes the whole topology, so a composite can trace every resource to one fixture.
+        let suffix = fixture
+            .network_name()
+            .strip_prefix("nigiri-rs-fixture-")
+            .expect("the network name carries the topology suffix");
+        assert!(fixture.node_container_name().ends_with(suffix));
+
+        drop(fixture);
+    }
+
+    // Catches a regression that gives the inner fixture a fresh clock instead of the caller's. A
+    // composite bounds its whole stack with one Deadline; an inner fixture that ignores it would let
+    // a slow node start spend budget the composite's later phases still believe they have.
+    #[tokio::test(start_paused = true)]
+    async fn start_under_reports_the_callers_exhausted_budget_not_its_own() {
+        let deadline = crate::deadline::Deadline::new(Duration::from_secs(30))
+            .expect("a positive deadline is valid");
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let error = Fixture::<Bitcoin>::builder()
+            .start_under(&deadline)
+            .await
+            .expect_err("an exhausted caller budget must not start a container");
+
+        let FixtureError::ReadinessTimeout { duration, .. } = error else {
+            panic!("an exhausted caller budget must surface as a readiness timeout: {error}");
+        };
+        assert_eq!(
+            duration,
+            Duration::from_secs(30),
+            "the reported budget must be the caller's 30s, not the builder's own 60s default"
+        );
+    }
+
+    // Catches a regression that leaves a composite's failure without the inner stack's evidence. A
+    // daemon that never syncs is explained by the node it was following, whose log lives behind a
+    // handle only the fixture owns.
+    #[tokio::test]
+    async fn inner_logs_are_attached_to_a_composites_error() {
+        let fixture = Fixture::<Bitcoin>::start()
+            .await
+            .expect("a pinned fixture must start against a real daemon");
+
+        let bare = FixtureError::ReadinessTimeout {
+            service: "lnd",
+            duration: Duration::from_secs(180),
+            last_observation: "waiting for synced_to_chain".to_owned(),
+            diagnostics: String::new(),
+        };
+        let enriched = fixture.attach_inner_logs(bare).await;
+
+        let FixtureError::ReadinessTimeout {
+            service,
+            diagnostics,
+            ..
+        } = enriched
+        else {
+            panic!("attaching logs must not change which error it is");
+        };
+        assert_eq!(service, "lnd", "the failing service must stay named");
+        assert!(
+            diagnostics.contains("bitcoind"),
+            "the node's log must be attached: {diagnostics:.256}"
+        );
+        assert!(
+            !diagnostics.contains("admin1:123"),
+            "attached logs must stay redacted"
+        );
+
+        drop(fixture);
     }
 }

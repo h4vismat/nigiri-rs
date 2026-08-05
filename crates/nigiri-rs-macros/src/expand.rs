@@ -23,7 +23,7 @@ pub(crate) fn expand(parsed: TestFn) -> TokenStream {
 
     let stacks = start_stacks(&fixtures, &args);
 
-    let call_args = fixtures.iter().map(|fixture| &fixture.ident);
+    let call_args = fixtures.iter().map(|fixture| fixture.ident());
 
     let runtime_attr = match &args.flavor {
         Some(flavor) => quote! { #[::nigiri_rs::__private::tokio::test(flavor = #flavor)] },
@@ -106,20 +106,23 @@ fn started_ident(index: usize) -> syn::Ident {
 /// what keeps the containers alive for the test's duration.
 fn bind_client(fixture: &FixtureParam, index: usize) -> TokenStream {
     let handle = handle_ident(index);
-    let binding = &fixture.ident;
-    quote! { let #binding = #handle.client().clone(); }
+    let binding = fixture.ident();
+    match fixture {
+        FixtureParam::Client { .. } => quote! { let #binding = #handle.client().clone(); },
+    }
 }
 
 fn start_expr(fixture: &FixtureParam, args: &MacroArgs) -> TokenStream {
-    let chain = &fixture.chain;
-    match args.startup_timeout {
-        Some(secs) => quote! {
-            ::nigiri_rs::__private::testcontainers::Fixture::<#chain>::builder()
-                .startup_timeout(::core::time::Duration::from_secs(#secs))
-                .start()
-        },
-        None => quote! {
-            ::nigiri_rs::__private::testcontainers::Fixture::<#chain>::start()
+    match fixture {
+        FixtureParam::Client { chain, .. } => match args.startup_timeout {
+            Some(secs) => quote! {
+                ::nigiri_rs::__private::testcontainers::Fixture::<#chain>::builder()
+                    .startup_timeout(::core::time::Duration::from_secs(#secs))
+                    .start()
+            },
+            None => quote! {
+                ::nigiri_rs::__private::testcontainers::Fixture::<#chain>::start()
+            },
         },
     }
 }
@@ -127,14 +130,15 @@ fn start_expr(fixture: &FixtureParam, args: &MacroArgs) -> TokenStream {
 /// `expect` rather than `?`: a fixture that will not start is an environment failure, not a test
 /// assertion, and the test's own error type need not convert from it.
 ///
-/// The chain is named because concurrent starts mean more than one can fail, and "the fixture"
+/// The fixture is named because concurrent starts mean more than one can fail, and "the fixture"
 /// would not say which.
 fn start_failure_message(fixture: &FixtureParam) -> String {
-    let chain = fixture
-        .chain
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
-        .unwrap_or_else(|| "requested".to_owned());
-    format!("nigiri-rs: the {chain} fixture could not start; is Docker running?")
+    let named = match fixture {
+        FixtureParam::Client { chain, .. } => chain
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            .unwrap_or_else(|| "requested".to_owned()),
+    };
+    format!("nigiri-rs: the {named} fixture could not start; is Docker running?")
 }

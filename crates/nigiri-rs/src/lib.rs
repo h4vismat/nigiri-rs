@@ -17,7 +17,7 @@
 //! consumer talking to a host-owned Nigiri does not need.
 //!
 //! ```toml
-//! nigiri-rs = { version = "0.4", features = ["testcontainers"] }
+//! nigiri-rs = { version = "0.5", features = ["testcontainers"] }
 //! ```
 //!
 //! # Testing a wallet against a throwaway chain
