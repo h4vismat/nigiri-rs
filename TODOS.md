@@ -20,6 +20,39 @@ dependency at all — only `proc-macro2`, `quote`, and `syn` — because it emit
 any point. The constraint is `nigiri-rs-core` first, then `nigiri-rs-testcontainers`, which does
 depend on it, then `nigiri-rs`, the facade, which depends on all three.
 
+### Overlap the node and Electrs container starts
+
+**Priority:** P3
+
+`FixtureBuilder::start` brings the node fully up — container start, RPC readiness, `createwallet`,
+and the whole 101-block fund — before it calls `electrs::start_electrs`. There is no compile-time
+dependency between them: `start_electrs` takes the node's *name* as a string, computed by
+`topology_names` before either container exists. Both could run under `tokio::try_join!`, which
+would take Electrs' own container bring-up off the critical path of every one of the 18
+fixture-starting tests.
+
+Two things to settle before doing it, neither answerable without container runs. Electrs must
+tolerate a node whose RPC is not yet listening; its `--jsonrpc-import` daemon is expected to
+retry, but that is unverified here. And the current ordering is load-bearing for diagnostics: the
+error branch attaches the node's container log to an Electrs failure, on the stated grounds that
+"the node is running and holds the only account of what Electrs was pointed at." Joining them
+means an Electrs failure can arrive while the node does not yet exist, so that pairing needs
+rethinking rather than deleting. Measure the saving before committing to it.
+
+### Probe the three services concurrently in `observe_heights`
+
+**Priority:** P4
+
+`readiness::observe_heights` issues its node `getblockcount`, Esplora `block_height`, and Electrum
+`tip_height` probes strictly in sequence each poll round, though nothing in a round depends on
+another probe's result — only the combined `Heights` is compared afterwards. Every retry round
+pays the sum of three round trips instead of the longest. Each probe is already bounded by the
+shared `Deadline`, so `tokio::join!` would not change timeout semantics.
+
+The saving is unmeasured and plausibly single-digit milliseconds per round on a loopback Docker
+port, which is why this sits below the start-overlap item. Worth measuring before touching
+readiness logic, which is the most load-bearing code in the crate.
+
 ## Test suite hygiene
 
 ### Deduplicate test scaffolding
