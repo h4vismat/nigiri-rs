@@ -92,7 +92,7 @@ pub use config::{DEFAULT_MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES_LIMIT, NigiriCon
 pub use endpoint::ElectrumEndpoint;
 pub use error::NigiriError;
 pub use network::{Bitcoin, Liquid, NigiriNetwork};
-pub use peg::{Peg, PegInRequest};
+pub use peg::{Peg, PegIn, PegInRequest};
 pub use types::{
     AddressStats, BitcoinAddressInfo, BitcoinTxInfo, BitcoinUtxo, IssuanceTxIn, LiquidAddressInfo,
     LiquidTxInfo, LiquidUtxo, MintResponse, TxStatus,

@@ -241,3 +241,130 @@ async fn claim_peg_in_refuses_an_immature_deposit() {
         NigiriError::PegInImmature { have: 3, need: 8 }
     ));
 }
+
+// Catches a regression that mines the wrong number of blocks before claiming. One block short and
+// the claim is rejected; the arithmetic is off by one because faucet already mines one.
+#[tokio::test]
+async fn complete_peg_in_mines_to_the_reported_depth() {
+    let mining_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+    let (peg, liquid_requests, bitcoin_requests) = connected_peg(
+        vec![
+            ok(json!({
+                "mainchain_address": MAINCHAIN_ADDRESS,
+                "claim_script": CLAIM_SCRIPT,
+            })),
+            ok(Value::String(CLAIM_TXID.to_owned())),
+        ],
+        vec![
+            // faucet: sendtoaddress, then getnewaddress + generatetoaddress for its own block.
+            ok(Value::String(MAINCHAIN_TXID.to_owned())),
+            ok(Value::String(mining_address.to_owned())),
+            ok(json!([format!("{}", "ee".repeat(32))])),
+            // complete_peg_in: an address to mine the remaining depth to.
+            ok(Value::String(mining_address.to_owned())),
+            ok(json!([format!("{}", "ff".repeat(32))])),
+            // claim_peg_in: the deposit, then its proof.
+            ok(json!({"hex": RAW_TX_HEX, "confirmations": 8})),
+            ok(Value::String(PROOF_HEX.to_owned())),
+        ],
+    )
+    .await;
+
+    let pegged = peg
+        .complete_peg_in(bitcoin::Amount::from_sat(100_000))
+        .await
+        .expect("a full peg-in completes");
+
+    assert_eq!(pegged.mainchain_txid.to_string(), MAINCHAIN_TXID);
+    assert_eq!(pegged.claim_txid.to_string(), CLAIM_TXID);
+    assert_eq!(pegged.amount, bitcoin::Amount::from_sat(100_000));
+
+    let bitcoin_requests = bitcoin_requests.await.unwrap();
+    // Depth 8, one block already mined by faucet, so seven remain.
+    let generates: Vec<&Value> = bitcoin_requests
+        .iter()
+        .filter(|request| request["method"] == "generatetoaddress")
+        .collect();
+    assert_eq!(generates.len(), 2);
+    assert_eq!(generates[0]["params"][0], json!(1));
+    assert_eq!(generates[1]["params"][0], json!(7));
+
+    let liquid_requests = liquid_requests.await.unwrap();
+    assert_eq!(liquid_requests[1]["method"], "getpeginaddress");
+    assert_eq!(liquid_requests[2]["method"], "claimpegin");
+}
+
+// Catches a regression that gives up the first time the node says a deposit is not deep enough.
+// The Liquid node's view of the mainchain lags the mainchain itself: the Task 1 spike saw a claim
+// rejected at exactly the reported depth of 8 and accepted at 11. Without the retry, one-shot
+// peg-in is intermittently broken.
+#[tokio::test]
+async fn complete_peg_in_retries_while_the_node_lags_the_chain() {
+    let mining_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+    let not_deep_enough = (
+        "500 Internal Server Error",
+        json!({
+            "result": null,
+            "error": {"code": -8, "message": "needs more confirmations to be sent"},
+            "id": "nigiri-rs",
+        })
+        .to_string(),
+    );
+
+    let (peg, liquid_requests, bitcoin_requests) = connected_peg(
+        vec![
+            ok(json!({
+                "mainchain_address": MAINCHAIN_ADDRESS,
+                "claim_script": CLAIM_SCRIPT,
+            })),
+            not_deep_enough.clone(),
+            not_deep_enough,
+            ok(Value::String(CLAIM_TXID.to_owned())),
+        ],
+        vec![
+            // faucet: sendtoaddress, getnewaddress, generatetoaddress.
+            ok(Value::String(MAINCHAIN_TXID.to_owned())),
+            ok(Value::String(mining_address.to_owned())),
+            ok(json!([format!("{}", "ee".repeat(32))])),
+            // complete_peg_in: mining address, then the bulk mine to depth.
+            ok(Value::String(mining_address.to_owned())),
+            ok(json!([format!("{}", "ff".repeat(32))])),
+            // attempt 1: deposit lookup, proof, rejected.
+            ok(json!({"hex": RAW_TX_HEX, "confirmations": 8})),
+            ok(Value::String(PROOF_HEX.to_owned())),
+            // retry 1: one block, then lookup and proof again, rejected.
+            ok(json!([format!("{}", "1a".repeat(32))])),
+            ok(json!({"hex": RAW_TX_HEX, "confirmations": 9})),
+            ok(Value::String(PROOF_HEX.to_owned())),
+            // retry 2: one block, lookup, proof, accepted.
+            ok(json!([format!("{}", "1b".repeat(32))])),
+            ok(json!({"hex": RAW_TX_HEX, "confirmations": 10})),
+            ok(Value::String(PROOF_HEX.to_owned())),
+        ],
+    )
+    .await;
+
+    let pegged = peg
+        .complete_peg_in(bitcoin::Amount::from_sat(100_000))
+        .await
+        .expect("the claim succeeds once the node catches up");
+
+    assert_eq!(pegged.claim_txid.to_string(), CLAIM_TXID);
+
+    let bitcoin_requests = bitcoin_requests.await.unwrap();
+    let generates: Vec<&Value> = bitcoin_requests
+        .iter()
+        .filter(|request| request["method"] == "generatetoaddress")
+        .collect();
+    // One from faucet, seven to reach depth, then one per retry.
+    assert_eq!(generates.len(), 4);
+    assert_eq!(generates[2]["params"][0], json!(1));
+    assert_eq!(generates[3]["params"][0], json!(1));
+
+    let liquid_requests = liquid_requests.await.unwrap();
+    let claims = liquid_requests
+        .iter()
+        .filter(|request| request["method"] == "claimpegin")
+        .count();
+    assert_eq!(claims, 3);
+}

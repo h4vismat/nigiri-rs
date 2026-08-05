@@ -26,6 +26,16 @@ struct SideChainInfo {
     pegin_confirmation_depth: u64,
 }
 
+/// How many extra blocks `complete_peg_in` will mine while waiting for the Liquid node to catch
+/// up with the mainchain.
+///
+/// The node rejects a claim at exactly the depth it reports. Task 1's spike saw
+/// `pegin_confirmation_depth = 8` and a claim that only succeeded at 11, with the node answering
+/// "needs more confirmations to be sent" in between — its view of the mainchain lags the chain
+/// itself. Retrying a block at a time adapts to however far behind it is; a fixed margin would
+/// bake in a number measured once, on one machine, against one image.
+const CLAIM_RETRY_BLOCKS: u64 = 20;
+
 impl Peg {
     /// Pairs two clients after verifying they are actually a peg pair.
     ///
@@ -128,6 +138,59 @@ impl Peg {
 
         self.liquid.rpc("claimpegin", (deposit.hex, proof)).await
     }
+
+    /// Runs a whole peg-in: address, deposit, maturity, claim.
+    ///
+    /// Mines to the depth the sidechain reports rather than a hardcoded number, so a regtest chain
+    /// with a lowered `peginconfirmationdepth` and a production-shaped one both work.
+    /// [`NigiriClient::faucet`] already mines one confirming block, so only the remainder is mined
+    /// here.
+    ///
+    /// The node's view of the mainchain lags the mainchain, so reaching the reported depth is
+    /// necessary but not sufficient. This mines one more block per rejected attempt rather than
+    /// guessing a margin. See [`CLAIM_RETRY_BLOCKS`].
+    pub async fn complete_peg_in(&self, amount: bitcoin::Amount) -> Result<PegIn, NigiriError> {
+        let request = self.peg_in_request().await?;
+        let mainchain_txid = self
+            .bitcoin
+            .faucet(&request.mainchain_address.to_string(), Some(amount))
+            .await?;
+
+        let mining_address = self.bitcoin.new_address().await?.to_string();
+        let remaining = self.pegin_confirmation_depth.saturating_sub(1);
+        if remaining > 0 {
+            self.bitcoin
+                .generate_to_address(remaining, &mining_address)
+                .await?;
+        }
+
+        let mut last = match self.claim_peg_in(&mainchain_txid).await {
+            Ok(claim_txid) => {
+                return Ok(PegIn {
+                    mainchain_txid,
+                    claim_txid,
+                    amount,
+                });
+            }
+            Err(error) => error,
+        };
+
+        for _ in 0..CLAIM_RETRY_BLOCKS {
+            self.bitcoin.generate_to_address(1, &mining_address).await?;
+            match self.claim_peg_in(&mainchain_txid).await {
+                Ok(claim_txid) => {
+                    return Ok(PegIn {
+                        mainchain_txid,
+                        claim_txid,
+                        amount,
+                    });
+                }
+                Err(error) => last = error,
+            }
+        }
+
+        Err(last)
+    }
 }
 
 /// A peg-in address and the script that will claim it.
@@ -141,6 +204,17 @@ pub struct PegInRequest {
     pub mainchain_address: bitcoin::Address,
     /// Hex claim script, retained for callers that submit their own claim.
     pub claim_script: String,
+}
+
+/// A completed peg-in, on both chains.
+#[derive(Debug, Clone)]
+pub struct PegIn {
+    /// The Bitcoin deposit that funded the peg-in address.
+    pub mainchain_txid: bitcoin::Txid,
+    /// The Liquid transaction that minted the L-BTC.
+    pub claim_txid: elements::Txid,
+    /// The amount deposited. L-BTC minted equals this minus network fees.
+    pub amount: bitcoin::Amount,
 }
 
 #[derive(Deserialize)]
