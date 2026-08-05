@@ -28,15 +28,12 @@ pub struct Fixture<C: FixtureChain> {
     )]
     handles: ContainerHandles<ContainerAsync<GenericImage>, ContainerAsync<GenericImage>>,
     client: NigiriClient<C>,
-    /// Retained so the teardown test can name what must no longer exist once this is dropped.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the network is reaped by Testcontainers; its name is only read when proving that"
-        )
-    )]
-    network: String,
+    /// The UUID-scoped names of everything this fixture created.
+    ///
+    /// Retained for two callers: the teardown test names what must no longer exist once this is
+    /// dropped, and a composite reads the network and node names to attach its own containers and
+    /// point them at the node.
+    names: TopologyNames,
 }
 
 /// The fixture's container handles, held only for their `Drop`.
@@ -96,6 +93,33 @@ impl<C: FixtureChain> Fixture<C> {
     #[must_use]
     pub fn electrum_endpoint(&self) -> &ElectrumEndpoint {
         self.client.electrum_endpoint()
+    }
+
+    /// The Docker network every container of this fixture is attached to.
+    ///
+    /// Crate-private: a composite attaches its own containers to it. The name is an implementation
+    /// detail of this crate's topology and is deliberately not public.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the composites that call this — PegPair, LightningStack — land after it"
+        )
+    )]
+    pub(crate) fn network_name(&self) -> &str {
+        &self.names.network
+    }
+
+    /// The node's container name, which sibling containers dial it by on the fixture network.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the composites that call this — PegPair, LightningStack — land after it"
+        )
+    )]
+    pub(crate) fn node_container_name(&self) -> &str {
+        &self.names.node
     }
 }
 
@@ -225,7 +249,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
                 node: node.container,
             },
             client,
-            network: names.network,
+            names,
         })
     }
 }
@@ -360,7 +384,7 @@ mod tests {
             .expect("a pinned fixture must start against a real daemon");
         let node = fixture.handles.node.id().to_owned();
         let electrs = fixture.handles.electrs.id().to_owned();
-        let network = fixture.network.clone();
+        let network = fixture.names.network.clone();
 
         let docker = Docker::connect_with_local_defaults()
             .expect("the daemon that just served the fixture is reachable");
@@ -532,5 +556,36 @@ mod tests {
             .expect("the network name carries the topology suffix");
         assert!(first.node.ends_with(suffix));
         assert!(first.electrs.ends_with(suffix));
+    }
+
+    // Catches a regression that discards the node's container name, which a composite needs to point
+    // its own daemons at the node over the fixture network. The mapped host port is not a substitute:
+    // sibling containers dial the node by name on the user-defined network, not through the host.
+    #[tokio::test]
+    async fn a_started_fixture_reports_the_topology_names_a_composite_must_dial() {
+        let fixture = Fixture::<Bitcoin>::start()
+            .await
+            .expect("a pinned fixture must start against a real daemon");
+
+        assert!(
+            fixture.network_name().starts_with("nigiri-rs-fixture-"),
+            "{}",
+            fixture.network_name()
+        );
+        assert!(
+            fixture
+                .node_container_name()
+                .starts_with("nigiri-rs-bitcoind-"),
+            "{}",
+            fixture.node_container_name()
+        );
+        // One UUID scopes the whole topology, so a composite can trace every resource to one fixture.
+        let suffix = fixture
+            .network_name()
+            .strip_prefix("nigiri-rs-fixture-")
+            .expect("the network name carries the topology suffix");
+        assert!(fixture.node_container_name().ends_with(suffix));
+
+        drop(fixture);
     }
 }
