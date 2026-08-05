@@ -36,6 +36,22 @@ struct SideChainInfo {
 /// bake in a number measured once, on one machine, against one image.
 const CLAIM_RETRY_BLOCKS: u64 = 20;
 
+/// Whether mining another block could plausibly change the outcome of a claim.
+///
+/// The Liquid node's view of the mainchain lags the mainchain, so a claim it has considered and
+/// rejected may succeed a block later — that is the whole reason `complete_peg_in` retries. A
+/// transport failure or an unusable response is not that: no amount of mining fixes a dead socket
+/// or a malformed reply, and retrying one only delays the real error by twenty blocks.
+///
+/// Matched on the variant rather than the node's message text, which carries no compatibility
+/// promise.
+fn worth_retrying(error: &NigiriError) -> bool {
+    matches!(
+        error,
+        NigiriError::PegInImmature { .. } | NigiriError::RpcFailed { .. }
+    )
+}
+
 impl Peg {
     /// Pairs two clients after verifying they are actually a peg pair.
     ///
@@ -172,7 +188,8 @@ impl Peg {
                     amount,
                 });
             }
-            Err(error) => error,
+            Err(error) if worth_retrying(&error) => error,
+            Err(error) => return Err(error),
         };
 
         for _ in 0..CLAIM_RETRY_BLOCKS {
@@ -185,7 +202,8 @@ impl Peg {
                         amount,
                     });
                 }
-                Err(error) => last = error,
+                Err(error) if worth_retrying(&error) => last = error,
+                Err(error) => return Err(error),
             }
         }
 

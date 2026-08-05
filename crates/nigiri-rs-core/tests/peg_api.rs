@@ -368,3 +368,51 @@ async fn complete_peg_in_retries_while_the_node_lags_the_chain() {
         .count();
     assert_eq!(claims, 3);
 }
+
+// Catches a regression that retries a permanent failure — a transport error or a malformed
+// response — as though it were the "not deep enough yet" case, burning the whole retry budget
+// before the real error surfaces.
+#[tokio::test]
+async fn complete_peg_in_does_not_retry_a_permanent_failure() {
+    let mining_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+    let (peg, liquid_requests, bitcoin_requests) = connected_peg(
+        vec![ok(json!({
+            "mainchain_address": MAINCHAIN_ADDRESS,
+            "claim_script": CLAIM_SCRIPT,
+        }))],
+        vec![
+            // faucet: sendtoaddress, then getnewaddress + generatetoaddress for its own block.
+            ok(Value::String(MAINCHAIN_TXID.to_owned())),
+            ok(Value::String(mining_address.to_owned())),
+            ok(json!([format!("{}", "ee".repeat(32))])),
+            // complete_peg_in: an address to mine the remaining depth to.
+            ok(Value::String(mining_address.to_owned())),
+            ok(json!([format!("{}", "ff".repeat(32))])),
+            // claim_peg_in: a deposit lookup that comes back malformed, not "not deep enough" —
+            // a non-envelope body with a success status maps to NigiriError::InvalidResponse.
+            ("200 OK", "not JSON".to_owned()),
+        ],
+    )
+    .await;
+
+    peg.complete_peg_in(bitcoin::Amount::from_sat(100_000))
+        .await
+        .expect_err("a malformed response must not be retried into a fake success");
+
+    let bitcoin_requests = bitcoin_requests.await.unwrap();
+    let generates: Vec<&Value> = bitcoin_requests
+        .iter()
+        .filter(|request| request["method"] == "generatetoaddress")
+        .collect();
+    // Only the two generatetoaddress calls that faucet and the initial mine-to-depth already
+    // perform; the fix must not mine any further blocks chasing an unretryable error.
+    assert_eq!(generates.len(), 2);
+
+    let liquid_requests = liquid_requests.await.unwrap();
+    assert!(
+        liquid_requests
+            .iter()
+            .all(|request| request["method"] != "claimpegin"),
+        "a permanent failure at the deposit lookup must never reach claimpegin"
+    );
+}
