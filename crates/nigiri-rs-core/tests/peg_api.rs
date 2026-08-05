@@ -602,6 +602,92 @@ async fn release_peg_out_rejects_a_transaction_with_no_peg_out() {
     assert_eq!(liquid_txid, PEG_OUT_TXID);
 }
 
+/// A peg-out-shaped `OP_RETURN` naming a 32-byte genesis that is not the regtest one, followed by
+/// a plausible destination script push. Hand-built rather than node-captured — like
+/// `peg/output.rs`'s rejection vectors — because only the golden vector needs to come from a real
+/// node; this one only needs the right shape to exercise the "structurally a peg-out, wrong
+/// chain" branch.
+const WRONG_CHAIN_PEG_OUT_SCRIPT: &str = "6a201111111111111111111111111111111111111111111111111111111111111111160014389ffce9cd9ae88dcc0631e88a821ffdbe9bfe26";
+
+/// Three outputs: an ordinary payment, a peg-out-shaped output for a foreign chain, then the real
+/// golden peg-out. Used to prove the foreign-chain output does not shadow the genuine one.
+fn transaction_with_wrong_chain_before_golden(value_btc: &str) -> Value {
+    let ordinary = "0014389ffce9cd9ae88dcc0631e88a821ffdbe9bfe26";
+    serde_json::from_str(&format!(
+        r#"{{"vout":[
+            {{"value":0.5,"scriptPubKey":{{"hex":"{ordinary}"}}}},
+            {{"value":0.5,"scriptPubKey":{{"hex":"{WRONG_CHAIN_PEG_OUT_SCRIPT}"}}}},
+            {{"value":{value_btc},"scriptPubKey":{{"hex":"{GOLDEN_PEG_OUT_SCRIPT}"}}}}
+        ]}}"#
+    ))
+    .expect("the scripted transaction is valid JSON")
+}
+
+// Catches a regression that rejects a transaction outright the first time it sees a
+// peg-out-shaped output for a different parent chain, instead of continuing to scan for the
+// genuine one. A wrong-chain OP_RETURN before the real peg-out must not shadow it.
+#[tokio::test]
+async fn release_peg_out_skips_a_wrong_chain_output_and_finds_the_real_one() {
+    let (peg, _liquid, bitcoin_requests) = connected_peg(
+        vec![ok(transaction_with_wrong_chain_before_golden("0.00010000"))],
+        vec![
+            ok(Value::String(RELEASE_TXID.to_owned())),
+            ok(Value::String(
+                "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080".to_owned(),
+            )),
+            ok(json!([format!("{}", "cd".repeat(32))])),
+        ],
+    )
+    .await;
+
+    let liquid_txid: elements::Txid = PEG_OUT_TXID.parse().unwrap();
+    let released = peg
+        .release_peg_out(&liquid_txid)
+        .await
+        .expect("the genuine peg-out is found past the wrong-chain output");
+
+    assert_eq!(released.destination.to_string(), GOLDEN_DESTINATION);
+    assert_eq!(released.amount, bitcoin::Amount::from_sat(10_000));
+
+    let bitcoin_requests = bitcoin_requests.await.unwrap();
+    assert_eq!(bitcoin_requests[1]["method"], "sendtoaddress");
+    assert_eq!(bitcoin_requests[1]["params"][0], json!(GOLDEN_DESTINATION));
+}
+
+// Catches a regression that drops the diagnostic once a mismatch is no longer fatal on sight: a
+// caller who genuinely points at a foreign-chain peg-out must still learn why it was rejected.
+#[tokio::test]
+async fn release_peg_out_reports_a_wrong_chain_mismatch_when_nothing_else_matches() {
+    let (peg, _liquid, _bitcoin) = connected_peg(
+        vec![ok(json!({
+            "vout": [
+                { "value": 0.5, "scriptPubKey": { "hex": WRONG_CHAIN_PEG_OUT_SCRIPT } }
+            ]
+        }))],
+        vec![],
+    )
+    .await;
+
+    let liquid_txid: elements::Txid = PEG_OUT_TXID.parse().unwrap();
+    let error = peg
+        .release_peg_out(&liquid_txid)
+        .await
+        .expect_err("a transaction with only a wrong-chain peg-out must be rejected");
+
+    let NigiriError::PegOutputMalformed {
+        liquid_txid,
+        detail,
+    } = &error
+    else {
+        panic!("expected PegOutputMalformed, got {error}");
+    };
+    assert_eq!(liquid_txid, PEG_OUT_TXID);
+    assert!(
+        detail.contains("parent chain"),
+        "unhelpful detail: {detail}"
+    );
+}
+
 // Catches a regression that sends the wrong sendtomainchain vector. A live node rejects it; this
 // pins the shape so the mistake surfaces without Docker.
 #[tokio::test]

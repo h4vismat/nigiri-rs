@@ -243,7 +243,8 @@ impl Peg {
     /// **This is a simulation.** The released BTC comes from the Bitcoin node's own wallet, not
     /// from a locked reserve, so total BTC on the mainchain side grows with every release. The
     /// Liquid side stays honest — `sendtomainchain` genuinely burned — but no 1:1 invariant holds
-    /// across the pair.
+    /// across the pair. The release also mines a confirming block, inherited from
+    /// [`NigiriClient::faucet`].
     ///
     /// The destination is read out of the transaction rather than taken as an argument, so a
     /// consumer who encodes it wrongly gets no payout, exactly as on liquidv1.
@@ -281,6 +282,12 @@ impl Peg {
             detail,
         };
 
+        // A wrong-chain output structurally shaped like a peg-out is not the peg-out being looked
+        // for: keep scanning rather than rejecting the whole transaction, since a genuine peg-out
+        // for this pair may still follow it. The mismatch detail is kept around only in case
+        // nothing better is ever found.
+        let mut mismatch: Option<String> = None;
+
         for output in &transaction.vout {
             let Ok(raw) = Vec::<u8>::from_hex(&output.script_pub_key.hex) else {
                 continue;
@@ -291,10 +298,13 @@ impl Peg {
             };
 
             if target.parent_genesis != self.parent_genesis {
-                return Err(malformed(format!(
-                    "peg-out names parent chain {} but this pair's parent is {}",
-                    target.parent_genesis, self.parent_genesis
-                )));
+                if mismatch.is_none() {
+                    mismatch = Some(format!(
+                        "peg-out names parent chain {} but this pair's parent is {}",
+                        target.parent_genesis, self.parent_genesis
+                    ));
+                }
+                continue;
             }
 
             let destination =
@@ -313,9 +323,12 @@ impl Peg {
             return Ok((destination, amount));
         }
 
-        Err(NigiriError::PegOutputNotFound {
-            liquid_txid: txid.to_owned(),
-        })
+        match mismatch {
+            Some(detail) => Err(malformed(detail)),
+            None => Err(NigiriError::PegOutputNotFound {
+                liquid_txid: txid.to_owned(),
+            }),
+        }
     }
 }
 
