@@ -429,11 +429,12 @@ Re-exports the `corepc-types` 0.15 crate as `nigiri_rs::bitcoin_rpc_types`, givi
 Bitcoin Core response records to deserialize `rpc()` results into:
 
 ```rust,ignore
-let info: bitcoin_rpc_types::v30::GetBlockchainInfo = client.rpc("getblockchaininfo", ()).await?;
+let info: bitcoin_rpc_types::v31::GetBlockchainInfo = client.rpc("getblockchaininfo", ()).await?;
 ```
 
-Nigiri v0.5.16 and the pinned fixture image both run Bitcoin Core v30.0, so `v30` is the module to
-use. A custom environment on another Core version needs the matching module.
+The module has to match the Core version serving the request. The pinned fixture image runs Bitcoin
+Core v31.0, so `v31` is the module against a fixture; Nigiri v0.5.16 runs v30.0 and needs `v30`. A
+custom environment on another Core version needs its own matching module.
 
 There is no equivalent for Liquid: the `elements` crate supplies the native values, and callers own
 their own RPC records.

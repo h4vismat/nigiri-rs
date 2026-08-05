@@ -92,7 +92,7 @@ Both live on the `nigiri-rs` facade and are off by default.
 | Feature | Pulls in | Enables |
 | --- | --- | --- |
 | `testcontainers` | `nigiri-rs-testcontainers`, `nigiri-rs-macros`, `tokio` | `nigiri_rs::testcontainers`, `#[nigiri_rs::test]` |
-| `bitcoin-rpc-types` | `corepc-types` 0.15 | `nigiri_rs::bitcoin_rpc_types`, maintained Bitcoin Core v30 response records |
+| `bitcoin-rpc-types` | `corepc-types` 0.15 | `nigiri_rs::bitcoin_rpc_types`, maintained Bitcoin Core response records — pick the module matching your node (`v31` for a fixture, `v30` for Nigiri) |
 
 `testcontainers` is off by default because it pulls Docker client dependencies that a consumer
 talking to services it already runs does not need.

@@ -115,9 +115,11 @@ async fn bitcoin_reorg_restores_the_test_created_tip() -> Result<(), BoxError> {
     Ok(())
 }
 
-// The public generic RPC, including the typed Core v30 responses behind `bitcoin-rpc-types`.
+// The public generic RPC, including the typed Core v31 responses behind `bitcoin-rpc-types`. The
+// module has to track the pinned node image: this deserializes what the fixture's Core actually
+// serves, unlike the stub-served `v30` test in `nigiri-rs-core`, which only proves the re-export.
 #[tokio::test]
-async fn bitcoin_public_rpc_deserializes_native_and_core_v30_types() -> Result<(), BoxError> {
+async fn bitcoin_public_rpc_deserializes_native_and_core_v31_types() -> Result<(), BoxError> {
     let fixture = Fixture::<Bitcoin>::start().await?;
     let client = fixture.client();
 
@@ -128,7 +130,7 @@ async fn bitcoin_public_rpc_deserializes_native_and_core_v30_types() -> Result<(
 
     #[cfg(feature = "bitcoin-rpc-types")]
     {
-        let info: nigiri_rs_core::bitcoin_rpc_types::v30::GetBlockchainInfo =
+        let info: nigiri_rs_core::bitcoin_rpc_types::v31::GetBlockchainInfo =
             client.rpc("getblockchaininfo", ()).await?;
         assert_eq!(info.chain, "regtest");
         assert!(!info.best_block_hash.is_empty());

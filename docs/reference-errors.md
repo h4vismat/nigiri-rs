@@ -143,7 +143,7 @@ field is why a readiness failure is usually diagnosable from the error text alon
 > `invalid fixture configuration: {detail}`
 
 Rejected **before Docker is asked to start anything**: an empty image name or tag, a malformed
-digest, a zero startup timeout.
+digest, a blank image entrypoint, a zero startup timeout.
 
 ### `RuntimeUnavailable`
 

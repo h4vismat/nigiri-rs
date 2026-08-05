@@ -164,13 +164,15 @@ nigiri-rs = { version = "0.4", features = ["bitcoin-rpc-types"] }
 ```rust,ignore
 use nigiri_rs::bitcoin_rpc_types;
 
-let info: bitcoin_rpc_types::v30::GetBlockchainInfo =
+let info: bitcoin_rpc_types::v31::GetBlockchainInfo =
     client.rpc("getblockchaininfo", ()).await?;
 ```
 
-Nigiri v0.5.16 and the pinned fixture image both run Bitcoin Core v30.0, so `v30` is the module. A
-different Core version needs the matching module. There is no Liquid equivalent — the `elements`
-crate supplies native values and you own the record.
+The module has to match the Core version you are actually talking to, and the two environments this
+crate targets no longer agree: the pinned fixture image runs Bitcoin Core v31.0, so `v31` is the
+module against a fixture, while Nigiri v0.5.16 runs v30.0 and needs `v30`.
+
+There is no Liquid equivalent — the `elements` crate supplies native values and you own the record.
 
 ## Method name rules
 

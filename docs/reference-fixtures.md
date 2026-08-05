@@ -44,6 +44,11 @@ client; it is a convenience, not a second source of truth.
 **The fixture owns the containers.** Dropping it removes both containers, their anonymous volumes,
 and the network. Nothing survives the test.
 
+How many anonymous volumes exist depends on the images, not on the fixture: Docker creates one per
+`VOLUME` an image declares, and of the pinned four only `docker-bitcoind` declares any. A Bitcoin
+fixture therefore owns one and a Liquid fixture owns none — either way a fixture never mounts
+storage Docker did not create for that container alone.
+
 Keep the `Fixture` alive for as long as you use the client. `client()` returns a borrow, so the
 compiler enforces this — but note that `NigiriClient` is `Clone`, and a cloned client outliving its
 fixture points at containers that no longer exist.
@@ -166,19 +171,29 @@ pub struct ContainerImage { /* private */ }
 impl ContainerImage {
     pub fn new(name: impl Into<String>, tag: impl Into<String>) -> Self;
     pub fn with_digest(self, digest: impl Into<String>) -> Self;
+    pub fn with_entrypoint(self, entrypoint: impl Into<String>) -> Self;
     pub fn name(&self) -> &str;
     pub fn tag(&self) -> &str;
     pub fn digest(&self) -> Option<&str>;
+    pub fn entrypoint(&self) -> Option<&str>;
 }
 ```
 
-Derives `Clone`, `Debug`, `Eq`, `PartialEq`. A digest is optional; `new` alone is valid.
+Derives `Clone`, `Debug`, `Eq`, `PartialEq`. Both the digest and the entrypoint are optional; `new`
+alone is valid.
+
+Without `with_entrypoint`, the image's own `ENTRYPOINT` is used, which is what most images want:
+they already start their daemon, and overriding it would exec that daemon twice. Set one only for an
+image that does not — `blockstream/elementsd` declares no entrypoint and defaults to `bash`, so
+without `with_entrypoint("elementsd")` the flag vector a chain builds would be execed as a program
+name.
 
 Validation, applied at `start()`:
 
 - Name must not be empty.
 - Tag must not be empty.
 - A digest, if present, must be `sha256:` followed by exactly 64 lowercase hex characters.
+- An entrypoint, if present, must not be blank.
 
 Each failure is `FixtureError::InvalidConfiguration`.
 
@@ -186,12 +201,24 @@ Each failure is `FixtureError::InvalidConfiguration`.
 
 Pinned by both tag and digest.
 
-| Role | Image | Tag |
-| --- | --- | --- |
-| Bitcoin node | `ghcr.io/getumbrel/docker-bitcoind` | `v30.0` |
-| Liquid node | `ghcr.io/vulpemventures/elements` | `latest` |
-| Bitcoin indexer | `ghcr.io/vulpemventures/electrs` | `latest` |
-| Liquid indexer | `ghcr.io/vulpemventures/electrs-liquid` | `latest` |
+| Role | Image | Tag | Entrypoint |
+| --- | --- | --- | --- |
+| Bitcoin node | `ghcr.io/getumbrel/docker-bitcoind` | `v31.0` | the image's own |
+| Liquid node | `blockstream/elementsd` | `23.3.3` | `elementsd` |
+| Bitcoin indexer | `mempool/electrs` | `v3.4.0-dev1` | the image's own |
+| Liquid indexer | `mempool/electrs-liquid` | `v3.4.0-dev1` | the image's own |
+
+The indexers are Mempool's Esplora-Electrs fork, not the one Nigiri runs, which has not been rebuilt
+since 2022. Both are pinned to the same `v3.4.0-dev1` build: the Liquid variant publishes no stable
+tag, and a version skew between the two would show up as a chain difference in a suite that asserts
+the same behaviour against both.
+
+The Liquid node is Blockstream's own image, built from the verified `ElementsProject/elements`
+release binaries. That is a provenance choice rather than a version bump: Nigiri's image runs Elements
+Core v23.3.3 as well, so the `liquidregtest` chain is unchanged, which the Liquid suite asserts
+against a genesis hash read from a real Nigiri stack.
+
+The Bitcoin node is one major version ahead of the Nigiri CLI, which runs Core v30.0.
 
 The constructors for these are crate-private; you reach them by not overriding the builder. You can
 replace any of them with `ContainerImage::new(...)`, but **an image this crate has not been tested

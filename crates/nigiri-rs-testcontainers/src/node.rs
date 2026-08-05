@@ -30,13 +30,19 @@ pub(crate) fn request<C: FixtureChain>(
 ) -> Result<ContainerRequest<GenericImage>, FixtureError> {
     image.validate()?;
 
-    Ok(
-        GenericImage::new(image.name().to_owned(), image.testcontainers_tag())
-            .with_exposed_port(C::NODE_RPC_PORT.tcp())
-            .with_network(network_name)
-            .with_container_name(container_name)
-            .with_cmd(C::node_cmd()),
-    )
+    // The entrypoint is applied here, before the request conversion, and only when the image asks
+    // for one: an image that entrypoints its own daemon must keep it, so the entrypoint travels with
+    // the image descriptor rather than being fixed per chain.
+    let mut generic = GenericImage::new(image.name().to_owned(), image.testcontainers_tag());
+    if let Some(entrypoint) = image.entrypoint() {
+        generic = generic.with_entrypoint(entrypoint);
+    }
+
+    Ok(generic
+        .with_exposed_port(C::NODE_RPC_PORT.tcp())
+        .with_network(network_name)
+        .with_container_name(container_name)
+        .with_cmd(C::node_cmd()))
 }
 
 pub(crate) async fn start_node<C: FixtureChain>(
@@ -239,6 +245,8 @@ mod tests {
         .expect("the pinned Bitcoind image is valid");
 
         assert_eq!(request.expose_ports(), &[18_443.tcp()]);
+        // The bitcoind image entrypoints its own daemon, so the fixture must not supply one.
+        assert_eq!(request.entrypoint(), None);
         assert_eq!(request.network().as_deref(), Some("nigiri-test-fixture"));
         assert_eq!(
             request.container_name().as_deref(),
@@ -256,6 +264,24 @@ mod tests {
             request.image().tag(),
             ContainerImage::bitcoind_default().testcontainers_tag()
         );
+    }
+
+    // Catches a regression that drops the image's entrypoint on the way into the request. Without
+    // it the Elements image runs its default `bash` and the chain's whole flag vector is discarded,
+    // which surfaces only as a node that never answers RPC.
+    #[test]
+    fn request_carries_the_images_entrypoint_when_it_declares_one() {
+        use nigiri_rs_core::Liquid;
+
+        let request = super::request::<Liquid>(
+            &ContainerImage::elements_default(),
+            "nigiri-test-fixture",
+            "nigiri-elements-fixture",
+        )
+        .expect("the pinned Elements image is valid");
+
+        assert_eq!(request.entrypoint(), Some("elementsd"));
+        assert_eq!(request.expose_ports(), &[18_884.tcp()]);
     }
 
     // Catches a regression that defers invalid image validation until Docker request startup.
