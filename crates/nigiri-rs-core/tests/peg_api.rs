@@ -131,3 +131,113 @@ async fn connect_rejects_a_mismatched_parent() {
     };
     assert!(detail.contains("parent"), "unhelpful detail: {detail}");
 }
+
+/// Connects a Peg against two servers whose first scripted response is the pair check.
+async fn connected_peg(
+    mut liquid: Vec<(&'static str, String)>,
+    mut bitcoin: Vec<(&'static str, String)>,
+) -> (
+    Peg,
+    tokio::task::JoinHandle<Vec<Value>>,
+    tokio::task::JoinHandle<Vec<Value>>,
+) {
+    liquid.insert(0, ok(sidechain_info(REGTEST_GENESIS, 8)));
+    bitcoin.insert(0, ok(Value::String(REGTEST_GENESIS.to_owned())));
+
+    let (liquid_url, liquid_requests) = scripted_server(liquid).await;
+    let (bitcoin_url, bitcoin_requests) = scripted_server(bitcoin).await;
+
+    let peg = Peg::connect(client::<Bitcoin>(bitcoin_url), client::<Liquid>(liquid_url))
+        .await
+        .expect("the scripted pair connects");
+
+    (peg, liquid_requests, bitcoin_requests)
+}
+
+const MAINCHAIN_ADDRESS: &str = "bcrt1qwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamsyzj6cv";
+const CLAIM_SCRIPT: &str = "0014389ffce9cd9ae88dcc0631e88a821ffdbe9bfe26";
+const MAINCHAIN_TXID: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const CLAIM_TXID: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const RAW_TX_HEX: &str = "02000000000101aabb";
+const PROOF_HEX: &str = "0000002011223344";
+
+// Catches a regression that stops asking the Liquid node for a peg-in address, or that mangles
+// the two fields it returns.
+#[tokio::test]
+async fn peg_in_request_returns_the_address_and_claim_script() {
+    let (peg, liquid_requests, _bitcoin) = connected_peg(
+        vec![ok(json!({
+            "mainchain_address": MAINCHAIN_ADDRESS,
+            "claim_script": CLAIM_SCRIPT,
+        }))],
+        vec![],
+    )
+    .await;
+
+    let request = peg
+        .peg_in_request()
+        .await
+        .expect("a peg-in address is issued");
+
+    assert_eq!(request.mainchain_address.to_string(), MAINCHAIN_ADDRESS);
+    assert_eq!(request.claim_script, CLAIM_SCRIPT);
+
+    let liquid_requests = liquid_requests.await.unwrap();
+    assert_eq!(liquid_requests[1]["method"], "getpeginaddress");
+    assert_eq!(liquid_requests[1]["params"], json!([]));
+}
+
+// Catches a regression in the claim vector: the wrong RPC, the wrong argument order, or a proof
+// requested for the wrong transaction. A live node rejects all three.
+#[tokio::test]
+async fn claim_peg_in_sends_the_raw_transaction_and_its_proof() {
+    let (peg, liquid_requests, bitcoin_requests) = connected_peg(
+        vec![ok(Value::String(CLAIM_TXID.to_owned()))],
+        vec![
+            ok(json!({"hex": RAW_TX_HEX, "confirmations": 8})),
+            ok(Value::String(PROOF_HEX.to_owned())),
+        ],
+    )
+    .await;
+
+    let mainchain_txid: bitcoin::Txid = MAINCHAIN_TXID.parse().unwrap();
+
+    let claimed = peg
+        .claim_peg_in(&mainchain_txid)
+        .await
+        .expect("a mature deposit claims");
+
+    assert_eq!(claimed.to_string(), CLAIM_TXID);
+
+    let bitcoin_requests = bitcoin_requests.await.unwrap();
+    assert_eq!(bitcoin_requests[1]["method"], "getrawtransaction");
+    assert_eq!(bitcoin_requests[1]["params"], json!([MAINCHAIN_TXID, true]));
+    assert_eq!(bitcoin_requests[2]["method"], "gettxoutproof");
+    assert_eq!(bitcoin_requests[2]["params"], json!([[MAINCHAIN_TXID]]));
+
+    let liquid_requests = liquid_requests.await.unwrap();
+    assert_eq!(liquid_requests[1]["method"], "claimpegin");
+    assert_eq!(liquid_requests[1]["params"], json!([RAW_TX_HEX, PROOF_HEX]));
+}
+
+// Catches a regression that submits a claim before the deposit is mature. The node would reject
+// it with an opaque message; this reports the two numbers the caller needs.
+#[tokio::test]
+async fn claim_peg_in_refuses_an_immature_deposit() {
+    let (peg, _liquid, _bitcoin) = connected_peg(
+        vec![],
+        vec![ok(json!({"hex": RAW_TX_HEX, "confirmations": 3}))],
+    )
+    .await;
+
+    let mainchain_txid: bitcoin::Txid = MAINCHAIN_TXID.parse().unwrap();
+    let error = peg
+        .claim_peg_in(&mainchain_txid)
+        .await
+        .expect_err("an immature deposit must be refused");
+
+    assert!(matches!(
+        error,
+        NigiriError::PegInImmature { have: 3, need: 8 }
+    ));
+}

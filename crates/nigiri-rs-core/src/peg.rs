@@ -76,4 +76,82 @@ impl Peg {
     pub fn pegin_confirmation_depth(&self) -> u64 {
         self.pegin_confirmation_depth
     }
+
+    /// Asks the Liquid node for a peg-in address.
+    pub async fn peg_in_request(&self) -> Result<PegInRequest, NigiriError> {
+        const OPERATION: &str = "peg-in address";
+
+        let issued: PegInAddress = self.liquid.rpc("getpeginaddress", ()).await?;
+        let mainchain_address = issued
+            .mainchain_address
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .map_err(|_| NigiriError::InvalidResponse {
+                operation: OPERATION.into(),
+                detail: "expected a Bitcoin address".to_owned(),
+            })?
+            .require_network(bitcoin::Network::Regtest)
+            .map_err(|_| NigiriError::InvalidResponse {
+                operation: OPERATION.into(),
+                detail: "expected a regtest Bitcoin address".to_owned(),
+            })?;
+
+        Ok(PegInRequest {
+            mainchain_address,
+            claim_script: issued.claim_script,
+        })
+    }
+
+    /// Claims a matured deposit, minting L-BTC into the Liquid node's wallet.
+    ///
+    /// Fetches the deposit and its merkle proof from the Bitcoin node, then submits `claimpegin`.
+    /// The claim script is omitted: Elements infers it when the claiming wallet issued the
+    /// address, which it did.
+    ///
+    /// Returns [`NigiriError::PegInImmature`] rather than letting the node reject the claim, so a
+    /// caller sees both the depth reached and the depth required.
+    pub async fn claim_peg_in(
+        &self,
+        mainchain_txid: &bitcoin::Txid,
+    ) -> Result<elements::Txid, NigiriError> {
+        let txid = mainchain_txid.to_string();
+
+        let deposit: MainchainTransaction =
+            self.bitcoin.rpc("getrawtransaction", (&txid, true)).await?;
+        if deposit.confirmations < self.pegin_confirmation_depth {
+            return Err(NigiriError::PegInImmature {
+                have: deposit.confirmations,
+                need: self.pegin_confirmation_depth,
+            });
+        }
+
+        let proof: String = self.bitcoin.rpc("gettxoutproof", ([&txid],)).await?;
+
+        self.liquid.rpc("claimpegin", (deposit.hex, proof)).await
+    }
+}
+
+/// A peg-in address and the script that will claim it.
+///
+/// `getpeginaddress` takes no destination: the address is derived from the Liquid node's own
+/// wallet, and the eventual claim credits that wallet. Moving pegged funds elsewhere is an
+/// ordinary transfer afterwards, not part of the peg.
+#[derive(Debug, Clone)]
+pub struct PegInRequest {
+    /// The Bitcoin address to fund. Federation-controlled, tweaked by the Liquid wallet's keys.
+    pub mainchain_address: bitcoin::Address,
+    /// Hex claim script, retained for callers that submit their own claim.
+    pub claim_script: String,
+}
+
+#[derive(Deserialize)]
+struct PegInAddress {
+    mainchain_address: String,
+    claim_script: String,
+}
+
+#[derive(Deserialize)]
+struct MainchainTransaction {
+    hex: String,
+    #[serde(default)]
+    confirmations: u64,
 }
