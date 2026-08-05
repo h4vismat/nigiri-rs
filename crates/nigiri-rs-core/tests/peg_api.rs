@@ -59,9 +59,9 @@ async fn write_scripted_response(stream: &mut tokio::net::TcpStream, status: &st
 
 /// Serves one scripted response per connection and returns every request body it parsed.
 ///
-/// Panics if a connection does not arrive within 3 seconds of the previous one completing: an
-/// under-provisioned test almost always means an assertion is wired to the wrong request, and a
-/// loud failure here is more useful than a silent, truncated request list.
+/// Panics if a connection does not arrive within [`REQUIRED_CONNECTION_TIMEOUT`] of the previous
+/// one completing: an under-provisioned test almost always means an assertion is wired to the
+/// wrong request, and a loud failure here is more useful than a silent, truncated request list.
 async fn scripted_server(
     responses: Vec<(&'static str, String)>,
 ) -> (Url, tokio::task::JoinHandle<Vec<Value>>) {
@@ -70,10 +70,11 @@ async fn scripted_server(
     let task = tokio::spawn(async move {
         let mut requests = Vec::with_capacity(responses.len());
         for (status, body) in responses {
-            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
-                .await
-                .expect("a scripted request arrives")
-                .unwrap();
+            let (mut stream, _) =
+                tokio::time::timeout(REQUIRED_CONNECTION_TIMEOUT, listener.accept())
+                    .await
+                    .expect("a scripted request arrives")
+                    .unwrap();
             requests.push(read_scripted_request(&mut stream).await);
             write_scripted_response(&mut stream, status, &body).await;
         }
@@ -82,26 +83,45 @@ async fn scripted_server(
     (Url::parse(&format!("http://{address}/")).unwrap(), task)
 }
 
-/// Like [`scripted_server`], but a scripted response that never gets a matching connection
-/// within `grace` is simply left unserved, returning whatever requests arrived before then,
-/// rather than panicking.
+/// How long [`scripted_server`] and the first `expected` slots of
+/// [`scripted_server_allowing_shortfall`] wait for a connection.
 ///
-/// Exists for one purpose: proving a scripted response is deliberately left *unconsumed* by
-/// correct code. [`scripted_server`]'s exact-count panic cannot express that — a test that
-/// scripts one more response than a correct implementation ever asks for would otherwise hang
-/// for the full 3-second accept timeout and then fail with a spurious `JoinError::Panic`, not
-/// the assertion the test is actually about. A short, deliberate grace period here converts that
-/// from "hangs and fails for the wrong reason" into "resolves quickly with the right answer".
+/// Generous on purpose: this suite runs alongside Docker-backed tests under
+/// `cargo test --workspace`, where CPU contention routinely causes multi-hundred-millisecond
+/// scheduling delays on a loopback `accept()`. A slot a correct implementation is actually going
+/// to use must tolerate that; only a slot it is expected to *decline* gets a short timeout.
+const REQUIRED_CONNECTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Like [`scripted_server`], but scripted responses at index `expected` and beyond that never
+/// get a matching connection within `grace` are simply left unserved, returning whatever
+/// requests arrived before then, rather than panicking.
+///
+/// The first `expected` slots still wait the full [`REQUIRED_CONNECTION_TIMEOUT`] — they are
+/// connections a correct implementation really does make, and must not be flaky under load. Only
+/// slots beyond `expected` use `grace`, because their whole purpose is to prove a scripted
+/// response is deliberately left *unconsumed* by correct code. [`scripted_server`]'s exact-count
+/// panic cannot express that — a test that scripts one more response than a correct
+/// implementation ever asks for would otherwise hang for the full accept timeout and then fail
+/// with a spurious `JoinError::Panic`, not the assertion the test is actually about. A short,
+/// deliberate grace period on just the trailing slots converts that from "hangs and fails for
+/// the wrong reason" into "resolves quickly with the right answer" — without also making the
+/// required slots flaky, which an across-the-board short timeout would.
 async fn scripted_server_allowing_shortfall(
     responses: Vec<(&'static str, String)>,
+    expected: usize,
     grace: Duration,
 ) -> (Url, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
         let mut requests = Vec::with_capacity(responses.len());
-        for (status, body) in responses {
-            let Ok(Ok((mut stream, _))) = tokio::time::timeout(grace, listener.accept()).await
+        for (index, (status, body)) in responses.into_iter().enumerate() {
+            let timeout = if index < expected {
+                REQUIRED_CONNECTION_TIMEOUT
+            } else {
+                grace
+            };
+            let Ok(Ok((mut stream, _))) = tokio::time::timeout(timeout, listener.accept()).await
             else {
                 break;
             };
@@ -434,6 +454,8 @@ async fn complete_peg_in_does_not_retry_a_permanent_failure() {
     let mining_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
     let grace = Duration::from_millis(300);
 
+    // `expected` below is a count of required slots, not a byte offset: every slot at that index
+    // or later gets the short `grace` timeout instead of `REQUIRED_CONNECTION_TIMEOUT`.
     let (liquid_url, liquid_requests) = scripted_server_allowing_shortfall(
         vec![
             ok(sidechain_info(REGTEST_GENESIS, 8)),
@@ -442,6 +464,7 @@ async fn complete_peg_in_does_not_retry_a_permanent_failure() {
                 "claim_script": CLAIM_SCRIPT,
             })),
         ],
+        2, // both slots are required: no trap on the Liquid side.
         grace,
     )
     .await;
@@ -457,12 +480,15 @@ async fn complete_peg_in_does_not_retry_a_permanent_failure() {
             ok(json!([format!("{}", "ff".repeat(32))])),
             // claim_peg_in: a deposit lookup that comes back malformed, not "not deep enough" —
             // a non-envelope body with a success status maps to NigiriError::InvalidResponse.
+            // This is the 7th and last required slot.
             ("200 OK", "not JSON".to_owned()),
             // Deliberately scripted to be consumed only by a wrongly-retrying implementation. Do
             // not remove this thinking it is dead: without it, this test cannot tell a correct
-            // fail-fast from the pre-fix bug, per the block comment above.
+            // fail-fast from the pre-fix bug, per the block comment above. It is slot index 7,
+            // at or beyond `expected`, so it gets the short `grace` timeout, not the generous one.
             ok(json!([format!("{}", "1a".repeat(32))])),
         ],
+        7, // seven required slots; the trailing generatetoaddress is the trap.
         grace,
     )
     .await;
