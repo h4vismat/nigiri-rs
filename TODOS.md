@@ -62,8 +62,11 @@ readiness logic, which is the most load-bearing code in the crate.
 Surfaced by the 0.3.0 specialist review:
 
 - `LiquidBlockchainInfo` is declared in both `crates/nigiri-rs-core/tests/rpc_api.rs` and
-  `crates/nigiri-rs-testcontainers/tests/liquid_fixture.rs` with the same three fields but
-  `blocks: i64` in one and `u64` in the other. The divergence is arbitrary.
+  `crates/nigiri-rs/tests/macro_smoke.rs` with the same three fields but `blocks: i64` in one and
+  `u64` in the other. The divergence is arbitrary. It moved out of the fixtures crate when the two
+  Liquid tests that used it were rewritten to `#[nigiri_rs::test]`, so the duplication crossed a
+  crate boundary rather than going away.
+
 ## Completed
 
 ### Exercise all feature combinations in CI

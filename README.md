@@ -139,10 +139,12 @@ There is deliberately no default generic parameter. `NigiriClient::new()` withou
 
 ## Verified default endpoints
 
-| Network | Node JSON-RPC | Esplora/electrs |
-| --- | --- | --- |
-| Bitcoin | `http://localhost:18443/` | `http://localhost:30000/` |
-| Liquid | `http://localhost:18884/` | `http://localhost:30001/` |
+| Network | Node JSON-RPC | Esplora/electrs | Electrum |
+| --- | --- | --- | --- |
+| Bitcoin | `http://localhost:18443/` | `http://localhost:30000/` | `localhost:50000` |
+| Liquid | `http://localhost:18884/` | `http://localhost:30001/` | `localhost:50001` |
+
+A fixture replaces the Electrum entry with its runtime-mapped port, so read it from the client rather than assuming the default.
 
 The default node credentials are the public Nigiri regtest credentials: user `admin1`, password `123`. They are intentionally visible in `NigiriConfig`'s derived `Debug` output; they are not production secrets.
 
@@ -302,7 +304,21 @@ let client = NigiriClient::<Bitcoin>::with_config(config)?;
 
 Construction accepts only HTTP(S) base URLs, normalizes their trailing slash, rejects query/fragment components, and requires a nonzero timeout and response limit. `NigiriConfig::default()` provides the Bitcoin endpoint and public regtest node credentials; `NigiriClient::<Liquid>::new()` selects the Liquid defaults. Cloning a client clones only immutable configuration and the shared HTTP transport; it never implies ownership of an external process.
 
-`NigiriConfig::default()` is Bitcoin-specific. For a custom `NigiriClient<Liquid>`, override the Esplora and node JSON-RPC URLs rather than relying on struct update syntax alone.
+`NigiriConfig::default()` is Bitcoin-specific, so build a Liquid config from `NigiriConfig::liquid()` rather than from `Default`:
+
+```rust
+use nigiri_rs::{Liquid, NigiriClient, NigiriConfig};
+
+let config = NigiriConfig {
+    node_rpc_password: "something-else".to_owned(),
+    ..NigiriConfig::liquid()
+};
+
+let client = NigiriClient::<Liquid>::with_config(config)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Do not reach for `..Default::default()` and override the two service URLs by hand. Rust evaluates `default()` before applying any override, so every chain-dependent field you do not name keeps Bitcoin's value — including the Electrum endpoint, which would leave a Liquid config pointing at port 50000. `NigiriConfig::bitcoin()` and `NigiriConfig::liquid()` exist as public constructors for exactly this reason, and `crates/nigiri-rs-core/src/config.rs` has a test pinning the trap.
 
 ## Typed network differences
 
