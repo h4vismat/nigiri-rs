@@ -81,13 +81,17 @@ Docker-backed `nigiri-rs-testcontainers` suite; the other three scope to `nigiri
 deliberately: its `trybuild` suite is pure compile-fail checking, and macro diagnostics are worth
 checking against the 1.88 floor as well as stable.
 
-### Bound `max_rpc_response_bytes` from above
+### Bound `max_response_bytes` from above
 
 **Completed:** v0.3.0
 
 `validate_and_normalize` rejected only zero, leaving the sole ceiling on process-output
-buffering unbounded above. Added `MAX_RPC_RESPONSE_BYTES_LIMIT` (16 MiB) and a rejection with
+buffering unbounded above. Added `MAX_RESPONSE_BYTES_LIMIT` (16 MiB) and a rejection with
 a boundary test.
+
+Both were named `max_rpc_response_bytes` and `MAX_RPC_RESPONSE_BYTES_LIMIT` when this shipped.
+The `rpc` dropped out once the limit also bounded Esplora responses, so the entry uses the names
+that exist today rather than the ones it was written with.
 
 ### Use a distinct error variant for pre-spawn input rejection
 
