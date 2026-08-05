@@ -7,8 +7,8 @@ use testcontainers::{ContainerAsync, GenericImage};
 use uuid::Uuid;
 
 use crate::{
-    ContainerImage, ElectrumEndpoint, FixtureError, chain::FixtureChain, electrs, node,
-    owned_start::attach_container_log, readiness,
+    ContainerImage, ElectrumEndpoint, FixtureError, chain::FixtureChain, deadline::Deadline,
+    electrs, node, owned_start::attach_container_log, readiness,
 };
 
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -198,18 +198,27 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     /// One `Deadline` covers everything after validation, so a slow phase spends budget the later
     /// phases no longer have, rather than each phase getting a fresh clock.
     pub async fn start(self) -> Result<Fixture<C>, FixtureError> {
+        let deadline = Deadline::new(self.startup_timeout)?;
+        self.start_under(&deadline).await
+    }
+
+    /// Starts under a clock the caller already owns.
+    ///
+    /// A composite bounds its whole stack with one `Deadline` and passes it here, so the inner
+    /// fixture spends the same budget rather than running a second one beside it. `startup_timeout`
+    /// is ignored on this path: the caller's clock is the only one.
+    pub(crate) async fn start_under(self, deadline: &Deadline) -> Result<Fixture<C>, FixtureError> {
         self.node_image.validate()?;
         self.electrs_image.validate()?;
 
         let names = topology_names::<C>();
-        let deadline = crate::deadline::Deadline::new(self.startup_timeout)?;
 
         let node = node::start_node::<C>(
             &self.node_image,
             &names.network,
             &names.node,
             &self.extra_node_args,
-            &deadline,
+            deadline,
         )
         .await?;
 
@@ -218,7 +227,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
             &names.network,
             &names.electrs,
             &names.node,
-            &deadline,
+            deadline,
         )
         .await
         {
@@ -236,7 +245,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         client_config.electrum = electrs.electrum_endpoint.clone();
         let client = node::fixture_client::<C>(client_config)?;
 
-        if let Err(not_ready) = readiness::wait_for_sync::<C>(&client, &deadline).await {
+        if let Err(not_ready) = readiness::wait_for_sync::<C>(&client, deadline).await {
             // Whichever service fell behind, its own log is what explains why.
             let with_electrs =
                 attach_container_log(electrs::SERVICE, not_ready, &electrs.container).await;
@@ -587,5 +596,29 @@ mod tests {
         assert!(fixture.node_container_name().ends_with(suffix));
 
         drop(fixture);
+    }
+
+    // Catches a regression that gives the inner fixture a fresh clock instead of the caller's. A
+    // composite bounds its whole stack with one Deadline; an inner fixture that ignores it would let
+    // a slow node start spend budget the composite's later phases still believe they have.
+    #[tokio::test(start_paused = true)]
+    async fn start_under_reports_the_callers_exhausted_budget_not_its_own() {
+        let deadline = crate::deadline::Deadline::new(Duration::from_secs(30))
+            .expect("a positive deadline is valid");
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let error = Fixture::<Bitcoin>::builder()
+            .start_under(&deadline)
+            .await
+            .expect_err("an exhausted caller budget must not start a container");
+
+        let FixtureError::ReadinessTimeout { duration, .. } = error else {
+            panic!("an exhausted caller budget must surface as a readiness timeout: {error}");
+        };
+        assert_eq!(
+            duration,
+            Duration::from_secs(30),
+            "the reported budget must be the caller's 30s, not the builder's own 60s default"
+        );
     }
 }
