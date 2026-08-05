@@ -203,9 +203,8 @@ async fn mint_then_send(client: NigiriClient<Liquid>) -> Result<(), BoxError> {
 
 ## What is deliberately not here
 
-Nigiri v0.5.16's default Liquid regtest configuration does not enable PAK enforcement, so
-`initpegoutwallet` and `sendtomainchain` fail on it. They are **not wrapped** by this crate, and
-peg-in and peg-out behaviour is not simulated with unrelated transfers.
+Peg-in and a simulated peg-out release exist on `Peg`. `initpegoutwallet` remains unwrapped because
+PAK enforcement is off on this chain.
 
 The crate models only what the verified default Liquid network can actually execute. Federation
 lifecycle, chain configuration, and cross-chain orchestration stay with your application.
