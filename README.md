@@ -15,7 +15,7 @@ Rust port.
 
 `nigiri-rs` is a typed asynchronous client for compatible Bitcoin and Liquid regtest services. A host-owned [Nigiri](https://github.com/vulpemventures/nigiri) environment is one compatible setup, not the only architecture.
 
-Version 0.4.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
+Version 0.4.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core response-type re-export. The curated network APIs retain their stronger native contracts.
 
 Version 0.2.0 was the breaking release that introduced network marker types selecting native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
 
@@ -242,7 +242,7 @@ Arbitrary RPC methods may mutate node wallets or active chain state. Tests using
 
 `NigiriConfig::timeout` bounds each HTTP operation against an already-running node or service. A timeout says the client did not receive a response in time; a mutating request may still have committed, so inspect node state before retrying.
 
-### Bitcoin Core v30 response types
+### Bitcoin Core response types
 
 Enable the optional re-export when the caller wants maintained Bitcoin Core response records:
 

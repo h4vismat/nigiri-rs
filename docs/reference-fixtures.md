@@ -44,6 +44,11 @@ client; it is a convenience, not a second source of truth.
 **The fixture owns the containers.** Dropping it removes both containers, their anonymous volumes,
 and the network. Nothing survives the test.
 
+How many anonymous volumes exist depends on the images, not on the fixture: Docker creates one per
+`VOLUME` an image declares, and of the pinned four only `docker-bitcoind` declares any. A Bitcoin
+fixture therefore owns one and a Liquid fixture owns none — either way a fixture never mounts
+storage Docker did not create for that container alone.
+
 Keep the `Fixture` alive for as long as you use the client. `client()` returns a borrow, so the
 compiler enforces this — but note that `NigiriClient` is `Clone`, and a cloned client outliving its
 fixture points at containers that no longer exist.

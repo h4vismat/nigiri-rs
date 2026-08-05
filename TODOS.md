@@ -53,6 +53,22 @@ The saving is unmeasured and plausibly single-digit milliseconds per round on a 
 port, which is why this sits below the start-overlap item. Worth measuring before touching
 readiness logic, which is the most load-bearing code in the crate.
 
+## Container images
+
+### Move both indexer pins to a stable Mempool release
+
+**Priority:** P3
+
+`ContainerImage::electrs_default` and `electrs_liquid_default` both pin
+`mempool/electrs*:v3.4.0-dev1`, a pre-release build. The Bitcoin pin had a choice — `v3.3.0` is
+stable and available — and is held at `dev1` only so both chains run the same indexer build, because
+`mempool/electrs-liquid` publishes nothing but `latest` and that dev tag. A version skew between the
+two would surface as a chain difference in a suite that asserts the same behaviour against both.
+
+Blocked on upstream, not on us: when Mempool publishes `v3.4.0` stable for the Liquid variant, move
+both pins to it and refresh both digests. Nothing else has to change — the flag vectors both chains
+build are already flag-compatible with this fork, verified against `--help` on both images.
+
 ## Test suite hygiene
 
 ### Deduplicate test scaffolding
