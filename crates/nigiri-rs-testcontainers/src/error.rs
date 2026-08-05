@@ -2,7 +2,13 @@ use std::time::Duration;
 
 use nigiri_rs_core::NigiriError;
 
+/// Error model for starting and operating a composite Docker-backed fixture.
+///
+/// `#[non_exhaustive]`: variants are added as new composites land — Lightning channel wiring,
+/// Ark round diagnostics, Liquid peg bootstrap — and a downstream match must carry a wildcard arm
+/// rather than being broken by each addition.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FixtureError {
     #[error("invalid fixture configuration: {detail}")]
     InvalidConfiguration { detail: String },

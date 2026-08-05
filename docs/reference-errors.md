@@ -1,7 +1,8 @@
 # Error reference
 
-Two closed error enums. `NigiriError` comes from the client; `FixtureError` comes from starting a
-fixture and wraps the former.
+Two `#[non_exhaustive]` error enums. `NigiriError` comes from the client; `FixtureError` comes from
+starting a fixture and wraps the former. Neither enum is closed: each grows variants as the crate
+grows, so a downstream match must carry a wildcard arm (`_ => ...`) or it will not compile.
 
 Both derive `Debug` and implement `std::error::Error` through `thiserror`. Where a variant has a
 `source`, `Error::source()` returns it — always check the chain, the `Display` text is deliberately
@@ -10,6 +11,7 @@ short.
 ## `NigiriError`
 
 ```rust
+#[non_exhaustive]
 pub enum NigiriError {
     HttpTransport { operation: Cow<'static, str>, source: reqwest::Error },
     HttpStatus { operation: Cow<'static, str>, status: StatusCode, body: String },
@@ -120,6 +122,7 @@ first, or the retry sends a second transaction.
 ## `FixtureError`
 
 ```rust
+#[non_exhaustive]
 pub enum FixtureError {
     InvalidConfiguration { detail: String },
     RuntimeUnavailable { source: Box<dyn Error + Send + Sync> },
