@@ -1,22 +1,37 @@
 # nigiri-rs
 
-`nigiri-rs` is a typed asynchronous client for Bitcoin and Liquid services in an already-running [Nigiri](https://github.com/vulpemventures/nigiri) regtest environment.
+## Crates
 
-Version 0.3.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
+| Crate | What it is |
+| --- | --- |
+| `nigiri-rs` | The facade. Depend on this. Re-exports the client, and the fixtures behind the `testcontainers` feature. |
+| `nigiri-rs-core` | The typed Bitcoin and Liquid clients. Re-exported in full by the facade. |
+| `nigiri-rs-testcontainers` | Ephemeral Docker-backed regtest fixtures: a node, an indexer, and a funded wallet per test. |
+| `nigiri-rs-macros` | Procedural macros for the above. |
+
+The bare `nigiri-*` names on crates.io are deliberately unused: Nigiri is
+[Vulpem Ventures'](https://github.com/vulpemventures/nigiri) project, and this is an unaffiliated
+Rust port.
+
+`nigiri-rs` is a typed asynchronous client for compatible Bitcoin and Liquid regtest services. A host-owned [Nigiri](https://github.com/vulpemventures/nigiri) environment is one compatible setup, not the only architecture.
+
+Version 0.4.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
 
 Version 0.2.0 was the breaking release that introduced network marker types selecting native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
 
 ## Lifecycle ownership
 
-The host owns Nigiri's complete lifecycle. This library provides readiness checks but never:
+The host owns the complete lifecycle of its regtest services. This library provides readiness checks but never:
 
-- starts or stops Nigiri;
-- invokes Docker;
-- provisions or deletes datadirs;
+- starts or stops services;
+- invokes Docker or Testcontainers;
+- provisions or deletes service data directories;
 - removes containers or volumes;
 - performs cleanup from `Drop`.
 
-Start the required services before running a client or an explicitly ignored host test:
+Host-owned Nigiri remains a compatible setup; start it before pointing a client at the default endpoints. The `nigiri-rs-testcontainers` companion crate in this workspace provides fixture lifecycle separately, and this core crate does not depend on it: no Docker or Testcontainers dependency is added here. Nothing in this repository's own test suite needs a host Nigiri installation any more: both chains' integration tests run against ephemeral `nigiri-rs-testcontainers` fixtures and require only Docker.
+
+Start the required services before pointing a client at them:
 
 ```sh
 # Bitcoin only
@@ -27,6 +42,68 @@ nigiri start --liquid
 ```
 
 The verified CLI and port contract is Nigiri v0.5.16, commit `39fd5891d093bfb8c2575b79640b95a830834f9c`.
+
+## Provisioning services
+
+This crate does not start or stop anything. Two paths exist, and they can be used side by side.
+
+**Ephemeral fixtures.** The companion `nigiri-rs-testcontainers` crate, reached through the facade's `testcontainers` feature, starts a throwaway Bitcoin or Liquid regtest stack for a test and removes it afterwards:
+
+```toml
+[dev-dependencies]
+nigiri-rs = { version = "0.4", features = ["testcontainers"] }
+```
+
+```rust
+use nigiri_rs::testcontainers::{Bitcoin, Fixture};
+
+# async fn example() -> Result<(), nigiri_rs::testcontainers::FixtureError> {
+let fixture = Fixture::<Bitcoin>::start().await?;
+let client = fixture.client();
+let electrum_host = fixture.electrum_endpoint().host();
+let electrum_port = fixture.electrum_endpoint().port();
+# let _ = (client, electrum_host, electrum_port);
+# Ok(())
+# }
+```
+
+Docker must be running; no Nigiri installation is needed. Containers, their anonymous volumes, and the network are removed when the fixture is dropped. Ports are assigned by the runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a machine pulls two pinned images per chain and is slow; later starts are ready in a few seconds. `Fixture::<Liquid>::start` starts the same way; swap the type parameter. Podman is untested.
+
+**One attribute instead of a preamble.** The same feature provides `#[nigiri_rs::test]`, which starts a fixture per parameter and hands the body a ready client. It needs the `testcontainers` feature and Docker; nothing else:
+
+```rust,ignore
+use nigiri_rs::{Bitcoin, NigiriClient};
+
+#[nigiri_rs::test]
+async fn my_wallet_sees_its_funding(client: NigiriClient<Bitcoin>) -> Result<(), Box<dyn std::error::Error>> {
+    // `client` is already pointed at a funded, synchronized stack.
+    let address = client.new_address().await?;
+    client.faucet(&address.to_string(), None).await?;
+
+    // Point a wallet library at either endpoint; both report runtime-mapped ports.
+    let _esplora = client.esplora_url();
+    let _electrum = client.electrum_endpoint();
+    Ok(())
+}
+```
+
+One fixture is started per parameter, so a cross-chain test takes two: add a `NigiriClient<Liquid>` alongside the Bitcoin one. The chain comes from the parameter type, never an attribute argument, so the two cannot disagree. `startup_timeout = <seconds>` and `flavor = "multi_thread"` are accepted. Tests are not `#[ignore]`d — if Docker is unavailable they fail loudly rather than reporting green having run nothing.
+
+The Electrum endpoint above is `fixture.electrum_endpoint()`, which delegates to the client. Any `NigiriClient<N>`, fixture-backed or not, exposes both endpoints a BDK or LWK wallet needs directly:
+
+```rust,no_run
+use nigiri_rs::{Bitcoin, NigiriClient};
+
+# fn example() {
+let client = NigiriClient::<Bitcoin>::new();
+let esplora_url = client.esplora_url();
+let electrum_host = client.electrum_endpoint().host();
+let electrum_port = client.electrum_endpoint().port();
+println!("esplora: {esplora_url}, electrum: {electrum_host}:{electrum_port}");
+# }
+```
+
+**Services you run yourself.** Point `NigiriClient` at a host-owned Nigiri installation or any compatible endpoints, as the quick start below does. Nothing in this crate starts, stops, or deletes them.
 
 ## Quick start
 
@@ -62,10 +139,12 @@ There is deliberately no default generic parameter. `NigiriClient::new()` withou
 
 ## Verified default endpoints
 
-| Network | Node JSON-RPC | Chopsticks | Esplora/electrs |
+| Network | Node JSON-RPC | Esplora/electrs | Electrum |
 | --- | --- | --- | --- |
-| Bitcoin | `http://localhost:18443/` | `http://localhost:3000/` | `http://localhost:30000/` |
-| Liquid | `http://localhost:18884/` | `http://localhost:3001/` | `http://localhost:30001/` |
+| Bitcoin | `http://localhost:18443/` | `http://localhost:30000/` | `localhost:50000` |
+| Liquid | `http://localhost:18884/` | `http://localhost:30001/` | `localhost:50001` |
+
+A fixture replaces the Electrum entry with its runtime-mapped port, so read it from the client rather than assuming the default.
 
 The default node credentials are the public Nigiri regtest credentials: user `admin1`, password `123`. They are intentionally visible in `NigiriConfig`'s derived `Debug` output; they are not production secrets.
 
@@ -113,7 +192,7 @@ Unlike the former CLI transport, JSON-RPC does not coerce strings according to a
 
 ### Response size limit
 
-One `NigiriConfig::max_response_bytes` limit applies to every response body: node JSON-RPC, Chopsticks, and Esplora. It defaults to `DEFAULT_MAX_RESPONSE_BYTES` (64 KiB) and is capped at `MAX_RESPONSE_BYTES_LIMIT` (16 MiB). Anything past the configured limit is rejected rather than buffered. Raise it for methods with large results:
+One `NigiriConfig::max_response_bytes` limit applies to every response body: node JSON-RPC and Esplora. It defaults to `DEFAULT_MAX_RESPONSE_BYTES` (64 KiB) and is capped at `MAX_RESPONSE_BYTES_LIMIT` (16 MiB). Anything past the configured limit is rejected rather than buffered. Raise it for methods with large results:
 
 ```rust,no_run
 use nigiri_rs::{Bitcoin, DEFAULT_MAX_RESPONSE_BYTES, NigiriClient, NigiriConfig};
@@ -130,6 +209,8 @@ let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
 
 Arbitrary RPC methods may mutate node wallets or active chain state. Tests using mutating RPCs must coordinate host access and restore valid state. This API does not start, stop, delete, or otherwise manage Nigiri.
 
+`faucet` writes directly through the configured node wallet RPC and `broadcast_tx` writes directly through the configured node RPC. Each first commits its transaction, then mines exactly one block. If that mining step fails after a commit, both return `NigiriError::PostTransactionMiningFailed` with the committed transaction ID; inspect node state before retrying.
+
 `NigiriConfig::timeout` bounds each HTTP operation against an already-running node or service. A timeout says the client did not receive a response in time; a mutating request may still have committed, so inspect node state before retrying.
 
 ### Bitcoin Core v30 response types
@@ -137,7 +218,7 @@ Arbitrary RPC methods may mutate node wallets or active chain state. Tests using
 Enable the optional re-export when the caller wants maintained Bitcoin Core response records:
 
 ```toml
-nigiri-rs = { version = "0.3.0", features = ["bitcoin-rpc-types"] }
+nigiri-rs = { version = "0.4", features = ["bitcoin-rpc-types"] }
 ```
 
 ```rust,no_run
@@ -209,7 +290,6 @@ use nigiri_rs::{Bitcoin, NigiriClient, NigiriConfig};
 use url::Url;
 
 let config = NigiriConfig {
-    chopsticks_url: Url::parse("http://regtest-host:4300")?,
     esplora_url: Url::parse("http://regtest-host:4301")?,
     node_rpc_url: Url::parse("http://regtest-host:18443")?,
     node_rpc_user: "admin1".to_owned(),
@@ -224,7 +304,21 @@ let client = NigiriClient::<Bitcoin>::with_config(config)?;
 
 Construction accepts only HTTP(S) base URLs, normalizes their trailing slash, rejects query/fragment components, and requires a nonzero timeout and response limit. `NigiriConfig::default()` provides the Bitcoin endpoint and public regtest node credentials; `NigiriClient::<Liquid>::new()` selects the Liquid defaults. Cloning a client clones only immutable configuration and the shared HTTP transport; it never implies ownership of an external process.
 
-`NigiriConfig::default()` is Bitcoin-specific. For a custom `NigiriClient<Liquid>`, override the Chopsticks, Esplora, and node JSON-RPC URLs rather than relying on struct update syntax alone.
+`NigiriConfig::default()` is Bitcoin-specific, so build a Liquid config from `NigiriConfig::liquid()` rather than from `Default`:
+
+```rust
+use nigiri_rs::{Liquid, NigiriClient, NigiriConfig};
+
+let config = NigiriConfig {
+    node_rpc_password: "something-else".to_owned(),
+    ..NigiriConfig::liquid()
+};
+
+let client = NigiriClient::<Liquid>::with_config(config)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Do not reach for `..Default::default()` and override the two service URLs by hand. Rust evaluates `default()` before applying any override, so every chain-dependent field you do not name keeps Bitcoin's value — including the Electrum endpoint, which would leave a Liquid config pointing at port 50000. `NigiriConfig::bitcoin()` and `NigiriConfig::liquid()` exist as public constructors for exactly this reason, and `crates/nigiri-rs-core/src/config.rs` has a test pinning the trap.
 
 ## Typed network differences
 
@@ -252,27 +346,24 @@ The dependency family is aligned with LWK 0.18.1: `elements 0.25.3` and compatib
 
 ## Tests
 
-Pure parsers, JSON-RPC request construction, exact amounts, HTTP bounds, error mapping, and network types run in the ordinary suite:
+Pure parsers, JSON-RPC request construction, exact amounts, HTTP bounds, error mapping, and network types need no Docker. A contributor without Docker installed runs:
 
 ```sh
-cargo test
+cargo test -p nigiri-rs-core --all-targets
 cargo test --doc
 ```
 
-Host integration tests are always explicit and never silently skip. They reuse the existing host chain and do not stop or delete Nigiri. Mutating tests acquire an exclusive cross-process mutation lock; read-only public RPC tests deliberately run without that lock:
+That is also exactly what three of this repository's four CI matrix cells run. A plain workspace `cargo test` is no longer that Docker-free command: nothing in this repository is `#[ignore]`d any more, so an unscoped `cargo test` also runs `nigiri-rs-testcontainers`'s Docker-backed integration tests. They need no feature flag to run because they live in that crate itself.
+
+Bitcoin and Liquid integration tests need Docker but no Nigiri installation. Each one starts its own funded regtest stack through `nigiri-rs-testcontainers`, owns its chain, and removes everything it created when it finishes:
 
 ```sh
-cargo test --test host_bitcoin -- --ignored --test-threads=1
-cargo test --test host_liquid -- --ignored --test-threads=1
+cargo test -p nigiri-rs-testcontainers --all-targets --all-features
 ```
 
-Both Esplora endpoints must be ready before running the host suites. When reusing a stale regtest chain, the host may need to mine a fresh block so the node leaves initial block download and electrs begins serving requests.
+Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other, and they can all run at once. Nothing here is `#[ignore]`d, on purpose: an ignored Docker test reports green having verified nothing, and this project has shipped that exact failure mode twice — once as a CI filter that matched zero tests and exited 0, once as a test that had never run in any CI job. Ignoring a test loses that signal; running it fails loudly instead when Docker is unavailable.
 
-The reorg tests record their baseline, invalidate only a tip created by that test, reconsider it before releasing the lock, and leave a valid active chain.
-
-## Migrating from 0.1.x
-
-See [MIGRATION.md](MIGRATION.md) for the breaking API changes.
+One Bitcoin fixture is ready in about 3 seconds, well inside the 60-second default startup budget. Two started at once take about 4.4 seconds total, so parallelism itself costs roughly a second, not the 103 seconds an earlier note here claimed. That figure was recorded while unrelated runaway processes were saturating every core and said nothing about this crate. A Liquid fixture mines a single block instead of 101: Liquid has no block subsidy, so it funds its wallet by connecting the genesis outputs rather than by mining one.
 
 ## License
 

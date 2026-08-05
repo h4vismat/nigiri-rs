@@ -1,0 +1,37 @@
+[package]
+name = "nigiri-rs"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Typed Bitcoin and Liquid regtest clients, with optional ephemeral Docker fixtures"
+repository = "https://github.com/h4vismat/nigiri-rs"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]
+testcontainers = ["dep:nigiri-rs-testcontainers", "dep:nigiri-rs-macros", "dep:tokio"]
+
+[dependencies]
+nigiri-rs-core = { version = "0.3.0", path = "../nigiri-rs-core" }
+nigiri-rs-testcontainers = { version = "0.1.0", path = "../nigiri-rs-testcontainers", optional = true }
+nigiri-rs-macros = { version = "0.1.0", path = "../nigiri-rs-macros", optional = true }
+# Re-exported through `__private` so generated code can annotate its wrapper with `#[tokio::test]`
+# without the consumer adding tokio themselves. `macros` supplies the attribute; `rt` and
+# `rt-multi-thread` supply the runtimes it selects between.
+tokio = { version = "1.50.0", features = ["macros", "rt", "rt-multi-thread"], optional = true }
+
+[dev-dependencies]
+# `bitcoin`/`elements` give the macro tests native typed values (amounts, block hashes) to assert
+# against, and `serde`/`serde_json` build the raw-transaction payloads the Liquid contract test
+# sends. These are the dependencies a real consumer of the macro would also declare themselves.
+bitcoin = { version = "0.32.7", features = ["serde"] }
+elements = { version = "0.25.3", features = ["serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+# The macro's own generated code reaches tokio through `__private`; this entry is for test bodies
+# that call tokio directly, which a consumer would get from their own dev-dependencies.
+tokio = { version = "1.50.0", features = ["macros", "rt", "rt-multi-thread"] }

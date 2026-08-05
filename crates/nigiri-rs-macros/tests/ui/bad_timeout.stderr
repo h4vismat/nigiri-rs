@@ -1,0 +1,5 @@
+error: `startup_timeout` takes a number of seconds, e.g. `#[nigiri_rs::test(startup_timeout = 120)]`
+ --> tests/ui/bad_timeout.rs:1:44
+  |
+1 | #[nigiri_rs_macros::test(startup_timeout = "two minutes")]
+  |                                            ^^^^^^^^^^^^^

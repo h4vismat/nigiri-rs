@@ -1,0 +1,5 @@
+error: parameter names beginning `__nigiri_rs_` are reserved for the code `#[nigiri_rs::test]` generates; rename this parameter
+ --> tests/ui/reserved_parameter_name.rs:4:41
+  |
+4 | async fn shadows_the_generated_inner_fn(__nigiri_rs_inner: u8) {
+  |                                         ^^^^^^^^^^^^^^^^^

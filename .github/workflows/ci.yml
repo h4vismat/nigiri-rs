@@ -4,7 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
-  # Lets the host suites be run on demand against a branch without waiting for a
+  # Lets any job be rerun on demand against a branch without waiting for a
   # merge to master.
   workflow_dispatch:
 
@@ -37,21 +37,47 @@ jobs:
 
       # --all-features so the bitcoin-rpc-types surface is linted too.
       - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test (${{ matrix.toolchain }}, ${{ matrix.features }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        # 1.85 is the rust-version floor declared in Cargo.toml. stable catches
-        # regressions from newer compilers.
-        toolchain: ["1.85", stable]
-        # Default features alone never compile tests/rpc_types_feature.rs or the
-        # gated test in tests/rpc_api.rs, so both columns are required to know the
-        # optional feature still works.
-        features: [default, all]
+        # 1.88 is the rust-version floor declared in Cargo.toml; stable catches regressions
+        # from newer compilers. Default features alone never compile
+        # tests/rpc_types_feature.rs or the gated test in tests/rpc_api.rs, so both feature
+        # columns are required to know the optional feature still works.
+        #
+        # Each cell states its own test scope instead of deriving it from the toolchain and
+        # feature names. A derived condition re-scopes every cell the moment a matrix value
+        # is renamed, and does it silently; stated data cannot drift out from under itself.
+        #
+        # Scoping by package, never by test name: a wrong package name is a hard error,
+        # whereas a name filter that stops matching selects nothing and exits 0.
+        # nigiri-rs-macros is in the cheap cells because its trybuild suite is pure rustc
+        # compile-fail checking with no Docker in it, and macro diagnostics are exactly the
+        # thing worth checking against the 1.88 floor as well as stable.
+        include:
+          - toolchain: "1.88"
+            features: default
+            cargo_features: ""
+            scope: -p nigiri-rs-core -p nigiri-rs-macros
+          - toolchain: "1.88"
+            features: all
+            cargo_features: --all-features
+            scope: -p nigiri-rs-core -p nigiri-rs-macros
+          - toolchain: stable
+            features: default
+            cargo_features: ""
+            scope: -p nigiri-rs-core -p nigiri-rs-macros
+          # The only cell that runs the Docker-backed tests.
+          - toolchain: stable
+            features: all
+            cargo_features: --all-features
+            scope: --workspace
     steps:
       - uses: actions/checkout@v4
 
@@ -64,25 +90,18 @@ jobs:
         with:
           key: ${{ matrix.toolchain }}-${{ matrix.features }}
 
-      - name: Set feature flag
-        id: flags
-        run: |
-          if [ "${{ matrix.features }}" = "all" ]; then
-            echo "cargo_features=--all-features" >> "$GITHUB_OUTPUT"
-          else
-            echo "cargo_features=" >> "$GITHUB_OUTPUT"
-          fi
-
+      # --workspace here even on the narrowed cells: every toolchain should still prove the
+      # whole workspace compiles, which is most of what the 1.88 floor is guarding.
       - name: cargo build
-        run: cargo build --all-targets ${{ steps.flags.outputs.cargo_features }}
+        run: cargo build --workspace --all-targets ${{ matrix.cargo_features }}
 
-      # Host suites are #[ignore] and need a running Nigiri, so they stay out of
-      # this job. The host-tests job below covers them.
+      # Nothing is #[ignore]d any more, so this cell's scope is what decides whether it
+      # starts containers.
       - name: cargo test
-        run: cargo test --all-targets ${{ steps.flags.outputs.cargo_features }}
+        run: cargo test ${{ matrix.scope }} --all-targets ${{ matrix.cargo_features }}
 
       - name: cargo test --doc
-        run: cargo test --doc ${{ steps.flags.outputs.cargo_features }}
+        run: cargo test --workspace --doc ${{ matrix.cargo_features }}
 
   packaging:
     name: Package for crates.io
@@ -99,57 +118,18 @@ jobs:
         with:
           key: packaging
 
-      # Catches missing files, bad metadata, and anything excluded from the
-      # published tarball that the crate actually needs to build.
-      - name: cargo package
-        run: cargo package --all-features
+      # Catches missing files, bad metadata, and anything excluded from the published tarball that
+      # the crate actually needs to build. nigiri-rs-core and nigiri-rs-macros can be packaged
+      # today: neither has a path dependency. The facade and the fixtures both depend on
+      # unpublished nigiri-rs-core, and `cargo package` resolves that requirement against
+      # crates.io even under --no-verify. They become packageable in publish order: core, then
+      # macros and fixtures, then the facade. Their metadata is still checked by the workspace
+      # build and by `cargo metadata` below.
+      - name: cargo package nigiri-rs-core
+        run: cargo package -p nigiri-rs-core --all-features
 
-  host-tests:
-    name: Host suites against live Nigiri
-    runs-on: ubuntu-latest
-    # Only on master and on demand: booting Nigiri pulls several container images
-    # and the mutating suites need exclusive access to one chain.
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
+      - name: cargo package nigiri-rs-macros
+        run: cargo package -p nigiri-rs-macros --all-features
 
-      - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: host-tests
-
-      - name: Install Nigiri
-        run: |
-          curl https://getnigiri.vulpem.com | bash
-          echo "$HOME/.nigiri" >> "$GITHUB_PATH"
-
-      - name: Start Nigiri with Liquid
-        run: nigiri start --liquid
-
-      - name: Wait for Esplora endpoints
-        run: |
-          for port in 30000 30001; do
-            for _ in $(seq 1 60); do
-              if curl -fsS "http://localhost:$port/blocks/tip/height" >/dev/null 2>&1; then
-                echo "port $port ready"
-                break
-              fi
-              sleep 5
-            done
-            curl -fsS "http://localhost:$port/blocks/tip/height" >/dev/null
-          done
-
-      # --test-threads=1 is mandatory: the mutating suites reorg a shared chain.
-      - name: Bitcoin host suite
-        run: cargo test --test host_bitcoin --all-features -- --ignored --test-threads=1
-
-      - name: Liquid host suite
-        run: cargo test --test host_liquid --all-features -- --ignored --test-threads=1
-
-      - name: Stop Nigiri
-        if: always()
-        run: nigiri stop --delete
+      - name: cargo metadata
+        run: cargo metadata --no-deps --format-version 1 > /dev/null
