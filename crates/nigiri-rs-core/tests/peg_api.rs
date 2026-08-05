@@ -362,9 +362,9 @@ async fn complete_peg_in_mines_to_the_reported_depth() {
 }
 
 // Catches a regression that gives up the first time the node says a deposit is not deep enough.
-// The Liquid node's view of the mainchain lags the mainchain itself: the Task 1 spike saw a claim
-// rejected at exactly the reported depth of 8 and accepted at 11. Without the retry, one-shot
-// peg-in is intermittently broken.
+// The Liquid node's view of the mainchain lags the mainchain itself: against a real Elements node,
+// a claim was rejected at exactly the reported depth of 8 and accepted at 11. Without the retry,
+// one-shot peg-in is intermittently broken.
 #[tokio::test]
 async fn complete_peg_in_retries_while_the_node_lags_the_chain() {
     let mining_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
@@ -521,11 +521,10 @@ async fn complete_peg_in_does_not_retry_a_permanent_failure() {
 
 const PEG_OUT_TXID: &str = "abababababababababababababababababababababababababababababababab";
 const RELEASE_TXID: &str = "babababababababababababababababababababababababababababababababa";
-/// Recorded during the Task 1 spike's golden peg-out vector: the peg-out output's
-/// `scriptPubKey.hex`, captured from a live Elements node and re-verified against the current
-/// pinned image.
+/// The peg-out output's `scriptPubKey.hex`, captured from a live Elements node and reproduced
+/// byte-for-byte on a second, differently-pinned image.
 const GOLDEN_PEG_OUT_SCRIPT: &str = "6a2006226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f160014153a100bf13cf08f49d13163e49df5a51d186626";
-/// The destination Bitcoin address that script pays, also recorded in the spike.
+/// The destination Bitcoin address that script pays, captured alongside it.
 const GOLDEN_DESTINATION: &str = "bcrt1qz5apqzl38ncg7jw3x937f80455w3se3xfhd0f5";
 
 /// Built by parsing rather than by `json!`, so the peg-out value stays an exact decimal literal.
@@ -684,6 +683,106 @@ async fn release_peg_out_reports_a_wrong_chain_mismatch_when_nothing_else_matche
     assert_eq!(liquid_txid, PEG_OUT_TXID);
     assert!(
         detail.contains("parent chain"),
+        "unhelpful detail: {detail}"
+    );
+}
+
+/// [`GOLDEN_PEG_OUT_SCRIPT`] with its 21-byte P2WPKH destination push replaced by a single
+/// non-empty byte that names no standard address template (not p2pkh, p2sh, or a witness
+/// program). The parent genesis push is untouched, so this still matches this pair's parent.
+const NON_STANDARD_DESTINATION_SCRIPT: &str =
+    "6a2006226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f0151";
+
+// Catches a regression that accepts a peg-out whose destination push cannot be turned into a
+// standard Bitcoin address, which would leave the simulated federation with nowhere valid to pay.
+#[tokio::test]
+async fn release_peg_out_rejects_a_non_standard_destination_script() {
+    let (peg, _liquid, _bitcoin) = connected_peg(
+        vec![ok(peg_out_transaction(
+            NON_STANDARD_DESTINATION_SCRIPT,
+            "0.00010000",
+        ))],
+        vec![],
+    )
+    .await;
+
+    let liquid_txid: elements::Txid = PEG_OUT_TXID.parse().unwrap();
+    let error = peg
+        .release_peg_out(&liquid_txid)
+        .await
+        .expect_err("a non-standard destination script must be rejected");
+
+    let NigiriError::PegOutputMalformed {
+        liquid_txid,
+        detail,
+    } = &error
+    else {
+        panic!("expected PegOutputMalformed, got {error}");
+    };
+    assert_eq!(liquid_txid, PEG_OUT_TXID);
+    assert!(
+        detail.contains("not a standard address"),
+        "unhelpful detail: {detail}"
+    );
+}
+
+// Catches a regression that accepts a peg-out output with no explicit value, which would leave
+// the simulated federation with no amount to pay out.
+#[tokio::test]
+async fn release_peg_out_rejects_a_peg_out_output_with_no_value() {
+    let (peg, _liquid, _bitcoin) = connected_peg(
+        vec![ok(peg_out_transaction(GOLDEN_PEG_OUT_SCRIPT, "null"))],
+        vec![],
+    )
+    .await;
+
+    let liquid_txid: elements::Txid = PEG_OUT_TXID.parse().unwrap();
+    let error = peg
+        .release_peg_out(&liquid_txid)
+        .await
+        .expect_err("a peg-out output with no value must be rejected");
+
+    let NigiriError::PegOutputMalformed {
+        liquid_txid,
+        detail,
+    } = &error
+    else {
+        panic!("expected PegOutputMalformed, got {error}");
+    };
+    assert_eq!(liquid_txid, PEG_OUT_TXID);
+    assert!(
+        detail.contains("no explicit value"),
+        "unhelpful detail: {detail}"
+    );
+}
+
+// Catches a regression that accepts a peg-out value that cannot be parsed as an amount — for
+// example a negative number the node would never actually send but a hand-rolled decoder might
+// wave through — which would panic or silently misreport further down the release path.
+#[tokio::test]
+async fn release_peg_out_rejects_a_value_that_is_not_an_amount() {
+    let (peg, _liquid, _bitcoin) = connected_peg(
+        vec![ok(peg_out_transaction(GOLDEN_PEG_OUT_SCRIPT, "-1"))],
+        vec![],
+    )
+    .await;
+
+    let liquid_txid: elements::Txid = PEG_OUT_TXID.parse().unwrap();
+    let error = peg
+        .release_peg_out(&liquid_txid)
+        .await
+        .expect_err("a value that is not an amount must be rejected");
+
+    let NigiriError::PegOutputMalformed {
+        liquid_txid,
+        detail,
+    } = &error
+    else {
+        panic!("expected PegOutputMalformed, got {error}");
+    };
+    assert_eq!(liquid_txid, PEG_OUT_TXID);
+    assert!(
+        detail.contains("is not an amount"),
         "unhelpful detail: {detail}"
     );
 }

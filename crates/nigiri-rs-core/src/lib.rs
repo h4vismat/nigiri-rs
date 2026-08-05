@@ -49,6 +49,14 @@
 //! Arbitrary RPC methods may mutate wallet or chain state. The host application
 //! remains responsible for synchronization and restoration.
 //!
+//! # Peg
+//!
+//! [`Peg`] pairs a Bitcoin and a Liquid client and moves value across the peg between them.
+//! Peg-in is real: it drives a genuine federation-controlled deposit address and a genuine
+//! `claimpegin`. The peg-out release is simulated: regtest has no federation, so [`Peg`] pays the
+//! decoded destination from the Bitcoin node's own wallet instead. See the [`Peg`] struct doc for
+//! what that means for the 1:1 invariant.
+//!
 //! Liquid-only methods are absent from the Bitcoin client at compile time:
 //!
 //! ```compile_fail

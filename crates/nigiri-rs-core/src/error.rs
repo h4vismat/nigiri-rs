@@ -63,7 +63,7 @@ pub enum NigiriError {
     /// A Liquid transaction expected to carry a peg-out carried none.
     #[error("no peg-out output in Liquid transaction {liquid_txid}")]
     PegOutputNotFound { liquid_txid: String },
-    /// A peg-out output was present but could not be decoded.
+    /// A peg-out output was present but not usable for this pair.
     #[error("malformed peg-out output in Liquid transaction {liquid_txid}: {detail}")]
     PegOutputMalformed { liquid_txid: String, detail: String },
     /// A peg-in deposit has not reached the sidechain's required confirmation depth.
@@ -115,8 +115,10 @@ mod tests {
         assert!(immature.to_string().contains('8'));
 
         let unconfigured = NigiriError::PegNotConfigured {
-            detail: "peg-out wallet has not been initialized".into(),
+            detail: "the Liquid node's parent chain is 11..11 but the Bitcoin node's genesis is \
+                     22..22"
+                .into(),
         };
-        assert!(unconfigured.to_string().contains("not been initialized"));
+        assert!(unconfigured.to_string().contains("parent chain"));
     }
 }

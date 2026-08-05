@@ -67,8 +67,8 @@ mod tests {
     const REGTEST_GENESIS: &str =
         "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
 
-    /// Recorded from a real `sendtomainchain` during the Task 1 spike. Replace with the value in
-    /// the spec's Spikes results before this test is meaningful.
+    /// Captured from a real `sendtomainchain` output on a live Elements node and reproduced
+    /// byte-for-byte on a second, differently-pinned image.
     const GOLDEN_PEG_OUT_SCRIPT: &str = "6a2006226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f160014153a100bf13cf08f49d13163e49df5a51d186626";
     const GOLDEN_DESTINATION_SCRIPT: &str = "0014153a100bf13cf08f49d13163e49df5a51d186626";
 
