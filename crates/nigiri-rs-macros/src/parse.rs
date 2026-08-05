@@ -11,11 +11,33 @@ use syn::{
 /// collide with it. The two have to agree, so they read the same constant.
 pub(crate) const RESERVED_PREFIX: &str = "__nigiri_rs_";
 
+/// The accepted fixture parameter types, named in one place.
+///
+/// The rejection message, the documentation, and every future composite read this. With three
+/// composites in flight it would otherwise be spelled out at each site and drift.
+pub(crate) const ACCEPTED_PARAMETERS: &str = "`NigiriClient<Bitcoin>` or `NigiriClient<Liquid>`";
+
 /// One fixture the generated wrapper must start, derived from one function parameter.
-pub(crate) struct FixtureParam {
-    pub(crate) ident: syn::Ident,
-    /// The chain marker, e.g. `Bitcoin`, taken from `NigiriClient<Bitcoin>`.
-    pub(crate) chain: syn::Path,
+///
+/// An enum rather than a struct because the composites landing next — `PegPair`, `LightningStack`
+/// — are parameters that name no chain. Each adds a variant here and an arm at the three match
+/// sites in `expand.rs`.
+pub(crate) enum FixtureParam {
+    /// `NigiriClient<C>`, whose chain marker is taken from the type.
+    Client {
+        ident: syn::Ident,
+        /// The chain marker, e.g. `Bitcoin`, taken from `NigiriClient<Bitcoin>`.
+        chain: syn::Path,
+    },
+}
+
+impl FixtureParam {
+    /// The parameter's binding, which every variant has and the expander always needs.
+    pub(crate) fn ident(&self) -> &syn::Ident {
+        match self {
+            Self::Client { ident, .. } => ident,
+        }
+    }
 }
 
 /// Arguments accepted by the attribute itself.
@@ -184,7 +206,7 @@ fn fixture_param(arg: &FnArg) -> Result<FixtureParam> {
 
     let chain = chain_of(&typed.ty)?;
 
-    Ok(FixtureParam {
+    Ok(FixtureParam::Client {
         ident: pat.ident.clone(),
         chain,
     })
@@ -198,8 +220,10 @@ fn chain_of(ty: &Type) -> Result<syn::Path> {
     let unsupported = || {
         Error::new(
             ty.span(),
-            "`#[nigiri_rs::test]` parameters must be `NigiriClient<Bitcoin>` or \
-             `NigiriClient<Liquid>`; the chain is taken from this type",
+            format!(
+                "`#[nigiri_rs::test]` parameters must be {ACCEPTED_PARAMETERS}; \
+                 the chain is taken from this type"
+            ),
         )
     };
 
@@ -219,4 +243,54 @@ fn chain_of(ty: &Type) -> Result<syn::Path> {
     };
 
     Ok(chain.path.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ACCEPTED_PARAMETERS, FixtureParam, parse};
+
+    // Catches a regression that stops deriving the chain from the parameter type, and pins the enum
+    // shape the composites add variants to.
+    #[test]
+    fn a_client_parameter_parses_into_the_client_variant() {
+        let parsed = parse(
+            proc_macro2::TokenStream::new(),
+            quote::quote! {
+                async fn a_test(bitcoin: NigiriClient<Bitcoin>) {}
+            },
+        )
+        .expect("a NigiriClient parameter is accepted");
+
+        assert_eq!(parsed.fixtures.len(), 1);
+        let FixtureParam::Client { ident, chain } = &parsed.fixtures[0];
+        assert_eq!(ident.to_string(), "bitcoin");
+        assert_eq!(
+            chain
+                .segments
+                .last()
+                .expect("the chain path has a segment")
+                .ident
+                .to_string(),
+            "Bitcoin"
+        );
+    }
+
+    // Catches a regression that spells the accepted-parameter list out at a second call site, which
+    // is how the message drifts once PegPair and LightningStack are added to it.
+    #[test]
+    fn the_rejection_message_names_the_accepted_parameters_from_one_source() {
+        // `expect_err` would require `TestFn: Debug`, which it deliberately does not derive; match
+        // instead.
+        let error = match parse(
+            proc_macro2::TokenStream::new(),
+            quote::quote! {
+                async fn a_test(unsupported: String) {}
+            },
+        ) {
+            Ok(_) => panic!("a String parameter is not a fixture"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains(ACCEPTED_PARAMETERS), "{error}");
+    }
 }
