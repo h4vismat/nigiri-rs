@@ -20,6 +20,10 @@ pub enum NigiriError {
     InvalidRequest { detail: Cow<'static, str> },
     InvalidResponse { operation: Cow<'static, str>, detail: String },
     PostTransactionMiningFailed { operation: Cow<'static, str>, txid: String, source: Box<NigiriError> },
+    PegOutputNotFound { liquid_txid: String },
+    PegOutputMalformed { liquid_txid: String, detail: String },
+    PegInImmature { have: u64, need: u64 },
+    PegNotConfigured { detail: Cow<'static, str> },
 }
 ```
 
@@ -118,6 +122,38 @@ committed transaction ID and the underlying mining error as its source.
 
 The transaction is on the node. It is simply not confirmed. Do not retry blindly — inspect node state
 first, or the retry sends a second transaction.
+
+### `PegOutputNotFound`
+
+> `no peg-out output in Liquid transaction {liquid_txid}`
+
+`Peg::release_peg_out` scanned every output of the named Liquid transaction and found none shaped
+like a peg-out at all.
+
+### `PegOutputMalformed`
+
+> `malformed peg-out output in Liquid transaction {liquid_txid}: {detail}`
+
+A peg-out-shaped output was present but not usable for this pair — a wrong-chain output decodes
+fine, it just names another pair, so this is not that case. `detail` names the specific problem: a
+destination script that is not a standard address, an output with no explicit value, a value that
+does not parse as an amount, or (when every peg-out-shaped output named a different parent chain)
+which chain it named instead.
+
+### `PegInImmature`
+
+> `peg-in deposit has {have} confirmations, needs {need}`
+
+`Peg::claim_peg_in` checked the deposit's confirmation count against the sidechain's reported
+`pegin_confirmation_depth` before submitting `claimpegin`, rather than letting the node reject the
+claim. `Peg::complete_peg_in` treats this as retryable and mines another block.
+
+### `PegNotConfigured`
+
+> `peg is not configured: {detail}`
+
+`Peg::connect` compared the Liquid node's `getsidechaininfo` parent block hash against the Bitcoin
+node's genesis and they did not match: the two nodes were never wired together as a peg pair.
 
 ## `FixtureError`
 

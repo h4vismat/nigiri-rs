@@ -21,3 +21,9 @@ serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["io-util", "macros", "net", "process", "rt", "test-util", "time"] }
 url = "2.5.8"
+
+[dev-dependencies]
+# The library itself only ever needs a current-thread runtime (driven by `#[tokio::test]` or a
+# fixture's own executor), so `rt-multi-thread` stays out of the main dependency's feature set.
+# `examples/peg_smoke.rs` uses plain `#[tokio::main]`, whose default flavor needs it.
+tokio = { version = "1.50.0", features = ["rt-multi-thread"] }

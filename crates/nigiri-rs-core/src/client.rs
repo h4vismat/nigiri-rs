@@ -122,12 +122,8 @@ impl<N: NigiriNetwork> NigiriClient<N> {
     ) -> Result<N::Txid, NigiriError> {
         const OPERATION: &str = "faucet";
         let amount = amount.unwrap_or(bitcoin::Amount::ONE_BTC);
-        let amount_text = amount.to_string_in(Denomination::Bitcoin);
-        let amount = serde_json::Number::from_str(&amount_text).map_err(|_| {
-            NigiriError::InvalidRequest {
-                detail: "faucet amount could not be represented as JSON".into(),
-            }
-        })?;
+        let (amount_text, amount) =
+            amount_as_json_number(amount, "faucet amount could not be represented as JSON")?;
         let value: String = crate::node_rpc::call_sensitive(
             self,
             "sendtoaddress",
@@ -255,6 +251,32 @@ fn invalid(operation: &'static str, expected: &'static str) -> NigiriError {
         operation: operation.into(),
         detail: format!("expected {expected}"),
     }
+}
+
+/// Formats a Bitcoin-denominated amount as a JSON number for a node RPC call.
+///
+/// Node RPCs take decimal BTC, not satoshis, and take it as a JSON number, not a string. Routing
+/// that through `f64` risks rounding a value that started out exact; going through
+/// [`bitcoin::Amount::to_string_in`] and [`serde_json::Number::from_str`] keeps it exact instead,
+/// which is why this exists rather than a call to `serde_json::json!`.
+///
+/// `detail` fills [`NigiriError::InvalidRequest`] if the conversion is ever rejected, which in
+/// practice does not happen for a value that came from [`bitcoin::Amount`] — the check exists
+/// because the conversion is fallible, not because it is expected to fail.
+///
+/// Returns the formatted decimal alongside the parsed number: a caller that also needs the text —
+/// for a [`crate::node_rpc::call_sensitive`] redaction list — gets it for free instead of
+/// formatting the amount twice.
+pub(crate) fn amount_as_json_number(
+    amount: bitcoin::Amount,
+    detail: &'static str,
+) -> Result<(String, serde_json::Number), NigiriError> {
+    let amount_text = amount.to_string_in(Denomination::Bitcoin);
+    let number =
+        serde_json::Number::from_str(&amount_text).map_err(|_| NigiriError::InvalidRequest {
+            detail: detail.into(),
+        })?;
+    Ok((amount_text, number))
 }
 
 #[cfg(test)]

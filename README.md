@@ -307,7 +307,7 @@ Both `NigiriClient<Bitcoin>` and `NigiriClient<Liquid>` provide:
 
 ### Deliberate scope limits
 
-Nigiri v0.5.16's default Liquid regtest configuration does not enable PAK enforcement. Consequently, `initpegoutwallet` and `sendtomainchain` fail on the default environment and are not wrapped by this crate. `nigiri-rs` also does not simulate peg-in or peg-out behavior with unrelated transfers.
+Peg-in and a simulated peg-out release exist on `Peg`, and `initpegoutwallet` remains unwrapped because PAK enforcement is off on this chain.
 
 The crate models only capabilities that the verified default Nigiri networks can execute. Custom federation lifecycle, chain configuration, and cross-chain orchestration remain the host application's responsibility.
 

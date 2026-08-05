@@ -60,6 +60,18 @@ pub enum NigiriError {
         #[source]
         source: Box<NigiriError>,
     },
+    /// A Liquid transaction expected to carry a peg-out carried none.
+    #[error("no peg-out output in Liquid transaction {liquid_txid}")]
+    PegOutputNotFound { liquid_txid: String },
+    /// A peg-out output was present but not usable for this pair.
+    #[error("malformed peg-out output in Liquid transaction {liquid_txid}: {detail}")]
+    PegOutputMalformed { liquid_txid: String, detail: String },
+    /// A peg-in deposit has not reached the sidechain's required confirmation depth.
+    #[error("peg-in deposit has {have} confirmations, needs {need}")]
+    PegInImmature { have: u64, need: u64 },
+    /// The Bitcoin and Liquid nodes are not a usable peg pair.
+    #[error("peg is not configured: {detail}")]
+    PegNotConfigured { detail: Cow<'static, str> },
 }
 
 #[cfg(test)]
@@ -80,5 +92,33 @@ mod tests {
 
         assert!(error.to_string().contains(&"11".repeat(32)));
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    // Catches a regression that drops the transaction id from a peg-out decode failure, which
+    // would leave a caller unable to say which transaction was rejected.
+    #[test]
+    fn peg_errors_name_what_failed() {
+        let not_found = NigiriError::PegOutputNotFound {
+            liquid_txid: "aa".repeat(32),
+        };
+        assert!(not_found.to_string().contains(&"aa".repeat(32)));
+
+        let malformed = NigiriError::PegOutputMalformed {
+            liquid_txid: "bb".repeat(32),
+            detail: "expected a 32-byte parent genesis hash push".to_owned(),
+        };
+        assert!(malformed.to_string().contains(&"bb".repeat(32)));
+        assert!(malformed.to_string().contains("32-byte parent genesis"));
+
+        let immature = NigiriError::PegInImmature { have: 3, need: 8 };
+        assert!(immature.to_string().contains('3'));
+        assert!(immature.to_string().contains('8'));
+
+        let unconfigured = NigiriError::PegNotConfigured {
+            detail: "the Liquid node's parent chain is 11..11 but the Bitcoin node's genesis is \
+                     22..22"
+                .into(),
+        };
+        assert!(unconfigured.to_string().contains("parent chain"));
     }
 }

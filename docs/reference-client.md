@@ -441,10 +441,9 @@ their own RPC records.
 
 ## Scope limits
 
-Nigiri v0.5.16's default Liquid regtest configuration does not enable PAK enforcement, so
-`initpegoutwallet` and `sendtomainchain` fail there and are deliberately not wrapped. Peg-in and
-peg-out behaviour is not simulated. Federation lifecycle, chain configuration, and cross-chain
-orchestration stay with the host application.
+Peg-in and a simulated peg-out release exist on `Peg`, and `initpegoutwallet` remains unwrapped
+because PAK enforcement is off on this chain. Federation lifecycle, chain configuration, and
+cross-chain orchestration stay with the host application.
 
 ## Related
 

@@ -106,8 +106,23 @@ impl FixtureChain for Liquid {
     /// Funds the wallet from the genesis outputs, then mines one block.
     ///
     /// Nothing here mines for money. Liquid's coins exist at height 0 and are spendable as soon as
-    /// the wallet has rescanned; the single block exists only because callers reasonably expect a
-    /// nonzero tip. This is why Liquid never touches the initial-mining permit Bitcoin needs.
+    /// the wallet has rescanned. This is why Liquid never touches the initial-mining permit Bitcoin
+    /// needs.
+    ///
+    /// **The single block is load-bearing, for two separate reasons. Do not remove it.**
+    ///
+    /// The first is presentation: callers reasonably expect a nonzero tip.
+    ///
+    /// The second is peg-in, and it is the one that is easy to break. `liquidregtest`'s genesis
+    /// carries a fixed 2011 timestamp, so a node still at height 0 considers itself in initial
+    /// block download. With `-validatepegin=1` — which a peg-capable fixture sets, though the
+    /// standalone Liquid fixture does not — `getpeginaddress` is then refused outright with
+    /// `RpcFailed { code: -4, "This action cannot be completed during initial sync or
+    /// reindexing" }`. Mining past `rescanblockchain 0` clears it.
+    ///
+    /// Verified 2026-08-05 against `blockstream/elementsd:23.3.3` wired to a `bitcoind` over
+    /// `-mainchainrpc*`. An earlier check missed it because that one ran `-validatepegin=0`, where
+    /// the node never consults the mainchain and so never reports initial sync.
     #[allow(
         private_interfaces,
         reason = "sealed trait; Deadline never crosses the crate boundary"
