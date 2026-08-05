@@ -1,4 +1,34 @@
-//! Cross-chain peg operations. See `peg/output.rs` for the pure decoding half.
+//! Moving value across Liquid's peg, for a Bitcoin and Liquid pair.
+//!
+//! Peg-in is real. [`Peg::peg_in_request`] asks the Liquid node for a genuine federation-controlled
+//! address, and [`Peg::claim_peg_in`] submits a real `claimpegin` with a real merkle proof, so a
+//! consumer's own claim path can be exercised.
+//!
+//! **Peg-out is half real.** [`Peg::send_to_mainchain`] is a genuine Elements call that burns
+//! L-BTC and records a Bitcoin destination. Nothing services it: regtest has no federation.
+//! [`Peg::release_peg_out`] plays that part, decoding the destination out of the transaction and
+//! paying it from the Bitcoin node's own wallet. That BTC is not the BTC anyone pegged in, so total
+//! BTC on the mainchain side grows with every release and no 1:1 invariant holds across the pair.
+//!
+//! ```no_run
+//! use bitcoin::Amount;
+//! use nigiri_rs_core::{Bitcoin, Liquid, NigiriClient, Peg};
+//!
+//! # async fn example() -> Result<(), nigiri_rs_core::NigiriError> {
+//! let peg = Peg::connect(
+//!     NigiriClient::<Bitcoin>::new(),
+//!     NigiriClient::<Liquid>::new(),
+//! )
+//! .await?;
+//!
+//! let pegged = peg.complete_peg_in(Amount::from_sat(100_000)).await?;
+//! println!("minted by {}", pegged.claim_txid);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The constructor verifies the pair. Two nodes that were never wired together are rejected up
+//! front rather than failing inside a later claim.
 
 mod output;
 
@@ -167,8 +197,8 @@ impl Peg {
     ///
     /// The node's view of the mainchain lags the mainchain, so reaching the reported depth is
     /// necessary but not sufficient. This mines one more block per rejected attempt rather than
-    /// guessing a margin. See [`CLAIM_RETRY_BLOCKS`]. A claim failure that another block cannot
-    /// plausibly fix — see [`worth_retrying`] — returns immediately instead of spending the
+    /// guessing a margin. See `CLAIM_RETRY_BLOCKS`. A claim failure that another block cannot
+    /// plausibly fix — see `worth_retrying` — returns immediately instead of spending the
     /// retry budget on it.
     pub async fn complete_peg_in(&self, amount: bitcoin::Amount) -> Result<PegIn, NigiriError> {
         let request = self.peg_in_request().await?;
