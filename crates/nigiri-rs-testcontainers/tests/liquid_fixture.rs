@@ -51,7 +51,10 @@ async fn fixture_starts_ready_and_funded() {
         .expect("a ready fixture must serve its Esplora tip");
     assert_eq!(
         height, 1,
-        "a Liquid fixture mines exactly one block; its funds come from genesis"
+        "a Liquid fixture mines exactly one block; its funds come from genesis. If this reads 0, \
+         the initial mine in Liquid::fund_wallet was removed — which also breaks peg-in, because \
+         a node still at height 0 reports initial block download and refuses getpeginaddress \
+         under -validatepegin=1. See that function's doc comment."
     );
 
     // Liquid has no block subsidy, so this balance proves the genesis outputs were connected and
