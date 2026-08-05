@@ -167,6 +167,35 @@ impl Peg {
         })
     }
 
+    /// Fetches a deposit and, once it has matured, its merkle proof.
+    ///
+    /// Split out of [`Peg::claim_peg_in`] so [`Peg::complete_peg_in`] can fetch this once and
+    /// retry only the submission: once a deposit is mature, its raw hex and merkle path cannot
+    /// change, only its confirmation count grows, so re-fetching them on every retry would be
+    /// two wasted Bitcoin round trips per iteration.
+    async fn fetch_matured_deposit(&self, txid: &str) -> Result<(String, String), NigiriError> {
+        let deposit: MainchainTransaction =
+            self.bitcoin.rpc("getrawtransaction", (txid, true)).await?;
+        if deposit.confirmations < self.pegin_confirmation_depth {
+            return Err(NigiriError::PegInImmature {
+                have: deposit.confirmations,
+                need: self.pegin_confirmation_depth,
+            });
+        }
+
+        let proof: String = self.bitcoin.rpc("gettxoutproof", ([txid],)).await?;
+        Ok((deposit.hex, proof))
+    }
+
+    /// Submits a fetched deposit and its merkle proof as a `claimpegin`.
+    ///
+    /// Kept separate from the fetch in [`Peg::fetch_matured_deposit`] so [`Peg::complete_peg_in`]
+    /// can resubmit the same hex and proof on retry instead of asking the Bitcoin node for them
+    /// again.
+    async fn submit_claim(&self, hex: &str, proof: &str) -> Result<elements::Txid, NigiriError> {
+        self.liquid.rpc("claimpegin", (hex, proof)).await
+    }
+
     /// Claims a matured deposit, minting L-BTC into the Liquid node's wallet.
     ///
     /// Fetches the deposit and its merkle proof from the Bitcoin node, then submits `claimpegin`.
@@ -180,19 +209,8 @@ impl Peg {
         mainchain_txid: &bitcoin::Txid,
     ) -> Result<elements::Txid, NigiriError> {
         let txid = mainchain_txid.to_string();
-
-        let deposit: MainchainTransaction =
-            self.bitcoin.rpc("getrawtransaction", (&txid, true)).await?;
-        if deposit.confirmations < self.pegin_confirmation_depth {
-            return Err(NigiriError::PegInImmature {
-                have: deposit.confirmations,
-                need: self.pegin_confirmation_depth,
-            });
-        }
-
-        let proof: String = self.bitcoin.rpc("gettxoutproof", ([&txid],)).await?;
-
-        self.liquid.rpc("claimpegin", (deposit.hex, proof)).await
+        let (hex, proof) = self.fetch_matured_deposit(&txid).await?;
+        self.submit_claim(&hex, &proof).await
     }
 
     /// Runs a whole peg-in: address, deposit, maturity, claim.
@@ -207,6 +225,11 @@ impl Peg {
     /// guessing a margin. See `CLAIM_RETRY_BLOCKS`. A claim failure that another block cannot
     /// plausibly fix — see `worth_retrying` — returns immediately instead of spending the
     /// retry budget on it.
+    ///
+    /// The deposit and its merkle proof are fetched once, up front: once mature, neither can
+    /// change, so every retry resubmits the same pair instead of asking the Bitcoin node for them
+    /// again. Only the submission — the call the lagging Liquid node actually rejects — is
+    /// retried.
     pub async fn complete_peg_in(&self, amount: bitcoin::Amount) -> Result<PegIn, NigiriError> {
         let request = self.peg_in_request().await?;
         let mainchain_txid = self
@@ -222,21 +245,19 @@ impl Peg {
                 .await?;
         }
 
-        let mut last = match self.claim_peg_in(&mainchain_txid).await {
-            Ok(claim_txid) => {
-                return Ok(PegIn {
-                    mainchain_txid,
-                    claim_txid,
-                    amount,
-                });
-            }
-            Err(error) if worth_retrying(&error) => error,
-            Err(error) => return Err(error),
-        };
+        let txid = mainchain_txid.to_string();
+        let (hex, proof) = self.fetch_matured_deposit(&txid).await?;
 
-        for _ in 0..CLAIM_RETRY_BLOCKS {
-            self.bitcoin.generate_to_address(1, &mining_address).await?;
-            match self.claim_peg_in(&mainchain_txid).await {
+        // `attempt` 0 is the initial claim with no mining; every later attempt mines exactly one
+        // more block first. That gives `CLAIM_RETRY_BLOCKS + 1` attempts and `CLAIM_RETRY_BLOCKS`
+        // mined blocks in total, matching the original one-attempt-outside-the-loop shape while
+        // keeping a single call site for the retry policy.
+        let mut last: Option<NigiriError> = None;
+        for attempt in 0..=CLAIM_RETRY_BLOCKS {
+            if attempt > 0 {
+                self.bitcoin.generate_to_address(1, &mining_address).await?;
+            }
+            match self.submit_claim(&hex, &proof).await {
                 Ok(claim_txid) => {
                     return Ok(PegIn {
                         mainchain_txid,
@@ -244,12 +265,14 @@ impl Peg {
                         amount,
                     });
                 }
-                Err(error) if worth_retrying(&error) => last = error,
+                Err(error) if worth_retrying(&error) => last = Some(error),
                 Err(error) => return Err(error),
             }
         }
 
-        Err(last)
+        Err(last.expect(
+            "the loop runs at least once and only reaches exhaustion via a worth-retrying error",
+        ))
     }
 
     /// Burns L-BTC and records a Bitcoin destination in the resulting Liquid transaction.

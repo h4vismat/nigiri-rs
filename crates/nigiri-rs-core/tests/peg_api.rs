@@ -396,17 +396,14 @@ async fn complete_peg_in_retries_while_the_node_lags_the_chain() {
             // complete_peg_in: mining address, then the bulk mine to depth.
             ok(Value::String(mining_address.to_owned())),
             ok(json!([format!("{}", "ff".repeat(32))])),
-            // attempt 1: deposit lookup, proof, rejected.
+            // fetched once, up front: the deposit and its proof cannot change once mature, so a
+            // rejected claimpegin never asks the Bitcoin node for either again.
             ok(json!({"hex": RAW_TX_HEX, "confirmations": 8})),
             ok(Value::String(PROOF_HEX.to_owned())),
-            // retry 1: one block, then lookup and proof again, rejected.
+            // retry 1: one block, no re-fetch.
             ok(json!([format!("{}", "1a".repeat(32))])),
-            ok(json!({"hex": RAW_TX_HEX, "confirmations": 9})),
-            ok(Value::String(PROOF_HEX.to_owned())),
-            // retry 2: one block, lookup, proof, accepted.
+            // retry 2: one block, no re-fetch, then the resubmitted claim is accepted.
             ok(json!([format!("{}", "1b".repeat(32))])),
-            ok(json!({"hex": RAW_TX_HEX, "confirmations": 10})),
-            ok(Value::String(PROOF_HEX.to_owned())),
         ],
     )
     .await;
