@@ -84,15 +84,21 @@ pub(crate) fn request<C: FixtureChain>(
 ) -> Result<ContainerRequest<GenericImage>, FixtureError> {
     image.validate()?;
 
-    Ok(
-        GenericImage::new(image.name().to_owned(), image.testcontainers_tag())
-            .with_entrypoint("/build/electrs")
-            .with_exposed_port(C::ELECTRS_HTTP_PORT.tcp())
-            .with_exposed_port(C::ELECTRS_ELECTRUM_PORT.tcp())
-            .with_network(network_name)
-            .with_container_name(container_name)
-            .with_cmd(C::electrs_cmd(node_name)),
-    )
+    // No entrypoint unless the image descriptor carries one. Every Electrs image entrypoints its own
+    // binary, at a path that differs between them (`/bin/electrs` on Mempool's, `/build/electrs` on
+    // Nigiri's), so hard-coding one here breaks every other image — which is exactly what an earlier
+    // hard-coded `/build/electrs` did to the Mempool images.
+    let mut generic = GenericImage::new(image.name().to_owned(), image.testcontainers_tag());
+    if let Some(entrypoint) = image.entrypoint() {
+        generic = generic.with_entrypoint(entrypoint);
+    }
+
+    Ok(generic
+        .with_exposed_port(C::ELECTRS_HTTP_PORT.tcp())
+        .with_exposed_port(C::ELECTRS_ELECTRUM_PORT.tcp())
+        .with_network(network_name)
+        .with_container_name(container_name)
+        .with_cmd(C::electrs_cmd(node_name)))
 }
 
 #[cfg(test)]
@@ -119,7 +125,11 @@ mod tests {
         )
         .expect("the pinned Electrs image is valid");
 
-        assert_eq!(request.entrypoint(), Some("/build/electrs"));
+        // Guards against a regression that reintroduces a hard-coded entrypoint: the binary lives
+        // at a different path in each Electrs image, so pinning one path here breaks every other
+        // image, including any a caller supplies through the builder. An image that genuinely needs
+        // one carries it on its own descriptor, which `node::tests` covers for Elements.
+        assert_eq!(request.entrypoint(), None);
         assert_eq!(request.expose_ports(), &[30_000.tcp(), 50_000.tcp()]);
         assert_eq!(request.network().as_deref(), Some("nigiri-test-fixture"));
         // Guards against a regression that passes `image.tag()` instead of

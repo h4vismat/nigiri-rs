@@ -263,7 +263,7 @@ let info: bitcoin_rpc_types::v30::GetBlockchainInfo = client
 # }
 ```
 
-Nigiri v0.5.16 runs Bitcoin Core v30.0. Custom environments running another Core version must select the matching `corepc-types` module.
+Nigiri v0.5.16 runs Bitcoin Core v30.0 (`v30`); the pinned fixture image runs v31.0 (`v31`). Custom environments running another Core version must select the matching `corepc-types` module.
 
 ### Liquid response records
 

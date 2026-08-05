@@ -88,10 +88,10 @@ then no longer have.
 Pre-pulling is the alternative, and it keeps your timeouts honest:
 
 ```sh
-docker pull ghcr.io/getumbrel/docker-bitcoind:v30.0
-docker pull ghcr.io/vulpemventures/electrs:latest
-docker pull ghcr.io/vulpemventures/elements:latest
-docker pull ghcr.io/vulpemventures/electrs-liquid:latest
+docker pull ghcr.io/getumbrel/docker-bitcoind:v31.0
+docker pull mempool/electrs:v3.4.0-dev1
+docker pull blockstream/elementsd:23.3.3
+docker pull mempool/electrs-liquid:v3.4.0-dev1
 ```
 
 ## Run several at once
@@ -136,6 +136,23 @@ let fixture = Fixture::<Bitcoin>::builder()
 The digest is optional — `ContainerImage::new(name, tag)` alone is valid. If you supply one it must
 be `sha256:` plus exactly 64 lowercase hex characters, or the fixture is rejected before Docker is
 touched.
+
+**If your image does not start its daemon on its own, give it an entrypoint.** The fixture passes a
+flag vector as the container command and otherwise leaves the entrypoint to the image, so an image
+whose `ENTRYPOINT` is unset (or is a shell) needs one:
+
+```rust,ignore
+use nigiri_rs::testcontainers::{ContainerImage, Fixture, Liquid};
+
+let fixture = Fixture::<Liquid>::builder()
+    .node_image(
+        ContainerImage::new("blockstream/elementsd", "23.3.3").with_entrypoint("elementsd"),
+    )
+    .start()
+    .await?;
+```
+
+Without it the container execs `-chain=liquidregtest` as a program name and never answers RPC.
 
 **An image this crate has not been tested against may not honour the same arguments.** The node and
 indexer command lines are built for the pinned images; a different upstream can reject a flag and the

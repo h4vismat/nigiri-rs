@@ -372,9 +372,27 @@ mod tests {
                 volumes.push(name);
             }
         }
-        assert!(
-            !volumes.is_empty(),
-            "the pinned {} image declares an anonymous volume, so at least one is expected",
+        // Guards against this test passing vacuously, without asserting an image fact that goes
+        // stale the moment a pin changes: how many anonymous volumes a fixture owns is decided by
+        // how many `VOLUME`s its images declare, so the expectation is read from the images
+        // themselves. Nigiri's Elements image declared one and Blockstream's declares none; either
+        // is fine, and mounting one Docker did not create for this container alone is not.
+        let mut declared = 0_usize;
+        for image in [C::node_image_default(), C::electrs_image_default()] {
+            let reference = format!("{}:{}", image.name(), image.testcontainers_tag());
+            let inspected = docker
+                .inspect_image(&reference)
+                .await
+                .expect("a pinned image a fixture just ran can be inspected");
+            declared += inspected
+                .config
+                .and_then(|config| config.volumes)
+                .map_or(0, |volumes| volumes.len());
+        }
+        assert_eq!(
+            volumes.len(),
+            declared,
+            "a {} fixture must own exactly one anonymous volume per volume its images declare",
             C::CHAIN_NAME
         );
         println!(
