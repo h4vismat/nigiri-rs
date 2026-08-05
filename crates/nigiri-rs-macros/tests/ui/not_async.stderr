@@ -1,0 +1,5 @@
+error: `#[nigiri_rs::test]` requires an `async fn`: starting a fixture awaits Docker
+ --> tests/ui/not_async.rs:2:1
+  |
+2 | fn blocking_test() {}
+  | ^^

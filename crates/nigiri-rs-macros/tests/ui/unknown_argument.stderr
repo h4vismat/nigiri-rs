@@ -1,0 +1,5 @@
+error: unknown argument `retries`; `#[nigiri_rs::test]` accepts `startup_timeout` and `flavor`. The chain is taken from the parameter type, not from an argument.
+ --> tests/ui/unknown_argument.rs:1:26
+  |
+1 | #[nigiri_rs_macros::test(retries = 3)]
+  |                          ^^^^^^^
