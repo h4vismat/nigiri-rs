@@ -12,7 +12,7 @@ Use this when you need the fixture handle itself. If you only need a ready clien
 
   ```toml
   [dev-dependencies]
-  nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", branch = "master", features = ["testcontainers"] }
+  nigiri-rs = { version = "0.4", features = ["testcontainers"] }
   tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
   ```
 

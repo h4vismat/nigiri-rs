@@ -158,7 +158,7 @@ let _: () = client.rpc("invalidateblock", (hash.to_string(),)).await?;
 **Maintained Bitcoin Core records** with the `bitcoin-rpc-types` feature:
 
 ```toml
-nigiri-rs = { git = "...", features = ["bitcoin-rpc-types"] }
+nigiri-rs = { version = "0.4", features = ["bitcoin-rpc-types"] }
 ```
 
 ```rust,ignore
