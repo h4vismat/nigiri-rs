@@ -7,6 +7,9 @@ license = "MIT"
 description = "Typed Bitcoin and Liquid regtest clients, with optional ephemeral Docker fixtures"
 repository = "https://github.com/h4vismat/nigiri-rs"
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]

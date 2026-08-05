@@ -6,9 +6,9 @@
 
 use nigiri_rs::{
     AddressStats, Bitcoin, BitcoinAddressInfo, BitcoinTxInfo, BitcoinUtxo,
-    DEFAULT_MAX_RESPONSE_BYTES, IssuanceTxIn, LBTC_REGTEST_ASSET, Liquid, LiquidAddressInfo,
-    LiquidTxInfo, LiquidUtxo, MAX_RESPONSE_BYTES_LIMIT, MintResponse, NigiriClient, NigiriConfig,
-    NigiriError, NigiriNetwork, TxStatus,
+    DEFAULT_MAX_RESPONSE_BYTES, ElectrumEndpoint, IssuanceTxIn, LBTC_REGTEST_ASSET, Liquid,
+    LiquidAddressInfo, LiquidTxInfo, LiquidUtxo, MAX_RESPONSE_BYTES_LIMIT, MintResponse,
+    NigiriClient, NigiriConfig, NigiriError, NigiriNetwork, TxStatus,
 };
 
 // Catches a dropped re-export in the facade. Every item below was public at 0.2.0; naming it in a
@@ -21,6 +21,7 @@ fn every_published_path_still_resolves() {
     accepts::<NigiriClient<Liquid>>();
     accepts::<NigiriConfig>();
     accepts::<NigiriError>();
+    accepts::<ElectrumEndpoint>();
     accepts::<AddressStats>();
     accepts::<BitcoinAddressInfo>();
     accepts::<BitcoinTxInfo>();

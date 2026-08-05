@@ -22,7 +22,8 @@
 //! # What a fixture requires and guarantees
 //!
 //! Docker must be running; no Nigiri installation is needed. Ports are chosen by the runtime, so read
-//! them from the fixture rather than assuming Nigiri's fixed ones. Containers, their anonymous
+//! them from the client (or [`Fixture::electrum_endpoint`], which delegates to it) rather than
+//! assuming Nigiri's fixed ones. Containers, their anonymous
 //! volumes, and the network are removed when the fixture is dropped, and nothing survives the test.
 //! The first start on a machine pulls two pinned images per chain, which is slow; later starts reuse
 //! them and a fixture is ready in a few seconds.

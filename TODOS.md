@@ -9,9 +9,15 @@ Completed items move to the bottom with the version that shipped them.
 
 **Priority:** P2
 
-`Cargo.toml` carries `license`, `description`, and `repository`, so the crate is shaped for
-publication, but nothing automates `cargo publish` on a tag. Releases are manual and
-unverified. Make it idempotent so re-running a failed release does not error.
+Each of the four workspace manifests (`nigiri-rs-core`, `nigiri-rs-macros`,
+`nigiri-rs-testcontainers`, `nigiri-rs`) carries `license`, `description`, and `repository`, so
+every crate is shaped for publication, but nothing automates `cargo publish` on a tag. Releases
+are manual and unverified. Make it idempotent so re-running a failed release does not error.
+
+Publish order, worked out for CI dependency resolution: `nigiri-rs-core` first (no workspace
+dependencies); then `nigiri-rs-macros` and `nigiri-rs-testcontainers`, which depend only on
+`nigiri-rs-core` and can publish in either order relative to each other; then `nigiri-rs`, the
+facade, which depends on all three.
 
 ## Test suite hygiene
 

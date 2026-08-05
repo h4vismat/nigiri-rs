@@ -15,7 +15,7 @@ Rust port.
 
 `nigiri-rs` is a typed asynchronous client for compatible Bitcoin and Liquid regtest services. A host-owned [Nigiri](https://github.com/vulpemventures/nigiri) environment is one compatible setup, not the only architecture.
 
-Version 0.3.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
+Version 0.4.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core v30 response-type re-export. The curated network APIs retain their stronger native contracts.
 
 Version 0.2.0 was the breaking release that introduced network marker types selecting native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
 
@@ -68,6 +68,20 @@ let electrum_port = fixture.electrum_endpoint().port();
 ```
 
 Docker must be running; no Nigiri installation is needed. Containers, their anonymous volumes, and the network are removed when the fixture is dropped. Ports are assigned by the runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a machine pulls two pinned images per chain and is slow; later starts are ready in a few seconds. `Fixture::<Liquid>::start` starts the same way; swap the type parameter. Podman is untested.
+
+The Electrum endpoint above is `fixture.electrum_endpoint()`, which delegates to the client. Any `NigiriClient<N>`, fixture-backed or not, exposes both endpoints a BDK or LWK wallet needs directly:
+
+```rust,no_run
+use nigiri_rs::{Bitcoin, NigiriClient};
+
+# fn example() {
+let client = NigiriClient::<Bitcoin>::new();
+let esplora_url = client.esplora_url();
+let electrum_host = client.electrum_endpoint().host();
+let electrum_port = client.electrum_endpoint().port();
+println!("esplora: {esplora_url}, electrum: {electrum_host}:{electrum_port}");
+# }
+```
 
 **Services you run yourself.** Point `NigiriClient` at a host-owned Nigiri installation or any compatible endpoints, as the quick start below does. Nothing in this crate starts, stops, or deletes them.
 

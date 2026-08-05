@@ -184,9 +184,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         client_config.electrum = electrs.electrum_endpoint.clone();
         let client = node::fixture_client::<C>(client_config)?;
 
-        if let Err(not_ready) =
-            readiness::wait_for_sync::<C>(&client, &electrs.electrum_endpoint, &deadline).await
-        {
+        if let Err(not_ready) = readiness::wait_for_sync::<C>(&client, &deadline).await {
             // Whichever service fell behind, its own log is what explains why.
             let with_electrs =
                 attach_container_log(electrs::SERVICE, not_ready, &electrs.container).await;
@@ -444,7 +442,6 @@ mod tests {
         assert_eq!(height, 101, "a ready fixture must already be funded");
 
         let port = fixture.electrum_endpoint().port();
-        assert_ne!(port, 0);
         assert_ne!(
             port, 50_000,
             "the Electrum endpoint must be the mapped port, not the fixed container port"

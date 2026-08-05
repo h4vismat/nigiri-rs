@@ -48,9 +48,9 @@ impl fmt::Display for Heights {
 /// only the budget running out ends this loop with an error.
 pub(crate) async fn wait_for_sync<C: FixtureChain>(
     client: &NigiriClient<C>,
-    endpoint: &ElectrumEndpoint,
     deadline: &Deadline,
 ) -> Result<(), FixtureError> {
+    let endpoint = client.electrum_endpoint();
     let mut observation = "waiting for node, Esplora, and Electrum tip synchronization".to_owned();
 
     loop {
@@ -193,12 +193,29 @@ mod tests {
     /// readiness round can be driven without Docker or a real node.
     struct SyncStub {
         client: NigiriClient<Bitcoin>,
-        endpoint: ElectrumEndpoint,
+        /// The shared base URL both the node RPC and Esplora reads are served from, kept so the
+        /// client can be rebuilt with a different Electrum endpoint without losing it.
+        base: Url,
         rounds: Arc<AtomicUsize>,
         servers: Vec<JoinHandle<()>>,
     }
 
     impl SyncStub {
+        /// Rebuilds the client so `client.electrum_endpoint()` is what `wait_for_sync` now reads it
+        /// from, keeping every other test input identical.
+        fn with_electrum_endpoint(&self, endpoint: ElectrumEndpoint) -> NigiriClient<Bitcoin> {
+            NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+                esplora_url: self.base.clone(),
+                node_rpc_url: self.base.clone(),
+                node_rpc_user: "admin1".to_owned(),
+                node_rpc_password: "123".to_owned(),
+                timeout: Duration::from_secs(5),
+                electrum: endpoint,
+                ..Default::default()
+            })
+            .expect("a loopback fixture configuration is valid")
+        }
+
         /// Replaces the Electrum half with a listener that accepts and then says nothing, so the probe
         /// can only end on the shared deadline.
         async fn with_silent_electrum(mut self) -> Self {
@@ -216,8 +233,9 @@ mod tests {
                     held.push(stream);
                 }
             }));
-            self.endpoint =
+            let endpoint =
                 ElectrumEndpoint::new("127.0.0.1", port).expect("a loopback endpoint is valid");
+            self.client = self.with_electrum_endpoint(endpoint);
             self
         }
 
@@ -315,18 +333,19 @@ mod tests {
                 .expect("a loopback URL is valid");
             let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
                 esplora_url: base.clone(),
-                node_rpc_url: base,
+                node_rpc_url: base.clone(),
                 node_rpc_user: "admin1".to_owned(),
                 node_rpc_password: "123".to_owned(),
                 timeout: Duration::from_secs(5),
+                electrum: ElectrumEndpoint::new("127.0.0.1", electrum_port)
+                    .expect("a loopback endpoint is valid"),
                 ..Default::default()
             })
             .expect("a loopback fixture configuration is valid");
 
             Self {
                 client,
-                endpoint: ElectrumEndpoint::new("127.0.0.1", electrum_port)
-                    .expect("a loopback endpoint is valid"),
+                base,
                 rounds,
                 servers: vec![http_server, electrum_server],
             }
@@ -458,7 +477,7 @@ mod tests {
         let deadline =
             Deadline::new(Duration::from_secs(30)).expect("a positive deadline is valid");
 
-        wait_for_sync(&stub.client, &stub.endpoint, &deadline)
+        wait_for_sync(&stub.client, &deadline)
             .await
             .expect("a converging fixture must become ready");
 
@@ -482,7 +501,7 @@ mod tests {
         let deadline =
             Deadline::new(Duration::from_secs(30)).expect("a positive deadline is valid");
 
-        wait_for_sync(&stub.client, &stub.endpoint, &deadline)
+        wait_for_sync(&stub.client, &deadline)
             .await
             .expect("a transiently unavailable service must be retried");
 
@@ -502,7 +521,7 @@ mod tests {
         let deadline =
             Deadline::new(Duration::from_secs(30)).expect("a positive deadline is valid");
 
-        wait_for_sync(&stub.client, &stub.endpoint, &deadline)
+        wait_for_sync(&stub.client, &deadline)
             .await
             .expect("an indexer that is still starting must be retried");
 
@@ -525,7 +544,7 @@ mod tests {
             let deadline =
                 Deadline::new(Duration::from_secs(1)).expect("a positive deadline is valid");
 
-            let error = wait_for_sync(&stub.client, &stub.endpoint, &deadline)
+            let error = wait_for_sync(&stub.client, &deadline)
                 .await
                 .expect_err("a permanently unavailable indexer must expire");
 
@@ -553,7 +572,7 @@ mod tests {
             .await;
         let deadline = Deadline::new(Duration::from_secs(1)).expect("a positive deadline is valid");
 
-        let error = wait_for_sync(&stub.client, &stub.endpoint, &deadline)
+        let error = wait_for_sync(&stub.client, &deadline)
             .await
             .expect_err("a probe that is never answered must expire");
 
@@ -576,7 +595,7 @@ mod tests {
         let stub = SyncStub::start(vec![Round::heights(101, 100, 100)]).await;
         let deadline = Deadline::new(Duration::from_secs(1)).expect("a positive deadline is valid");
 
-        let error = wait_for_sync(&stub.client, &stub.endpoint, &deadline)
+        let error = wait_for_sync(&stub.client, &deadline)
             .await
             .expect_err("a fixture that never converges must expire");
 

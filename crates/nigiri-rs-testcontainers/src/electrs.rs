@@ -68,7 +68,11 @@ pub(crate) async fn start_electrs<C: FixtureChain>(
     Ok(StartedElectrs {
         container,
         esplora_url: mapped_http_url(&host, esplora_port)?,
-        electrum_endpoint: ElectrumEndpoint::new(host, electrum_port)?,
+        electrum_endpoint: ElectrumEndpoint::new(host, electrum_port).map_err(|_| {
+            FixtureError::InvalidConfiguration {
+                detail: "container runtime returned an invalid mapped Electrum endpoint".to_owned(),
+            }
+        })?,
     })
 }
 

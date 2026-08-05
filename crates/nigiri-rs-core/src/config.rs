@@ -68,11 +68,20 @@ pub struct NigiriConfig {
 }
 
 impl NigiriConfig {
-    pub(crate) fn bitcoin() -> Self {
+    /// The Bitcoin service defaults: Esplora on `30000`, node RPC on `18443`, Electrum on `50000`.
+    #[must_use]
+    pub fn bitcoin() -> Self {
         Self::defaults("http://localhost:30000", "http://localhost:18443/", 50_000)
     }
 
-    pub(crate) fn liquid() -> Self {
+    /// The Liquid service defaults: Esplora on `30001`, node RPC on `18884`, Electrum on `50001`.
+    ///
+    /// [`Default::default`] always returns the Bitcoin configuration regardless of which network a
+    /// caller intends, so a `NigiriClient<Liquid>` built from `NigiriConfig { esplora_url: ...,
+    /// node_rpc_url: ..., ..Default::default() }` silently keeps Bitcoin's Electrum port. Start from
+    /// this constructor instead of `Default::default()` when configuring a Liquid client.
+    #[must_use]
+    pub fn liquid() -> Self {
         Self::defaults("http://localhost:30001", "http://localhost:18884/", 50_001)
     }
 
@@ -114,8 +123,11 @@ impl NigiriConfig {
 impl Default for NigiriConfig {
     /// Returns the Bitcoin service defaults.
     ///
-    /// A custom [`crate::NigiriClient<crate::Liquid>`] must override both
-    /// service URLs, including [`NigiriConfig::node_rpc_url`].
+    /// Three fields are chain-dependent: [`NigiriConfig::esplora_url`],
+    /// [`NigiriConfig::node_rpc_url`], and [`NigiriConfig::electrum`]. A custom
+    /// [`crate::NigiriClient<crate::Liquid>`] built with `..Default::default()` and only the two
+    /// URLs overridden silently keeps Bitcoin's Electrum port. Start from [`NigiriConfig::liquid`]
+    /// instead of this default to get Liquid-shaped defaults for all three.
     fn default() -> Self {
         Self::bitcoin()
     }
@@ -246,5 +258,21 @@ mod tests {
 
         // Default is the Bitcoin configuration.
         assert_eq!(NigiriConfig::default().electrum.port(), 50_000);
+    }
+
+    // Pins the exact trap `NigiriConfig::liquid()` exists to let a caller avoid: building a config
+    // the way a naive Liquid consumer would, by overriding only the two service URLs and leaving
+    // the rest to `..Default::default()`, silently keeps Bitcoin's Electrum port. This is why
+    // `bitcoin()` and `liquid()` are public constructors rather than merely documented advice: a
+    // consumer who reaches for `liquid()` sidesteps this entirely.
+    #[test]
+    fn naive_liquid_override_of_only_the_two_urls_keeps_bitcoins_electrum_port() {
+        let naive_liquid_config = NigiriConfig {
+            esplora_url: "http://localhost:30001".parse().unwrap(),
+            node_rpc_url: "http://localhost:18884/".parse().unwrap(),
+            ..Default::default()
+        };
+
+        assert_eq!(naive_liquid_config.electrum.port(), 50_000);
     }
 }

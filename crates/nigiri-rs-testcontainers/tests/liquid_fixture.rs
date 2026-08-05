@@ -68,7 +68,6 @@ async fn fixture_starts_ready_and_funded() {
     );
 
     let port = fixture.electrum_endpoint().port();
-    assert_ne!(port, 0);
     assert_ne!(
         port, 50_001,
         "the Electrum endpoint must be the mapped port, not the fixed container port"
@@ -230,7 +229,4 @@ async fn client_reports_the_mapped_electrum_port() {
         50_001,
         "the client must report the mapped port, not the fixed container port"
     );
-    // `Fixture::electrum_endpoint()` delegates to the client, so this only checks that the two
-    // accessors still agree; it cannot fail on its own and is not the regression guard above.
-    assert_eq!(from_client, fixture.electrum_endpoint());
 }

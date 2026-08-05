@@ -12,7 +12,7 @@
 //!
 //! # Fixtures
 //!
-//! Enable the `testcontainers` feature to reach [`testcontainers`], which provisions a throwaway
+//! Enable the `testcontainers` feature to reach `testcontainers`, which provisions a throwaway
 //! regtest stack per test. It is off by default because it pulls Docker client dependencies that a
 //! consumer talking to a host-owned Nigiri does not need.
 //!
