@@ -42,6 +42,7 @@ jobs:
   test:
     name: Test (${{ matrix.toolchain }}, ${{ matrix.features }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -76,10 +77,14 @@ jobs:
           # crate, which is where both things this matrix exists for live: the 1.88 floor and
           # the bitcoin-rpc-types feature. Scoping by package rather than by test name is
           # deliberate — a name filter that stops matching exits 0 and reports green.
-          if [ "${{ matrix.toolchain }}" = "stable" ] && [ "${{ matrix.features }}" = "all" ]; then
-            echo "test_scope=--workspace" >> "$GITHUB_OUTPUT"
-          else
+          #
+          # The full workspace suite is the default. Only the cheap cells are narrowed, so a
+          # matrix value that stops matching over-covers loudly instead of under-covering
+          # silently.
+          if [ "${{ matrix.toolchain }}" != "stable" ] || [ "${{ matrix.features }}" != "all" ]; then
             echo "test_scope=-p nigiri-rs-core" >> "$GITHUB_OUTPUT"
+          else
+            echo "test_scope=--workspace" >> "$GITHUB_OUTPUT"
           fi
 
       - name: cargo build

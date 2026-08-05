@@ -37,8 +37,10 @@ Surfaced by the 0.3.0 specialist review:
 **Completed:** current main
 
 `.github/workflows/ci.yml` runs formatting, Clippy with warnings denied, default- and
-all-feature target tests on Rust 1.88 and stable, all-feature doctests, packaging checks,
-and separately gated host suites.
+all-feature target tests on Rust 1.88 and stable, all-feature doctests, and packaging checks.
+Exactly one matrix cell (stable, all-features) runs the full workspace, including the
+Docker-backed `nigiri-rs-testcontainers` suite; the other three cells scope to
+`nigiri-rs-core`, which needs no Docker.
 
 ### Bound `max_rpc_response_bytes` from above
 

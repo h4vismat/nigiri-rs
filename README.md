@@ -330,23 +330,24 @@ The dependency family is aligned with LWK 0.18.1: `elements 0.25.3` and compatib
 
 ## Tests
 
-Pure parsers, JSON-RPC request construction, exact amounts, HTTP bounds, error mapping, and network types run in the ordinary suite:
+Pure parsers, JSON-RPC request construction, exact amounts, HTTP bounds, error mapping, and network types need no Docker. A contributor without Docker installed runs:
 
 ```sh
-cargo test
+cargo test -p nigiri-rs-core --all-targets
 cargo test --doc
 ```
+
+That is also exactly what three of this repository's four CI matrix cells run. A plain workspace `cargo test` is no longer that Docker-free command: nothing in this repository is `#[ignore]`d any more, so an unscoped `cargo test` also runs `nigiri-rs-testcontainers`'s Docker-backed integration tests. They need no feature flag to run because they live in that crate itself.
 
 Bitcoin and Liquid integration tests need Docker but no Nigiri installation. Each one starts its own funded regtest stack through `nigiri-rs-testcontainers`, owns its chain, and removes everything it created when it finishes:
 
 ```sh
-cargo test -p nigiri-rs-testcontainers --test bitcoin_fixture -- --ignored --test-threads=1
-cargo test -p nigiri-rs-testcontainers --test liquid_fixture -- --ignored --test-threads=1
+cargo test -p nigiri-rs-testcontainers --all-targets --all-features
 ```
 
-Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other, and the two suites can run at once.
+Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other, and they can all run at once. Nothing here is `#[ignore]`d, on purpose: an ignored Docker test reports green having verified nothing, and this project has shipped that exact failure mode twice — once as a CI filter that matched zero tests and exited 0, once as a test that had never run in any CI job. Ignoring a test loses that signal; running it fails loudly instead when Docker is unavailable.
 
-One Bitcoin fixture is ready in about 6 seconds, well inside the 60-second default startup budget. Two started at once measured 103 seconds: the cost is contention, not queueing, because both nodes mine 101 blocks while both indexers follow them. Raise `startup_timeout` when starting fixtures in parallel. A Liquid fixture mines a single block instead of 101: Liquid has no block subsidy, so it funds its wallet by connecting the genesis outputs rather than by mining one.
+One Bitcoin fixture is ready in about 3 seconds, well inside the 60-second default startup budget. Two started at once take about 4.4 seconds total, so parallelism itself costs roughly a second, not the 103 seconds an earlier note here claimed. That figure was recorded while unrelated runaway processes were saturating every core and said nothing about this crate. A Liquid fixture mines a single block instead of 101: Liquid has no block subsidy, so it funds its wallet by connecting the genesis outputs rather than by mining one.
 
 ## License
 
