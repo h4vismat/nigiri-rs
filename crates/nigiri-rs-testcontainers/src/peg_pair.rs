@@ -62,8 +62,8 @@ struct PegHandles<LiquidStack, BitcoinStack> {
 }
 
 // Written by hand rather than derived, exactly as for `Fixture`, but the field that forces it is
-// different: the two held clients would print safely on their own, as `Fixture`'s own `Debug`
-// already shows. `peg` is the one that must stay out — `nigiri_rs_core::Peg` derives `Debug` over a
+// different: the two held stacks print safely because `Fixture`'s own `Debug` is hand-written and
+// redacting. `peg` is the one that must stay out — `nigiri_rs_core::Peg` derives `Debug` over a
 // config whose `node_rpc_password` is public.
 impl fmt::Debug for PegPair {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

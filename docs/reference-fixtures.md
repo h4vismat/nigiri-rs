@@ -194,8 +194,8 @@ pub struct PegPair { /* private */ }
 ```
 
 Implements `Debug` by hand, exactly as `Fixture` does, but for a different field: the two held
-clients would print safely on their own, while `peg` derives `Debug` over a config whose
-`node_rpc_password` is public. Not `Clone`.
+stacks print safely because `Fixture`'s own `Debug` is hand-written and redacting, while `peg`
+derives `Debug` over a config whose `node_rpc_password` is public. Not `Clone`.
 
 A pair is **four containers on one Docker network**: `bitcoind` with its Electrs, and `elementsd` with
 its Electrs. The Elements node runs `-validatepegin=1` and reaches `bitcoind` over `-mainchainrpchost`,
