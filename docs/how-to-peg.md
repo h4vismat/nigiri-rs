@@ -60,7 +60,8 @@ async fn a_deposit_becomes_lbtc(pair: PegPair) -> Result<(), BoxError> {
     let pegged = pair.peg().complete_peg_in(Amount::from_sat(100_000)).await?;
     println!("minted by {}", pegged.claim_txid);
 
-    // The Bitcoin tip is above the funding height because `complete_peg_in` mined to depth.
+    // `>= 101` is a floor a pair that pegged nothing already clears — 101 is also the arrival
+    // height, so this is not evidence that `complete_peg_in` mined anything.
     assert!(pair.bitcoin().block_height().await? >= 101);
     assert_eq!(pair.liquid().block_height().await?, 1);
     Ok(())
@@ -234,9 +235,12 @@ let claim = claim.expect("a matured deposit is claimable within twenty blocks");
 # }
 ```
 
-That loop is what `complete_peg_in` runs on your behalf; it also keeps the last retryable error so an
-exhausted budget reports something useful. If you do not need to intervene between the steps, call
-`complete_peg_in` and skip all of it.
+That loop applies the same retry **policy** `complete_peg_in` runs, but not the same loop.
+`complete_peg_in` fetches the deposit and its merkle proof once, before retrying, and resubmits only
+the claim; this snippet calls `claim_peg_in` on every attempt, which re-fetches both. It also checks
+maturity once and fails fast on a genuinely immature deposit, where this snippet's loop retries
+through that instead. It also keeps the last retryable error so an exhausted budget reports something
+useful. If you do not need to intervene between the steps, call `complete_peg_in` and skip all of it.
 
 Signatures:
 

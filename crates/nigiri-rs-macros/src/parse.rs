@@ -20,9 +20,9 @@ pub(crate) const ACCEPTED_PARAMETERS: &str =
 
 /// One fixture the generated wrapper must start, derived from one function parameter.
 ///
-/// An enum rather than a struct because the composites landing next — `PegPair`, `LightningStack`
-/// — are parameters that name no chain. Each adds a variant here and an arm at the three match
-/// sites in `expand.rs`.
+/// An enum rather than a struct because a composite parameter names no chain: `PegPair` is one
+/// such parameter, already landed, and `LightningStack` is the one still to come. Each adds a
+/// variant here and an arm at the three match sites in `expand.rs`.
 pub(crate) enum FixtureParam {
     /// `NigiriClient<C>`, whose chain marker is taken from the type.
     Client {

@@ -190,9 +190,12 @@ a `SIGKILL` skips it. Everything is prefixed and UUID-scoped, so:
 ```sh
 docker ps -a --filter "name=nigiri-rs-" --format "{{.Names}}"
 docker rm -f -v $(docker ps -aq --filter "name=nigiri-rs-")
+docker network rm $(docker network ls -q --filter "name=nigiri-rs-fixture-")
 ```
 
-The `-v` matters — without it the anonymous volumes stay.
+The `-v` matters — without it the anonymous volumes stay. And `docker rm` never removes a network, so
+the last line is not optional: a killed run leaves its network behind even after every container of it
+is gone.
 
 ## Related
 

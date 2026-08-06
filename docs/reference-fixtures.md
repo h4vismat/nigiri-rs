@@ -107,7 +107,8 @@ the slow one**: it pulls two pinned images per chain. Raise `startup_timeout` fo
 pub struct FixtureBuilder<C: FixtureChain> { /* private */ }
 ```
 
-Derives `Clone` and `Debug`. Every setter takes and returns `self`.
+Derives `Clone`. Implements `Debug` by hand — the images and the timeout only, since
+`extra_node_args` can carry the fixture credentials. Every setter takes and returns `self`.
 
 | Method | Signature | Default |
 | --- | --- | --- |
@@ -192,8 +193,9 @@ is gone.
 pub struct PegPair { /* private */ }
 ```
 
-Implements `Debug` by hand, for the same reason `Fixture` does — both held clients carry the RPC
-password. Not `Clone`.
+Implements `Debug` by hand, exactly as `Fixture` does, but for a different field: the two held
+clients would print safely on their own, while `peg` derives `Debug` over a config whose
+`node_rpc_password` is public. Not `Clone`.
 
 A pair is **four containers on one Docker network**: `bitcoind` with its Electrs, and `elementsd` with
 its Electrs. The Elements node runs `-validatepegin=1` and reaches `bitcoind` over `-mainchainrpchost`,
@@ -218,7 +220,14 @@ use nigiri_rs::testcontainers::PegPair;
 let pair = PegPair::start().await?;
 
 let pegged = pair.peg().complete_peg_in(Amount::from_sat(100_000)).await?;
-assert_eq!(pegged.amount, Amount::from_sat(100_000));
+
+// `pegged.amount` is the argument echoed back, so comparing it to itself proves nothing. Ask the
+// Liquid node about the claim instead — `-txindex=1` makes even a mempool transaction retrievable.
+let claim: serde_json::Value = pair
+    .liquid()
+    .rpc("getrawtransaction", (pegged.claim_txid.to_string(), 1_u64))
+    .await?;
+assert!(claim["vout"].as_array().is_some_and(|vout| !vout.is_empty()));
 
 // Either half is still an ordinary client.
 assert_eq!(pair.liquid().block_height().await?, 1);

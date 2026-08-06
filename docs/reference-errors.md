@@ -179,7 +179,9 @@ pub enum FixtureError {
 ```
 
 `service` is `"bitcoind"`, `"elements"`, or `"electrs"` — plus `"fixture"` on the three-way readiness
-wait, where no single container is the one at fault. `chain` is `"Bitcoin"` or `"Liquid"`.
+wait, where no single container is the one at fault, and `"peg"` on a `PegPair`'s pairing check, where
+the budget ran out verifying the two chains rather than starting either one. `chain` is `"Bitcoin"` or
+`"Liquid"`.
 
 `diagnostics` carries bounded container output where the failure happened inside a container — that
 field is why a readiness failure is usually diagnosable from the error text alone.
@@ -237,6 +239,11 @@ The startup budget ran out with the three services still disagreeing. `last_obse
 height reading, formatted `node=<n> esplora=<n> electrum=<n>`, which tells you *which* service was
 behind. On this path `service` is `"fixture"`, since the failure is the disagreement rather than any
 one container. The variant has **no source** — nothing failed, the budget simply expired.
+
+On a [`PegPair`](reference-fixtures.md#pegpair), the same variant also covers the budget running out
+while verifying the pair, after all four containers are already up. There `service` is `"peg"` and
+`last_observation` is prose rather than the height triplet — `verifying both chains report the same
+parent` — since there is only the one check, not three services to compare.
 
 Bumping `startup_timeout` is the fix when this happens on a first run that is still pulling images.
 

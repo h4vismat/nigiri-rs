@@ -120,18 +120,34 @@ impl<C: FixtureChain> Fixture<C> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FixtureBuilder<C: FixtureChain> {
     startup_timeout: Duration,
     node_image: ContainerImage,
     electrs_image: ContainerImage,
-    /// Appended to `C::node_cmd()` by a composite that needs arguments the standalone chain does
-    /// not set. Crate-private: a composite in this crate supplies them, and a caller who wants a
+    /// Merged into `C::node_cmd()` by a composite that needs arguments the standalone chain does
+    /// not set, or needs to replace one it does — see `node::merge_node_args` for how a
+    /// composite's argument replaces the chain's own entry of the same key rather than sitting
+    /// beside it. Crate-private: a composite in this crate supplies them, and a caller who wants a
     /// differently-configured node replaces the image instead.
     extra_node_args: Vec<String>,
     /// The network to join instead of creating one, supplied by a composite.
     network: Option<String>,
     chain: PhantomData<C>,
+}
+
+// Written by hand rather than derived: since this branch, `extra_node_args` can carry
+// `-mainchainrpcpassword=123`, and the rest of the crate works to keep that out of any
+// caller-visible text.
+impl<C: FixtureChain> fmt::Debug for FixtureBuilder<C> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FixtureBuilder")
+            .field("startup_timeout", &self.startup_timeout)
+            .field("node_image", &self.node_image)
+            .field("electrs_image", &self.electrs_image)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The UUID-scoped names of one fixture's Docker resources.
@@ -144,21 +160,10 @@ struct TopologyNames {
 
 /// Scopes every Docker resource of one fixture to a single UUID, so concurrent fixtures cannot
 /// collide and a leaked resource is traceable to the fixture that made it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the thin wrapper survives for the naming unit test while start_under calls topology_names_on"
-    )
-)]
-fn topology_names<C: FixtureChain>() -> TopologyNames {
-    topology_names_on::<C>(None)
-}
-
-/// The same scoping, with a composite's shared network in place of a generated one.
 ///
-/// Only the network is replaceable. The container names keep their own scope even when the network
-/// is shared, which is what lets two fixtures live on one network.
+/// Only the network is replaceable, by a composite's shared network in place of a generated one.
+/// The container names keep their own scope even when the network is shared, which is what lets
+/// two fixtures live on one network.
 fn topology_names_on<C: FixtureChain>(shared_network: Option<String>) -> TopologyNames {
     let scope = Uuid::new_v4().simple().to_string();
 
@@ -189,10 +194,12 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         self
     }
 
-    /// Arguments appended to the chain's own node command.
+    /// Arguments merged into the chain's own node command, not merely appended.
     ///
-    /// Crate-private, and deliberately additive: a composite extends the chain's flag vector and
-    /// must not have to restate the flags the chain owns.
+    /// Crate-private. See `node::merge_node_args` for the merge itself: a composite's argument
+    /// replaces the chain's entry of the same key rather than sitting beside it, which is what
+    /// lets `PegPair` turn the standalone chain's `-validatepegin=0` into `-validatepegin=1`
+    /// instead of shipping both.
     #[must_use]
     pub(crate) fn extra_node_args(mut self, args: Vec<String>) -> Self {
         self.extra_node_args = args;
@@ -572,8 +579,8 @@ mod tests {
     // concurrent fixtures collide on the host instead of running independently.
     #[test]
     fn every_fixture_scopes_its_own_topology_names() {
-        let first = super::topology_names::<Bitcoin>();
-        let second = super::topology_names::<Bitcoin>();
+        let first = super::topology_names_on::<Bitcoin>(None);
+        let second = super::topology_names_on::<Bitcoin>(None);
 
         assert_ne!(first.network, second.network);
         assert_ne!(first.node, second.node);

@@ -128,7 +128,11 @@ async fn peg_in_driven_through_the_primitives_credits_the_liquid_wallet() -> Res
         .await?;
 
     // The node's view of the mainchain lags the mainchain, so reaching the reported depth is
-    // necessary but not sufficient. This is the loop `complete_peg_in` runs on a caller's behalf.
+    // necessary but not sufficient. This applies the same retry policy `complete_peg_in` runs, but
+    // not the same loop: `complete_peg_in` fetches the deposit and proof once and resubmits only
+    // the claim, where this calls `claim_peg_in` — re-fetching both — on every attempt, and it
+    // checks maturity once and fails fast on a genuinely immature deposit, where this retries
+    // through that instead.
     let mut last = None;
     let mut claim = None;
     let mut fail_fast = false;

@@ -61,8 +61,10 @@ struct PegHandles<LiquidStack, BitcoinStack> {
     bitcoin: BitcoinStack,
 }
 
-// Written by hand rather than derived, exactly as for `Fixture`: both held clients carry the RPC
-// password, and the rest of the crate works to keep that out of any caller-visible text.
+// Written by hand rather than derived, exactly as for `Fixture`, but the field that forces it is
+// different: the two held clients would print safely on their own, as `Fixture`'s own `Debug`
+// already shows. `peg` is the one that must stay out — `nigiri_rs_core::Peg` derives `Debug` over a
+// config whose `node_rpc_password` is public.
 impl fmt::Debug for PegPair {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -384,8 +386,10 @@ mod tests {
         }
     }
 
-    // The one test that proves the whole assembly: a pair that reports itself started must have
-    // four containers on one network and a `Peg` that already verified the two chains are paired.
+    // Catches a regression in any of the wiring guarantees a caller reads straight off `PegPair` —
+    // this is the one test that proves the whole assembly, so a pair that reports itself started
+    // must have four containers on one network and a `Peg` that already verified the two chains
+    // are paired.
     #[tokio::test]
     async fn a_started_pair_is_wired_and_reports_both_chains() {
         let pair = PegPair::start()
