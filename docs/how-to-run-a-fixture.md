@@ -69,7 +69,9 @@ errors, not a compile error.
 ## Give it a longer budget
 
 The default is 60 seconds for the whole startup. That covers every warm start with room to spare.
-The **first** run on a machine has to pull two images, which can blow through it:
+The **first** run on a machine has to pull two images, which can blow through it (a
+[`PegPair`](reference-fixtures.md#pegpair) pulls four and defaults to 120 seconds for the same
+reason):
 
 ```rust,ignore
 use std::time::Duration;
@@ -136,6 +138,11 @@ let fixture = Fixture::<Bitcoin>::builder()
 The digest is optional — `ContainerImage::new(name, tag)` alone is valid. If you supply one it must
 be `sha256:` plus exactly 64 lowercase hex characters, or the fixture is rejected before Docker is
 touched.
+
+**A [`PegPair`](reference-fixtures.md#pegpairbuilder) has four images, so it has four setters**:
+`bitcoind_image`, `bitcoin_electrs_image`, `elements_image`, and `liquid_electrs_image`. All four are
+validated before the first container starts, so a bad Elements image is rejected without leaving the
+Bitcoin half running.
 
 **If your image does not start its daemon on its own, give it an entrypoint.** The fixture passes a
 flag vector as the container command and otherwise leaves the entrypoint to the image, so an image

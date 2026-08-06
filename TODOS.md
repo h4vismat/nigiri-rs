@@ -105,6 +105,42 @@ Surfaced by the 0.3.0 specialist review:
   Liquid tests that used it were rewritten to `#[nigiri_rs::test]`, so the duplication crossed a
   crate boundary rather than going away.
 
+## Diagnostics
+
+### Attach the pair's container logs to a `Peg::connect` timeout
+
+**Priority:** P4
+
+`PegPairBuilder::start` runs `Peg::connect` under the shared deadline and propagates its expiry with
+`?`. That expiry is a `FixtureError::ReadinessTimeout`, which is one of only two variants
+`owned_start::attach_diagnostics` will enrich — so container logs *could* be attached there and are
+not. It is the one remaining place a pair could explain its own failure better than it does.
+
+Deliberately narrow. The neighbouring `Peg::connect` *failure* path is a different case and was
+settled during the peg-fixtures review: it arrives as `FixtureError::Client`, which has no
+diagnostics field, so the two `attach_inner_logs` calls that used to sit there read two container
+logs and discarded both. Those were removed rather than made to work. This item is only about the
+timeout path, where the variant can carry what is read.
+
+Low value in practice: a `Peg::connect` timeout means a hung `getsidechaininfo` on a node that
+already came up and passed its own readiness check, so the container log is less likely to be the
+thing that explains it than it is for a node that never started.
+
+## Documentation
+
+### Make the container-cleanup one-liners safe when nothing matches
+
+**Priority:** P4
+
+`docs/reference-fixtures.md` and `docs/how-to-run-a-fixture.md` both give a hard-kill cleanup recipe
+built on `docker rm -f -v $(docker ps -aq --filter ...)`. When the filter matches nothing, the
+command substitution is empty and `docker rm` exits with a usage error rather than doing nothing —
+noise at exactly the moment a reader is already confused about whether they leaked containers. The
+same shape now appears in two pages, so it is worth fixing once in both.
+
+Pre-existing style rather than something this work introduced; the peg-fixtures branch only copied it
+to a second page while documenting how to clean up a four-container pair.
+
 ## Completed
 
 ### Give the peg API a presence in `docs/`
