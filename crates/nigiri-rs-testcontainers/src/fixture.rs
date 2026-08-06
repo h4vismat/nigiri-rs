@@ -133,7 +133,10 @@ impl<C: FixtureChain> Fixture<C> {
     /// Test-only, and only for a composite's teardown test: proving a pair removes everything it
     /// created means naming all four containers, and these handles are private to this type.
     #[cfg(test)]
-    #[expect(dead_code, reason = "the composite teardown test that calls this lands in the next task")]
+    #[expect(
+        dead_code,
+        reason = "the composite teardown test that calls this lands in the next task"
+    )]
     pub(crate) fn container_ids(&self) -> [String; 2] {
         [
             self.handles.electrs.id().to_owned(),
