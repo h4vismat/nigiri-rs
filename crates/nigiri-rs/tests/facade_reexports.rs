@@ -40,6 +40,11 @@ fn every_published_path_still_resolves() {
     fn is_network<N: NigiriNetwork>() {}
     is_network::<Bitcoin>();
     is_network::<Liquid>();
+
+    accepts::<nigiri_rs::Peg>();
+    accepts::<nigiri_rs::PegIn>();
+    accepts::<nigiri_rs::PegInRequest>();
+    accepts::<nigiri_rs::PegOut>();
 }
 
 // Catches the fixtures being re-exported unconditionally, which would drag Docker dependencies
@@ -50,6 +55,8 @@ fn fixtures_are_reachable_when_the_feature_is_on() {
     fn accepts<T>() {}
     accepts::<nigiri_rs::testcontainers::Fixture<Bitcoin>>();
     accepts::<nigiri_rs::testcontainers::FixtureError>();
+    accepts::<nigiri_rs::testcontainers::PegPair>();
+    accepts::<nigiri_rs::testcontainers::PegPairBuilder>();
 }
 
 // Catches a broken feature forward in the facade manifest. `bitcoin_rpc_types` is the only core

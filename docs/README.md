@@ -8,6 +8,9 @@ The [repository README](../README.md) is the tour. These pages are the depth beh
 
 - **[Tutorial: your first fixture-backed test](tutorial-first-test.md)** — from an empty crate to a
   passing test that funds an address on a throwaway chain. No Nigiri installation, no manual setup.
+- **[Tutorial: a round trip across Liquid's peg](tutorial-peg-round-trip.md)** — BTC into the
+  sidechain and back out again, against a wired four-container pair. Start here if the peg is why
+  you came.
 
 ## How-to guides
 
@@ -23,17 +26,19 @@ Task-oriented. Each one assumes you have the crate building already.
   methods the curated API does not wrap.
 - [How to work with Liquid assets](how-to-work-with-liquid-assets.md) — mint an asset, send it, and
   read confidential UTXOs.
+- [How to peg in and peg out](how-to-peg.md) — start a wired Bitcoin and Liquid pair, claim a real
+  peg-in, and release a simulated peg-out.
 
 ## Reference
 
 Complete, accurate, derived from the source.
 
-- [Client API](reference-client.md) — `NigiriClient`, `NigiriConfig`, `ElectrumEndpoint`, the
-  response records, and the network markers.
-- [Fixture API](reference-fixtures.md) — `Fixture`, `FixtureBuilder`, `ContainerImage`,
-  `FixtureChain`.
-- [`#[nigiri_rs::test]`](reference-test-macro.md) — accepted arguments, accepted signatures, and
-  every rejection with its message.
+- [Client API](reference-client.md) — `NigiriClient`, `NigiriConfig`, `ElectrumEndpoint`, `Peg` and
+  the peg records, the response records, and the network markers.
+- [Fixture API](reference-fixtures.md) — `Fixture`, `FixtureBuilder`, `PegPair`, `PegPairBuilder`,
+  `ContainerImage`, `FixtureChain`.
+- [`#[nigiri_rs::test]`](reference-test-macro.md) — accepted arguments, accepted signatures
+  (including `PegPair`), and every rejection with its message.
 - [Errors](reference-errors.md) — `NigiriError` and `FixtureError`, variant by variant, with what
   triggers each.
 
@@ -47,6 +52,8 @@ Why the design is shaped this way.
   rather than an enum, and what that buys at compile time.
 - [What "ready" means](explanation-fixture-readiness.md) — why a fixture waits for three services to
   agree on a tip before it hands you a client.
+- [What the peg simulates](explanation-what-the-peg-simulates.md) — which half of Liquid's peg is
+  real on regtest, which half this crate plays, and what that means for what you can assert.
 
 ## The workspace
 

@@ -403,6 +403,12 @@ mod tests {
             "--cookie admin1:123",
             "Authorization: Basic YWRtaW4xOjEyMw==",
             "Command-line arg: rpcuser=admin1",
+            // `PegPair`'s Elements arguments: the password matches only because `rpcpassword` is
+            // a substring of `mainchainrpcpassword`, and the user only because `admin1` is matched
+            // as whole text. Nothing pins either spelling on its own, so both are asserted here
+            // rather than left to match by accident.
+            "-mainchainrpcuser=admin1",
+            "-mainchainrpcpassword=123",
         ] {
             let redacted = redact(spelling);
             assert!(!redacted.contains("admin1"), "{spelling} -> {redacted}");

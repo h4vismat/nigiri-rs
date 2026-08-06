@@ -25,11 +25,14 @@ This README is the tour. [`docs/`](docs/README.md) is the depth behind it, organ
 trying to do.
 
 **New here?** [Tutorial: your first fixture-backed test](docs/tutorial-first-test.md) takes you from
-an empty crate to a passing test against a throwaway chain.
+an empty crate to a passing test against a throwaway chain. [Tutorial: a round trip across Liquid's
+peg](docs/tutorial-peg-round-trip.md) is the next one up: BTC into the sidechain and back out again,
+against a wired four-container pair.
 
 | Guide | For |
 | --- | --- |
 | [Run a throwaway regtest stack](docs/how-to-run-a-fixture.md) | Starting a fixture by hand, tuning its budget, swapping images |
+| [Peg in and peg out](docs/how-to-peg.md) | Getting a wired pair, claiming a real peg-in, releasing a simulated peg-out |
 | [Point a wallet at a fixture](docs/how-to-connect-a-wallet.md) | Wiring BDK or LWK to the runtime-mapped endpoints |
 | [Point at services you run](docs/how-to-point-at-your-own-services.md) | Custom endpoints, credentials, timeouts, response limits |
 | [Call any node RPC](docs/how-to-call-any-node-rpc.md) | Methods the curated API does not wrap |
@@ -37,8 +40,8 @@ an empty crate to a passing test against a throwaway chain.
 
 | Reference | Covers |
 | --- | --- |
-| [Client API](docs/reference-client.md) | `NigiriClient`, `NigiriConfig`, response records, network markers |
-| [Fixture API](docs/reference-fixtures.md) | `Fixture`, `FixtureBuilder`, `ContainerImage`, `FixtureChain` |
+| [Client API](docs/reference-client.md) | `NigiriClient`, `NigiriConfig`, `Peg`, response records, network markers |
+| [Fixture API](docs/reference-fixtures.md) | `Fixture`, `FixtureBuilder`, `PegPair`, `PegPairBuilder`, `ContainerImage`, `FixtureChain` |
 | [`#[nigiri_rs::test]`](docs/reference-test-macro.md) | Arguments, accepted signatures, every rejection message |
 | [Errors](docs/reference-errors.md) | `NigiriError` and `FixtureError`, variant by variant |
 
@@ -47,6 +50,7 @@ an empty crate to a passing test against a throwaway chain.
 | [Lifecycle ownership](docs/explanation-lifecycle-ownership.md) | Why the client crate never starts or stops anything |
 | [Typed networks](docs/explanation-typed-networks.md) | Why `Bitcoin` and `Liquid` are type parameters |
 | [What "ready" means](docs/explanation-fixture-readiness.md) | Why a fixture waits for three services to agree |
+| [What the peg simulates](docs/explanation-what-the-peg-simulates.md) | Which half of the peg is real, and what that costs you in assertions |
 
 ## Lifecycle ownership
 
@@ -307,7 +311,7 @@ Both `NigiriClient<Bitcoin>` and `NigiriClient<Liquid>` provide:
 
 ### Deliberate scope limits
 
-Peg-in and a simulated peg-out release exist on `Peg`, and `initpegoutwallet` remains unwrapped because PAK enforcement is off on this chain.
+Liquid's peg is covered by `Peg`, and half of it is real. Peg-in is genuine end to end: a real federation-controlled address, a real `claimpegin` with a real merkle proof. Peg-out is split — `sendtomainchain` is a genuine Elements call that genuinely burns L-BTC, but regtest has no federation to service it, so `release_peg_out` plays that part. **That release is a simulation with no reserve:** the BTC comes from the Bitcoin node's own wallet, total BTC on the mainchain side grows with every release, and no 1:1 invariant holds across the pair. `initpegoutwallet` is deliberately not wrapped: this chain runs with PAK enforcement off, so the node rejects the call outright, and `sendtomainchain` does not need it. See [Client API](docs/reference-client.md#peg) for the whole surface and [`PegPair`](docs/reference-fixtures.md#pegpair) for a wired four-container pair to run it against.
 
 The crate models only capabilities that the verified default Nigiri networks can execute. Custom federation lifecycle, chain configuration, and cross-chain orchestration remain the host application's responsibility.
 
@@ -392,7 +396,7 @@ cargo test -p nigiri-rs-testcontainers --all-targets --all-features
 
 Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other, and they can all run at once. Nothing here is `#[ignore]`d, on purpose: an ignored Docker test reports green having verified nothing, and this project has shipped that exact failure mode twice — once as a CI filter that matched zero tests and exited 0, once as a test that had never run in any CI job. Ignoring a test loses that signal; running it fails loudly instead when Docker is unavailable.
 
-One Bitcoin fixture is ready in about 3 seconds, well inside the 60-second default startup budget. Two started at once take about 4.4 seconds total, so parallelism itself costs roughly a second, not the 103 seconds an earlier note here claimed. That figure was recorded while unrelated runaway processes were saturating every core and said nothing about this crate. A Liquid fixture mines a single block instead of 101: Liquid has no block subsidy, so it funds its wallet by connecting the genesis outputs rather than by mining one.
+One Bitcoin fixture is ready in about 3 seconds, well inside the 60-second default startup budget. Two started at once take about 4.4 seconds total, so parallelism itself costs roughly a second, not the 103 seconds an earlier note here claimed. That figure was recorded while unrelated runaway processes were saturating every core and said nothing about this crate. A Liquid fixture mines a single block instead of 101: Liquid has no block subsidy, so it funds its wallet by connecting the genesis outputs rather than by mining one. A `PegPair` is four containers rather than two and starts its two halves in sequence, since the Elements node reads `-mainchainrpc*` while starting and needs the `bitcoind` already answering; its default budget is 120 seconds for that reason.
 
 ## License
 

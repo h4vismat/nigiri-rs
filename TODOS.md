@@ -105,36 +105,58 @@ Surfaced by the 0.3.0 specialist review:
   Liquid tests that used it were rewritten to `#[nigiri_rs::test]`, so the duplication crossed a
   crate boundary rather than going away.
 
+## Diagnostics
+
+### Attach the pair's container logs to a `Peg::connect` timeout
+
+**Priority:** P4
+
+`PegPairBuilder::start` runs `Peg::connect` under the shared deadline and propagates its expiry with
+`?`. That expiry is a `FixtureError::ReadinessTimeout`, which is one of only two variants
+`owned_start::attach_diagnostics` will enrich — so container logs *could* be attached there and are
+not. It is the one remaining place a pair could explain its own failure better than it does.
+
+Deliberately narrow. The neighbouring `Peg::connect` *failure* path is a different case and was
+settled during the peg-fixtures review: it arrives as `FixtureError::Client`, which has no
+diagnostics field, so the two `attach_inner_logs` calls that used to sit there read two container
+logs and discarded both. Those were removed rather than made to work. This item is only about the
+timeout path, where the variant can carry what is read.
+
+Low value in practice: a `Peg::connect` timeout means a hung `getsidechaininfo` on a node that
+already came up and passed its own readiness check, so the container log is less likely to be the
+thing that explains it than it is for a node that never started.
+
 ## Documentation
+
+### Make the container-cleanup one-liners safe when nothing matches
+
+**Priority:** P4
+
+`docs/reference-fixtures.md` and `docs/how-to-run-a-fixture.md` both give a hard-kill cleanup recipe
+built on `docker rm -f -v $(docker ps -aq --filter ...)`. When the filter matches nothing, the
+command substitution is empty and `docker rm` exits with a usage error rather than doing nothing —
+noise at exactly the moment a reader is already confused about whether they leaked containers. The
+same shape now appears in two pages, so it is worth fixing once in both.
+
+Pre-existing style rather than something this work introduced; the peg-fixtures branch only copied it
+to a second page while documenting how to clean up a four-container pair.
+
+## Completed
 
 ### Give the peg API a presence in `docs/`
 
-**Priority:** P2
+**Completed:** v0.5.0
 
-The peg API shipped fully documented **in rustdoc** — the module doc, the `Peg` struct doc, and
-every method carry their contracts, and the "peg-out is half real / no 1:1 invariant" warning
-renders on both `struct.Peg.html` and the crate index. It has **no presence in `docs/` at all**.
+The peg API had shipped fully documented in rustdoc and with no presence in `docs/` at all — the
+index contained zero occurrences of "peg". It now has a `Peg` section in `docs/reference-client.md`
+covering `connect`, the three accessors, both peg-in paths, both peg-out calls, and the three peg
+records; `PegPair` and `PegPairBuilder` sections in `docs/reference-fixtures.md`; the macro's new
+`PegPair` parameter in `docs/reference-test-macro.md`; the how-to `docs/how-to-peg.md`; the
+explanation `docs/explanation-what-the-peg-simulates.md`; and index entries in `docs/README.md`
+routing to each.
 
-`docs/README.md`, the index every page routes through, contains zero occurrences of "peg".
-`docs/reference-client.md` mentions `Peg` in one sentence, inside *Scope limits*. So a reader
-browsing the documentation site cannot discover the feature exists, while a reader in their editor
-sees it fully. Fifteen of the nineteen new public items have no coverage: `Peg`, `connect`, the
-three accessors, `peg_in_request`, `claim_peg_in`, `complete_peg_in`, `send_to_mainchain`,
-`release_peg_out`, `PegInRequest`, `PegIn`, and `PegOut`. Only the four `NigiriError` peg variants
-are covered, in `docs/reference-errors.md`.
-
-Nothing in `docs/` is **wrong** — the four pages that asserted peg was unsupported were corrected
-before merge. This is missing coverage, not stale coverage.
-
-Deliberately deferred to the `PegPair` work rather than written now. The pages worth having are
-task-oriented, and a how-to that cannot answer "how do I get a wired Bitcoin and Liquid pair"
-is half a page. That answer arrives with the fixture. When it does, the sweep wants: a `Peg`
-reference section, a how-to covering both directions, an explanation page distinguishing what is
-real from what is simulated, and index entries for each.
-
-`/document-generate` is the tool for it.
-
-## Completed
+Deferred to the `PegPair` work on purpose, and that was the right call: the how-to opens by starting
+a wired pair, which was not something a reader could do when this entry was written.
 
 ### Exercise all feature combinations in CI
 

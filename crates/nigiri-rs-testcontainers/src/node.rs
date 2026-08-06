@@ -39,16 +39,41 @@ pub(crate) fn request<C: FixtureChain>(
         generic = generic.with_entrypoint(entrypoint);
     }
 
-    // Appended, never substituted: a composite extends the chain's flag vector rather than
-    // restating it. `LightningStack` adds ZMQ publishers, `PegPair` adds the peg parameters.
-    let mut cmd = C::node_cmd();
-    cmd.extend_from_slice(extra_args);
+    let cmd = merge_node_args(C::node_cmd(), extra_args);
 
     Ok(generic
         .with_exposed_port(C::NODE_RPC_PORT.tcp())
         .with_network(network_name)
         .with_container_name(container_name)
         .with_cmd(cmd))
+}
+
+/// Extends the chain's own arguments with a composite's, letting the composite win a conflict.
+///
+/// A composite cannot simply append. `Liquid::node_cmd` sets `-validatepegin=0` and a peg pair
+/// needs `-validatepegin=1`; a vector carrying both says two contradictory things and leaves the
+/// node's behaviour resting on which occurrence Elements happens to prefer. So an argument the
+/// composite sets removes the chain's own, and everything else is appended in order.
+///
+/// A key is the text before the first `=`, or the whole token when there is none. Matching is
+/// exact, so `-validatepegin` cannot shadow `-validatepeginfoo`.
+pub(crate) fn merge_node_args(base: Vec<String>, extra: &[String]) -> Vec<String> {
+    let overridden: Vec<&str> = extra
+        .iter()
+        .map(|argument| argument_key(argument))
+        .collect();
+
+    let mut merged: Vec<String> = base
+        .into_iter()
+        .filter(|argument| !overridden.contains(&argument_key(argument)))
+        .collect();
+    merged.extend_from_slice(extra);
+    merged
+}
+
+/// The part of a node argument that says which setting it sets.
+fn argument_key(argument: &str) -> &str {
+    argument.split_once('=').map_or(argument, |(key, _)| key)
 }
 
 pub(crate) async fn start_node<C: FixtureChain>(
@@ -496,5 +521,118 @@ mod tests {
         // to compile.
         let cmd: Vec<String> = request.cmd().map(std::borrow::Cow::into_owned).collect();
         assert_eq!(cmd, Bitcoin::node_cmd());
+    }
+
+    // Catches a regression that appends a composite's argument beside the chain's conflicting one
+    // instead of replacing it. `Liquid::node_cmd` sets `-validatepegin=0` and a peg pair needs
+    // `1`; passing both leaves the node's behaviour resting on which occurrence Elements happens
+    // to prefer.
+    #[test]
+    fn merge_replaces_a_conflicting_chain_argument_in_place() {
+        let merged = super::merge_node_args(
+            vec![
+                "-chain=liquidregtest".to_owned(),
+                "-validatepegin=0".to_owned(),
+                "-printtoconsole=1".to_owned(),
+            ],
+            &["-validatepegin=1".to_owned()],
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                "-chain=liquidregtest".to_owned(),
+                "-printtoconsole=1".to_owned(),
+                "-validatepegin=1".to_owned(),
+            ],
+            "the chain's own setting must be dropped, not duplicated"
+        );
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|argument| argument.starts_with("-validatepegin"))
+                .count(),
+            1
+        );
+    }
+
+    // Catches a regression that drops a composite's non-conflicting arguments, or reorders either
+    // side. LightningStack's ZMQ publishers are additions the chain says nothing about.
+    #[test]
+    fn merge_appends_what_the_chain_does_not_set_and_keeps_both_orders() {
+        let merged = super::merge_node_args(
+            vec!["-chain=regtest".to_owned(), "-txindex=1".to_owned()],
+            &[
+                "-zmqpubrawblock=tcp://0.0.0.0:28332".to_owned(),
+                "-zmqpubrawtx=tcp://0.0.0.0:28333".to_owned(),
+            ],
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                "-chain=regtest".to_owned(),
+                "-txindex=1".to_owned(),
+                "-zmqpubrawblock=tcp://0.0.0.0:28332".to_owned(),
+                "-zmqpubrawtx=tcp://0.0.0.0:28333".to_owned(),
+            ]
+        );
+    }
+
+    // Catches a regression that matches argument keys by prefix, which would let `-validatepegin`
+    // silently delete an unrelated `-validatepeginfoo`, and one that mishandles a valueless flag.
+    #[test]
+    fn merge_matches_argument_keys_exactly() {
+        let merged = super::merge_node_args(
+            vec![
+                "-validatepeginfoo=1".to_owned(),
+                "-server".to_owned(),
+                "-txindex=1".to_owned(),
+            ],
+            &["-validatepegin=1".to_owned(), "-server".to_owned()],
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                "-validatepeginfoo=1".to_owned(),
+                "-txindex=1".to_owned(),
+                "-validatepegin=1".to_owned(),
+                "-server".to_owned(),
+            ],
+            "only an exact key match may be replaced"
+        );
+    }
+
+    // Catches a regression in the path every existing call site takes: no extras must leave the
+    // chain's vector untouched, not merely equal to it by accident.
+    #[test]
+    fn merge_without_extras_is_the_chains_own_vector() {
+        use nigiri_rs_core::Liquid;
+
+        assert_eq!(
+            super::merge_node_args(Liquid::node_cmd(), &[]),
+            Liquid::node_cmd()
+        );
+    }
+
+    // Catches a regression that stops `request` merging at all, which is the only place the merge
+    // reaches a real container.
+    #[test]
+    fn request_overrides_the_chains_conflicting_argument() {
+        use nigiri_rs_core::Liquid;
+
+        let request = super::request::<Liquid>(
+            &ContainerImage::elements_default(),
+            "nigiri-test-fixture",
+            "nigiri-elements-fixture",
+            &["-validatepegin=1".to_owned()],
+        )
+        .expect("the pinned Elements image is valid");
+
+        let cmd: Vec<String> = request.cmd().map(std::borrow::Cow::into_owned).collect();
+        assert!(cmd.contains(&"-validatepegin=1".to_owned()), "{cmd:?}");
+        assert!(!cmd.contains(&"-validatepegin=0".to_owned()), "{cmd:?}");
+        assert_eq!(cmd.len(), Liquid::node_cmd().len(), "{cmd:?}");
     }
 }

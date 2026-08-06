@@ -201,15 +201,23 @@ async fn mint_then_send(client: NigiriClient<Liquid>) -> Result<(), BoxError> {
 }
 ```
 
+## The peg lives on another page
+
+Peg-in and the simulated peg-out release are not on `NigiriClient` at all — they need both chains at
+once, so they live on [`Peg`](reference-client.md#peg). See
+[How to peg in and peg out](how-to-peg.md) for both flows, and
+[What the peg simulates](explanation-what-the-peg-simulates.md) for which half is real and what you
+may assert about it.
+
 ## What is deliberately not here
 
-Peg-in and a simulated peg-out release exist on `Peg`. `initpegoutwallet` remains unwrapped because
-PAK enforcement is off on this chain.
+`initpegoutwallet` remains unwrapped: PAK enforcement is off on this chain, so the node rejects the
+call outright, and `sendtomainchain` does not need it.
 
 The crate models only what the verified default Liquid network can actually execute. Federation
 lifecycle, chain configuration, and cross-chain orchestration stay with your application.
 
-If you need those methods on a custom environment that does enable PAK, reach them through
+If you need `initpegoutwallet` on a custom environment that does enable PAK, reach it through
 [`rpc()`](how-to-call-any-node-rpc.md).
 
 ## Troubleshooting
