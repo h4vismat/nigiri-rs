@@ -133,7 +133,7 @@ impl<C: FixtureChain> Fixture<C> {
     /// Test-only, and only for a composite's teardown test: proving a pair removes everything it
     /// created means naming all four containers, and these handles are private to this type.
     #[cfg(test)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "the composite teardown test that calls this lands in the next task")]
     pub(crate) fn container_ids(&self) -> [String; 2] {
         [
             self.handles.electrs.id().to_owned(),
@@ -166,7 +166,13 @@ struct TopologyNames {
 
 /// Scopes every Docker resource of one fixture to a single UUID, so concurrent fixtures cannot
 /// collide and a leaked resource is traceable to the fixture that made it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the thin wrapper survives for the naming unit test while start_under calls topology_names_on"
+    )
+)]
 fn topology_names<C: FixtureChain>() -> TopologyNames {
     topology_names_on::<C>(None)
 }
