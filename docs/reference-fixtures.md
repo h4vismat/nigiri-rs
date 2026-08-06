@@ -463,3 +463,6 @@ list and what triggers each.
 - [`#[nigiri_rs::test]`](reference-test-macro.md) — the same fixtures without the preamble
 - [What "ready" means](explanation-fixture-readiness.md)
 - [Lifecycle ownership](explanation-lifecycle-ownership.md)
+- [Tutorial: a round trip across Liquid's peg](tutorial-peg-round-trip.md) — `PegPair` from an empty
+  crate
+- [How to peg in and peg out](how-to-peg.md) — what to do with a started pair

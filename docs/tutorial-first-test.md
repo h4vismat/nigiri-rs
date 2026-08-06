@@ -218,6 +218,8 @@ mutate wallets in parallel, because none of them can see each other's chain.
 Where to go next:
 
 - [How to point a wallet at a fixture](how-to-connect-a-wallet.md) — the actual reason to want this.
+- [Tutorial: a round trip across Liquid's peg](tutorial-peg-round-trip.md) — the next tutorial up:
+  two chains wired together, and value crossing between them.
 - [How to call any node RPC](how-to-call-any-node-rpc.md) — for anything the curated API doesn't
   wrap.
 - [`#[nigiri_rs::test]` reference](reference-test-macro.md) — `startup_timeout`, `flavor`, and every

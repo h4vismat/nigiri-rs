@@ -8,6 +8,9 @@ The [repository README](../README.md) is the tour. These pages are the depth beh
 
 - **[Tutorial: your first fixture-backed test](tutorial-first-test.md)** — from an empty crate to a
   passing test that funds an address on a throwaway chain. No Nigiri installation, no manual setup.
+- **[Tutorial: a round trip across Liquid's peg](tutorial-peg-round-trip.md)** — BTC into the
+  sidechain and back out again, against a wired four-container pair. Start here if the peg is why
+  you came.
 
 ## How-to guides
 

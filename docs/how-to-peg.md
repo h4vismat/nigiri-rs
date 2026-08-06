@@ -440,6 +440,8 @@ shared network name is the only thing they have in common; see
 
 ## Related
 
+- [Tutorial: a round trip across Liquid's peg](tutorial-peg-round-trip.md) — the same operations from
+  an empty crate, if you have not pegged anything before
 - [What the peg simulates](explanation-what-the-peg-simulates.md) — which half is real, and what that
   costs you in assertions
 - [Client API reference](reference-client.md#peg) — every `Peg` method and the three peg records

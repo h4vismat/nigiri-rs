@@ -151,6 +151,8 @@ repeats it.
 
 ## Related
 
+- [Tutorial: a round trip across Liquid's peg](tutorial-peg-round-trip.md) — the boundary described
+  here, met one step at a time against real containers
 - [How to peg in and peg out](how-to-peg.md) — the working flows in both directions
 - [Client API reference](reference-client.md#peg) — every `Peg` method, and the peg records
 - [Fixture API reference](reference-fixtures.md#pegpair) — the four-container pair the flows run

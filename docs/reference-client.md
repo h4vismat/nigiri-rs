@@ -670,3 +670,7 @@ configuration, and cross-chain orchestration stay with the host application.
 - [Errors](reference-errors.md)
 - [Fixture API](reference-fixtures.md)
 - [Typed networks](explanation-typed-networks.md)
+- [Tutorial: a round trip across Liquid's peg](tutorial-peg-round-trip.md) — the `Peg` methods above,
+  from an empty crate
+- [How to peg in and peg out](how-to-peg.md)
+- [What the peg simulates](explanation-what-the-peg-simulates.md) — which half of peg-out is real
