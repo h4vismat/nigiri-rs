@@ -307,7 +307,7 @@ Both `NigiriClient<Bitcoin>` and `NigiriClient<Liquid>` provide:
 
 ### Deliberate scope limits
 
-Peg-in and a simulated peg-out release exist on `Peg`, and `initpegoutwallet` remains unwrapped because PAK enforcement is off on this chain.
+Liquid's peg is covered by `Peg`, and half of it is real. Peg-in is genuine end to end: a real federation-controlled address, a real `claimpegin` with a real merkle proof. Peg-out is split — `sendtomainchain` is a genuine Elements call that genuinely burns L-BTC, but regtest has no federation to service it, so `release_peg_out` plays that part. **That release is a simulation with no reserve:** the BTC comes from the Bitcoin node's own wallet, total BTC on the mainchain side grows with every release, and no 1:1 invariant holds across the pair. `initpegoutwallet` is deliberately not wrapped: this chain runs with PAK enforcement off, so the node rejects the call outright, and `sendtomainchain` does not need it. See [Client API](docs/reference-client.md#peg) for the whole surface and [`PegPair`](docs/reference-fixtures.md#pegpair) for a wired four-container pair to run it against.
 
 The crate models only capabilities that the verified default Nigiri networks can execute. Custom federation lifecycle, chain configuration, and cross-chain orchestration remain the host application's responsibility.
 

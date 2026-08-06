@@ -7,6 +7,8 @@ A fixture is one throwaway regtest stack: a node with a funded wallet, an Electr
 it, and a `NigiriClient` pointed at both. Nothing is shared between fixtures, so tests can run in
 parallel and mine or reorg freely without coordinating.
 
+[`PegPair`](#pegpair) is the one composite: two stacks wired for Liquid's peg, torn down together.
+
 Requires a running Docker daemon. No Nigiri installation. Podman is untested.
 
 ## `Fixture<C>`
@@ -162,6 +164,147 @@ collide and a leaked resource is traceable to the fixture that made it.
 The UUID suffix is shared across all four. If you ever need to clean up after a hard kill:
 `docker rm -f -v` on anything matching those prefixes — the `-v` matters, it takes the anonymous
 volumes with it.
+
+## `PegPair`
+
+```rust
+pub struct PegPair { /* private */ }
+```
+
+Implements `Debug` by hand, for the same reason `Fixture` does — both held clients carry the RPC
+password. Not `Clone`.
+
+A pair is **four containers on one Docker network**: `bitcoind` with its Electrs, and `elementsd` with
+its Electrs. The Elements node runs `-validatepegin=1` and reaches `bitcoind` over `-mainchainrpchost`,
+`-mainchainrpcport`, `-mainchainrpcuser`, and `-mainchainrpcpassword`, addressing it by container
+name. Those five arguments are the entire difference between a pair and two unrelated fixtures, and
+they are what lets a real `claimpegin` validate against a real deposit.
+
+| Method | Signature |
+| --- | --- |
+| `start` | `async fn start() -> Result<PegPair, FixtureError>` |
+| `builder` | `fn builder() -> PegPairBuilder` |
+| `bitcoin` | `fn bitcoin(&self) -> &NigiriClient<Bitcoin>` |
+| `liquid` | `fn liquid(&self) -> &NigiriClient<Liquid>` |
+| `peg` | `fn peg(&self) -> &Peg` |
+
+```rust,no_run
+use bitcoin::Amount;
+use nigiri_rs::testcontainers::PegPair;
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let pair = PegPair::start().await?;
+
+let pegged = pair.peg().complete_peg_in(Amount::from_sat(100_000)).await?;
+assert_eq!(pegged.amount, Amount::from_sat(100_000));
+
+// Either half is still an ordinary client.
+assert_eq!(pair.liquid().block_height().await?, 1);
+# Ok(())
+# }
+```
+
+`start()` is `builder().start()` with the pinned defaults. `peg()` returns the
+[`Peg`](reference-client.md#peg) that `start` already verified — that page documents every method on
+it, including what `Peg::connect` can and cannot prove.
+
+`bitcoin()` and `liquid()` behave exactly as a standalone `Fixture`'s client of that chain does. The
+same two nodes are also reachable as `peg().bitcoin()` and `peg().liquid()`.
+
+### Lifetime and teardown
+
+**The pair owns all four containers.** Dropping it removes them, their anonymous volumes, and the
+shared network. Nothing survives the test, and the network belongs to neither half alone — which is
+why the pair, not either inner stack, is what you keep alive.
+
+**The Liquid stack is released first.** `elementsd` holds an RPC connection to `bitcoind` through
+`-mainchainrpc*` and must not outlive it, so the two inner stacks live in their own struct whose field
+order *is* the teardown order. A test in `peg_pair.rs` pins that order with drop recorders.
+
+`bitcoin()`, `liquid()`, and `peg()` all return borrows, so the compiler keeps the pair alive for as
+long as you use them. The `NigiriClient` caveat from `Fixture` still applies: a *cloned* client
+outliving the pair points at containers that no longer exist.
+
+### What a started pair guarantees
+
+When `start()` returns:
+
+- Both stacks are on **one** Docker network.
+- Each chain has satisfied the standalone fixture's three-way agreement — node, Esplora, and Electrum
+  on the same tip — so the arrival heights are the usual 101 for Bitcoin and 1 for Liquid.
+- `Peg::connect` has already run against them, so `peg()` needs no fallible step of its own.
+
+A pair whose Elements node reports a parent chain the Bitcoin node does not have **fails at `start`**,
+as `FixtureError::Client` wrapping `NigiriError::PegNotConfigured`, rather than surfacing later inside
+a claim. Verifying at startup also charges the check to the same clock as everything above it.
+
+Note what that check is worth: it catches a Liquid node built for a different parent chain, not an
+unwired one. Wiring here is guaranteed by construction — the pair passes `bitcoind`'s container name
+to `elementsd` itself — not by the verification. See
+[What `connect` proves](reference-client.md#what-connect-proves-and-what-it-does-not).
+
+### The peg-out half is simulated and holds no reserve
+
+`Peg::release_peg_out` pays the peg-out's destination from the **Bitcoin node's own wallet**, because
+regtest has no functionaries to pay it from a locked reserve. Total BTC on the mainchain side grows
+with every release, and no 1:1 invariant holds across the pair — do not assert one. The Liquid half
+stays honest: `sendtomainchain` genuinely burns. Full detail on the client page under
+[Peg-out has no reserve](reference-client.md#peg-out-has-no-reserve).
+
+### Startup cost
+
+Twice the containers, so budget for twice a standalone fixture. **The default `startup_timeout` is
+120 seconds**, against 60 for `FixtureBuilder`, and it covers all four containers *and* the pairing
+check under one deadline.
+
+The Bitcoin half comes up completely before the Elements node is started, and not for tidiness:
+`elementsd` reads `-mainchainrpc*` while starting, so the node it points at has to be answering RPC by
+then. The two halves therefore cannot overlap the way two independent fixtures do under
+`#[nigiri_rs::test]` — a pair pays for its halves one after the other.
+
+No timings for a pair are recorded: the standalone figures above are its floor, not its cost. As with
+a standalone fixture, **the first run on a machine is the slow one** — it pulls four pinned images.
+Raise `startup_timeout` for that.
+
+## `PegPairBuilder`
+
+```rust
+pub struct PegPairBuilder { /* private */ }
+```
+
+Derives `Clone` and `Debug`. Every setter takes and returns `self`. Five overrides, one per container
+plus the budget:
+
+| Method | Signature | Default |
+| --- | --- | --- |
+| `startup_timeout` | `fn startup_timeout(self, timeout: Duration) -> Self` | 120 s |
+| `bitcoind_image` | `fn bitcoind_image(self, image: ContainerImage) -> Self` | `Bitcoin::node_image_default()` |
+| `bitcoin_electrs_image` | `fn bitcoin_electrs_image(self, image: ContainerImage) -> Self` | `Bitcoin::electrs_image_default()` |
+| `elements_image` | `fn elements_image(self, image: ContainerImage) -> Self` | `Liquid::node_image_default()` |
+| `liquid_electrs_image` | `fn liquid_electrs_image(self, image: ContainerImage) -> Self` | `Liquid::electrs_image_default()` |
+| `start` | `async fn start(self) -> Result<PegPair, FixtureError>` | — |
+
+```rust,no_run
+use std::time::Duration;
+use nigiri_rs::testcontainers::PegPair;
+
+# async fn example() -> Result<(), nigiri_rs::testcontainers::FixtureError> {
+let pair = PegPair::builder()
+    .startup_timeout(Duration::from_secs(300))
+    .start()
+    .await?;
+# let _ = pair;
+# Ok(())
+# }
+```
+
+The four images are the same [pinned defaults](#pinned-defaults) a standalone fixture uses, named
+separately here because a pair runs all four at once and the two Electrs roles are distinct images.
+
+Like `FixtureBuilder`, `startup_timeout` bounds **the whole startup** rather than any step within it,
+and **all four** image descriptors are validated before the first container starts. That last point
+matters more for a pair than for a single fixture: the Bitcoin half runs to completion first, so an
+unusable Elements image would otherwise be rejected only after two containers were already up.
 
 ## `ContainerImage`
 
