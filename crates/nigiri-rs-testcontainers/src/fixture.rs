@@ -86,25 +86,11 @@ impl<C: FixtureChain> Fixture<C> {
     ///
     /// Crate-private: a composite attaches its own containers to it. The name is an implementation
     /// detail of this crate's topology and is deliberately not public.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composites that call this — PegPair, LightningStack — land after it"
-        )
-    )]
     pub(crate) fn network_name(&self) -> &str {
         &self.names.network
     }
 
     /// The node's container name, which sibling containers dial it by on the fixture network.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composites that call this — PegPair, LightningStack — land after it"
-        )
-    )]
     pub(crate) fn node_container_name(&self) -> &str {
         &self.names.node
     }
@@ -115,13 +101,6 @@ impl<C: FixtureChain> Fixture<C> {
     /// indexer beside it, and those handles are private to this type. The order matches `start`'s
     /// own failure path: the indexer first, then the node, so the node's log — the service most
     /// failures come back to — ends up nearest the error text.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composites that call this — PegPair, LightningStack — land after it"
-        )
-    )]
     pub(crate) async fn attach_inner_logs(&self, error: FixtureError) -> FixtureError {
         let with_electrs =
             attach_container_log(electrs::SERVICE, error, &self.handles.electrs).await;
@@ -133,10 +112,6 @@ impl<C: FixtureChain> Fixture<C> {
     /// Test-only, and only for a composite's teardown test: proving a pair removes everything it
     /// created means naming all four containers, and these handles are private to this type.
     #[cfg(test)]
-    #[expect(
-        dead_code,
-        reason = "the composite teardown test that calls this lands in the next task"
-    )]
     pub(crate) fn container_ids(&self) -> [String; 2] {
         [
             self.handles.electrs.id().to_owned(),
@@ -219,13 +194,6 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     /// Crate-private, and deliberately additive: a composite extends the chain's flag vector and
     /// must not have to restate the flags the chain owns.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composites that call this — PegPair, LightningStack — land after it"
-        )
-    )]
     pub(crate) fn extra_node_args(mut self, args: Vec<String>) -> Self {
         self.extra_node_args = args;
         self
@@ -242,13 +210,6 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     /// references: `testcontainers` keys created networks by name and removes one only once the
     /// last container holding it is gone.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composites that call this — PegPair, LightningStack — land after it"
-        )
-    )]
     pub(crate) fn network(mut self, name: String) -> Self {
         self.network = Some(name);
         self

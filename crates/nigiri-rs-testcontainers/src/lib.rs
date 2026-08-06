@@ -19,6 +19,10 @@
 //!
 //! `Fixture::<Liquid>::start` starts the same way; swap the type parameter.
 //!
+//! [`PegPair`] starts a wired pair instead: four containers on one network, with the Elements node
+//! validating peg-ins against the `bitcoind` beside it. Its peg-in is real; its peg-out release is
+//! simulated and holds no reserve. See [`PegPair`] and [`nigiri_rs_core::Peg`].
+//!
 //! # What a fixture requires and guarantees
 //!
 //! Docker must be running; no Nigiri installation is needed. Ports are chosen by the runtime, so read
@@ -65,6 +69,7 @@ mod fixture;
 mod image;
 mod node;
 mod owned_start;
+mod peg_pair;
 mod readiness;
 
 pub use chain::FixtureChain;
@@ -72,6 +77,7 @@ pub use error::FixtureError;
 pub use fixture::{Fixture, FixtureBuilder};
 pub use image::ContainerImage;
 pub use nigiri_rs_core::{Bitcoin, ElectrumEndpoint, Liquid};
+pub use peg_pair::{PegPair, PegPairBuilder};
 
 /// The fixture's regtest RPC credentials.
 ///
