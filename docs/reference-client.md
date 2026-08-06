@@ -365,7 +365,9 @@ the first real evidence of wiring is a `claimpegin` that succeeds.
 | `pegin_confirmation_depth` | `fn pegin_confirmation_depth(&self) -> u64` | Confirmations a deposit needs before it can be claimed, as the sidechain reported them to `connect`. |
 
 All three are synchronous, `#[must_use]`, and free — no request is made. `pegin_confirmation_depth`
-is 8 on both pinned Elements images; read it rather than hardcoding that, and see
+is 8 on the pinned Elements image, `blockstream/elementsd:23.3.3` — the only one pinned — and was
+also 8 on the other Elements build this was measured against. Read it rather than hardcoding it, and
+see
 [the mining note](#complete_peg_in-mines-and-how-many-blocks-is-not-fixed) for why reaching it is
 necessary but not sufficient.
 
@@ -475,8 +477,11 @@ your own encoding and your own claim handling, not the federation's behaviour.
 ### Peg records
 
 All three derive `Debug`, `Clone`, `PartialEq`, `Eq`, and every field is public. Unlike the
-[response records](#response-records) below, none of them is `Deserialize`: each is assembled by this
-crate from more than one call rather than parsed out of one response.
+[response records](#response-records) below, none of them is `Deserialize`, for two different
+reasons. `PegIn` and `PegOut` are assembled by this crate from more than one call, so there is no
+single response to parse them out of. `PegInRequest` does come from one call, `getpeginaddress`, but
+its `mainchain_address` has to be network-checked against regtest on the way in — a step a derived
+`Deserialize` would skip — so it is built by hand too.
 
 ```rust
 pub struct PegInRequest {

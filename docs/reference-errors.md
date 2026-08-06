@@ -153,7 +153,14 @@ claim. `Peg::complete_peg_in` treats this as retryable and mines another block.
 > `peg is not configured: {detail}`
 
 `Peg::connect` compared the Liquid node's `getsidechaininfo` parent block hash against the Bitcoin
-node's genesis and they did not match: the two nodes were never wired together as a peg pair.
+node's genesis and they did not match, so the Elements node was built for a different parent chain
+than this `bitcoind` serves.
+
+It does **not** mean the two were never wired together. That comparison cannot tell a wired pair from
+two unrelated nodes in either direction: regtest's genesis is a hardcoded chain parameter, so
+independent nodes agree on it, and a genuinely wired pair still mismatches if its Elements node
+carries other chain parameters. See
+[What `connect` proves](reference-client.md#what-connect-proves-and-what-it-does-not).
 
 ## `FixtureError`
 

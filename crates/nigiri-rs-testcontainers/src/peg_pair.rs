@@ -208,10 +208,14 @@ impl PegPairBuilder {
             Err(error) => return Err(bitcoin.attach_inner_logs(error).await),
         };
 
-        // Run here rather than left to the first peg call: a mis-wired pair is a startup failure,
-        // and charged to the same clock as everything above it. A mis-wired pair surfaces as
-        // `NigiriError::PegNotConfigured`, whose detail already names both chains' block hashes;
-        // `FixtureError::Client` has no diagnostics field to attach a container log to, so none is.
+        // Run here rather than left to the first peg call: a parent-chain disagreement is then a
+        // startup failure, charged to the same clock as everything above it. Note how narrow that
+        // is — `Peg::connect` only compares the two reported parent chains, which catches an
+        // Elements image built for a different parent chain and cannot tell a wired pair from two
+        // unrelated nodes. Wiring is guaranteed by `peg_node_args` and the shared network above,
+        // not by this check. A disagreement surfaces as `NigiriError::PegNotConfigured`, whose
+        // detail already names both chains' block hashes; `FixtureError::Client` has no diagnostics
+        // field to attach a container log to, so none is.
         let paired = deadline
             .run(
                 PEG_SERVICE,

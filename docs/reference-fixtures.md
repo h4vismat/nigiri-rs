@@ -161,9 +161,30 @@ collide and a leaked resource is traceable to the fixture that made it.
 | Liquid node | `nigiri-rs-elements-<uuid>` |
 | Indexer | `nigiri-rs-electrs-<uuid>` |
 
-The UUID suffix is shared across all four. If you ever need to clean up after a hard kill:
-`docker rm -f -v` on anything matching those prefixes — the `-v` matters, it takes the anonymous
-volumes with it.
+One standalone fixture's three resources — its network, its node, and its indexer — share one UUID.
+
+**A [`PegPair`](#pegpair) does not.** Its two inner fixtures generate **independent** UUIDs and share
+only the network *name*: the Bitcoin half's `nigiri-rs-fixture-<uuid-a>` is handed to the Liquid half,
+whose own two containers are suffixed `<uuid-b>`. So no single suffix matches all four containers of a
+pair, and a recipe that greps for one cleans up half of it.
+
+Teardown runs on `Drop`, including while panicking, but a `SIGKILL` skips it. After a hard kill the
+network is the only thing tying a pair's four containers together, so either ask it who is attached or
+sweep the prefixes:
+
+```sh
+# One pair, by its network: this lists all four containers.
+docker network inspect nigiri-rs-fixture-<uuid> \
+    --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}'
+
+# Everything this crate left behind, pairs included.
+docker rm -f -v $(docker ps -aq --filter "name=nigiri-rs-")
+docker network rm $(docker network ls -q --filter "name=nigiri-rs-fixture-")
+```
+
+The `-v` matters — without it the anonymous volumes stay. And `docker rm` never removes a network, so
+the last line is not optional: a killed run leaves its network behind even after every container of it
+is gone.
 
 ## `PegPair`
 
@@ -177,7 +198,8 @@ password. Not `Clone`.
 A pair is **four containers on one Docker network**: `bitcoind` with its Electrs, and `elementsd` with
 its Electrs. The Elements node runs `-validatepegin=1` and reaches `bitcoind` over `-mainchainrpchost`,
 `-mainchainrpcport`, `-mainchainrpcuser`, and `-mainchainrpcpassword`, addressing it by container
-name. Those five arguments are the entire difference between a pair and two unrelated fixtures, and
+name. Those five arguments **and the shared network** are the difference between a pair and two
+unrelated fixtures — a container name is no use without a network on which it resolves — and together
 they are what lets a real `claimpegin` validate against a real deposit.
 
 | Method | Signature |

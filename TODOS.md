@@ -105,36 +105,22 @@ Surfaced by the 0.3.0 specialist review:
   Liquid tests that used it were rewritten to `#[nigiri_rs::test]`, so the duplication crossed a
   crate boundary rather than going away.
 
-## Documentation
+## Completed
 
 ### Give the peg API a presence in `docs/`
 
-**Priority:** P2
+**Completed:** v0.5.0
 
-The peg API shipped fully documented **in rustdoc** — the module doc, the `Peg` struct doc, and
-every method carry their contracts, and the "peg-out is half real / no 1:1 invariant" warning
-renders on both `struct.Peg.html` and the crate index. It has **no presence in `docs/` at all**.
+The peg API had shipped fully documented in rustdoc and with no presence in `docs/` at all — the
+index contained zero occurrences of "peg". It now has a `Peg` section in `docs/reference-client.md`
+covering `connect`, the three accessors, both peg-in paths, both peg-out calls, and the three peg
+records; `PegPair` and `PegPairBuilder` sections in `docs/reference-fixtures.md`; the macro's new
+`PegPair` parameter in `docs/reference-test-macro.md`; the how-to `docs/how-to-peg.md`; the
+explanation `docs/explanation-what-the-peg-simulates.md`; and index entries in `docs/README.md`
+routing to each.
 
-`docs/README.md`, the index every page routes through, contains zero occurrences of "peg".
-`docs/reference-client.md` mentions `Peg` in one sentence, inside *Scope limits*. So a reader
-browsing the documentation site cannot discover the feature exists, while a reader in their editor
-sees it fully. Fifteen of the nineteen new public items have no coverage: `Peg`, `connect`, the
-three accessors, `peg_in_request`, `claim_peg_in`, `complete_peg_in`, `send_to_mainchain`,
-`release_peg_out`, `PegInRequest`, `PegIn`, and `PegOut`. Only the four `NigiriError` peg variants
-are covered, in `docs/reference-errors.md`.
-
-Nothing in `docs/` is **wrong** — the four pages that asserted peg was unsupported were corrected
-before merge. This is missing coverage, not stale coverage.
-
-Deliberately deferred to the `PegPair` work rather than written now. The pages worth having are
-task-oriented, and a how-to that cannot answer "how do I get a wired Bitcoin and Liquid pair"
-is half a page. That answer arrives with the fixture. When it does, the sweep wants: a `Peg`
-reference section, a how-to covering both directions, an explanation page distinguishing what is
-real from what is simulated, and index entries for each.
-
-`/document-generate` is the tool for it.
-
-## Completed
+Deferred to the `PegPair` work on purpose, and that was the right call: the how-to opens by starting
+a wired pair, which was not something a reader could do when this entry was written.
 
 ### Exercise all feature combinations in CI
 
