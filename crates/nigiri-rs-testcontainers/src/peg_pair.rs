@@ -209,7 +209,9 @@ impl PegPairBuilder {
         };
 
         // Run here rather than left to the first peg call: a mis-wired pair is a startup failure,
-        // and charged to the same clock as everything above it.
+        // and charged to the same clock as everything above it. A mis-wired pair surfaces as
+        // `NigiriError::PegNotConfigured`, whose detail already names both chains' block hashes;
+        // `FixtureError::Client` has no diagnostics field to attach a container log to, so none is.
         let paired = deadline
             .run(
                 PEG_SERVICE,
@@ -219,10 +221,7 @@ impl PegPairBuilder {
             .await?;
         let peg = match paired {
             Ok(peg) => peg,
-            Err(source) => {
-                let error = liquid.attach_inner_logs(FixtureError::Client(source)).await;
-                return Err(bitcoin.attach_inner_logs(error).await);
-            }
+            Err(source) => return Err(FixtureError::Client(source)),
         };
 
         Ok(PegPair {
