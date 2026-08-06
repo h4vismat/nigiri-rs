@@ -14,6 +14,7 @@
 use std::time::Duration;
 
 use bitcoin::Amount;
+use nigiri_rs::testcontainers::PegPair;
 use nigiri_rs::{Bitcoin, Liquid, NigiriClient};
 use serde::Deserialize;
 
@@ -196,5 +197,20 @@ async fn liquid_complete_shared_and_asset_contract(
     client
         .wait_for_confirmation(&asset_faucet_txid, Duration::from_secs(30))
         .await?;
+    Ok(())
+}
+
+// Catches a regression in the pair parameter: the wrapper must start the wired stack, hand the body
+// a `PegPair` that owns it, and keep all four containers alive for the test's duration.
+#[nigiri_rs::test(startup_timeout = 180)]
+async fn a_peg_pair_parameter_starts_a_wired_stack(peg: PegPair) -> Result<(), BoxError> {
+    let pegged = peg.peg().complete_peg_in(Amount::from_sat(100_000)).await?;
+
+    assert_eq!(pegged.amount, Amount::from_sat(100_000));
+    // Both halves are reachable through the pair, which is what distinguishes it from two
+    // independent stacks. The Bitcoin tip is above the funding height because `complete_peg_in`
+    // mined to the confirmation depth.
+    assert_eq!(peg.liquid().block_height().await?, 1);
+    assert!(peg.bitcoin().block_height().await? >= 101);
     Ok(())
 }

@@ -15,7 +15,8 @@ pub(crate) const RESERVED_PREFIX: &str = "__nigiri_rs_";
 ///
 /// The rejection message, the documentation, and every future composite read this. With three
 /// composites in flight it would otherwise be spelled out at each site and drift.
-pub(crate) const ACCEPTED_PARAMETERS: &str = "`NigiriClient<Bitcoin>` or `NigiriClient<Liquid>`";
+pub(crate) const ACCEPTED_PARAMETERS: &str =
+    "`NigiriClient<Bitcoin>`, `NigiriClient<Liquid>`, or `PegPair`";
 
 /// One fixture the generated wrapper must start, derived from one function parameter.
 ///
@@ -29,13 +30,15 @@ pub(crate) enum FixtureParam {
         /// The chain marker, e.g. `Bitcoin`, taken from `NigiriClient<Bitcoin>`.
         chain: syn::Path,
     },
+    /// `PegPair`, a wired Bitcoin and Liquid stack. Names no chain: it is both.
+    PegPair { ident: syn::Ident },
 }
 
 impl FixtureParam {
     /// The parameter's binding, which every variant has and the expander always needs.
     pub(crate) fn ident(&self) -> &syn::Ident {
         match self {
-            Self::Client { ident, .. } => ident,
+            Self::Client { ident, .. } | Self::PegPair { ident } => ident,
         }
     }
 }
@@ -204,6 +207,12 @@ fn fixture_param(arg: &FnArg) -> Result<FixtureParam> {
         ));
     }
 
+    if is_peg_pair(&typed.ty) {
+        return Ok(FixtureParam::PegPair {
+            ident: pat.ident.clone(),
+        });
+    }
+
     let chain = chain_of(&typed.ty)?;
 
     Ok(FixtureParam::Client {
@@ -245,6 +254,22 @@ fn chain_of(ty: &Type) -> Result<syn::Path> {
     Ok(chain.path.clone())
 }
 
+/// Whether a parameter names the wired pair.
+///
+/// Matched on the last path segment, like [`chain_of`], so `PegPair` and
+/// `nigiri_rs::testcontainers::PegPair` both work. The exported type takes no generic arguments, so
+/// a `PegPair<…>` is something else and falls through to `chain_of`'s rejection rather than being
+/// accepted and expanded into code that cannot compile.
+fn is_peg_pair(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+
+    path.path.segments.last().is_some_and(|segment| {
+        segment.ident == "PegPair" && matches!(segment.arguments, PathArguments::None)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ACCEPTED_PARAMETERS, FixtureParam, parse};
@@ -262,7 +287,9 @@ mod tests {
         .expect("a NigiriClient parameter is accepted");
 
         assert_eq!(parsed.fixtures.len(), 1);
-        let FixtureParam::Client { ident, chain } = &parsed.fixtures[0];
+        let FixtureParam::Client { ident, chain } = &parsed.fixtures[0] else {
+            panic!("a NigiriClient parameter must parse into the client variant");
+        };
         assert_eq!(ident.to_string(), "bitcoin");
         assert_eq!(
             chain
@@ -292,5 +319,50 @@ mod tests {
         };
 
         assert!(error.to_string().contains(ACCEPTED_PARAMETERS), "{error}");
+    }
+
+    // Catches a regression that stops recognizing the wired pair, or that tries to read a chain out
+    // of a parameter that names none.
+    #[test]
+    fn a_peg_pair_parameter_parses_into_the_pair_variant() {
+        for signature in [
+            quote::quote! { async fn a_test(peg: PegPair) {} },
+            quote::quote! { async fn a_test(peg: nigiri_rs::testcontainers::PegPair) {} },
+        ] {
+            let parsed = parse(proc_macro2::TokenStream::new(), signature)
+                .expect("a PegPair parameter is accepted");
+
+            assert_eq!(parsed.fixtures.len(), 1);
+            let FixtureParam::PegPair { ident } = &parsed.fixtures[0] else {
+                panic!("a PegPair parameter must parse into the pair variant");
+            };
+            assert_eq!(ident.to_string(), "peg");
+        }
+    }
+
+    // Catches a regression that accepts a generic `PegPair<…>`, which is not the type this crate
+    // exports and would expand into code that cannot compile.
+    #[test]
+    fn a_generic_peg_pair_is_rejected_with_the_accepted_list() {
+        let error = match parse(
+            proc_macro2::TokenStream::new(),
+            quote::quote! {
+                async fn a_test(peg: PegPair<Bitcoin>) {}
+            },
+        ) {
+            Ok(_) => panic!("`PegPair<Bitcoin>` is not an accepted parameter"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains(ACCEPTED_PARAMETERS), "{error}");
+    }
+
+    // Catches a regression that drops the pair from the one place the accepted list is spelled.
+    #[test]
+    fn the_accepted_list_names_the_pair() {
+        assert!(
+            ACCEPTED_PARAMETERS.contains("PegPair"),
+            "{ACCEPTED_PARAMETERS}"
+        );
     }
 }

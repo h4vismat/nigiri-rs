@@ -61,7 +61,7 @@ fn start_stacks(fixtures: &[FixtureParam], args: &MacroArgs) -> TokenStream {
             .map(|(index, fixture)| {
                 let handle = handle_ident(index);
                 let start = start_expr(fixture, args);
-                let bind = bind_client(fixture, index);
+                let bind = bind_fixture(fixture, index);
                 let failed = start_failure_message(fixture);
                 quote! {
                     let #handle = #start.await.expect(#failed);
@@ -76,7 +76,7 @@ fn start_stacks(fixtures: &[FixtureParam], args: &MacroArgs) -> TokenStream {
     let unwrap = fixtures.iter().enumerate().map(|(index, fixture)| {
         let slot = started_ident(index);
         let handle = handle_ident(index);
-        let bind = bind_client(fixture, index);
+        let bind = bind_fixture(fixture, index);
         let failed = start_failure_message(fixture);
         quote! {
             let #handle = #slot.expect(#failed);
@@ -102,13 +102,17 @@ fn started_ident(index: usize) -> syn::Ident {
     quote::format_ident!("{RESERVED_PREFIX}started_{index}")
 }
 
-/// The client is cloned so the fixture stays owned by the wrapper and outlives the body, which is
-/// what keeps the containers alive for the test's duration.
-fn bind_client(fixture: &FixtureParam, index: usize) -> TokenStream {
+/// Binds what the body asked for.
+///
+/// A client is cloned so the fixture handle stays owned by the wrapper and keeps the containers
+/// alive for the test's duration. A `PegPair` *is* that handle — it owns its four containers and
+/// both clients together — so it moves into the binding instead of being cloned out of one.
+fn bind_fixture(fixture: &FixtureParam, index: usize) -> TokenStream {
     let handle = handle_ident(index);
     let binding = fixture.ident();
     match fixture {
         FixtureParam::Client { .. } => quote! { let #binding = #handle.client().clone(); },
+        FixtureParam::PegPair { .. } => quote! { let #binding = #handle; },
     }
 }
 
@@ -122,6 +126,16 @@ fn start_expr(fixture: &FixtureParam, args: &MacroArgs) -> TokenStream {
             },
             None => quote! {
                 ::nigiri_rs::__private::testcontainers::Fixture::<#chain>::start()
+            },
+        },
+        FixtureParam::PegPair { .. } => match args.startup_timeout {
+            Some(secs) => quote! {
+                ::nigiri_rs::__private::testcontainers::PegPair::builder()
+                    .startup_timeout(::core::time::Duration::from_secs(#secs))
+                    .start()
+            },
+            None => quote! {
+                ::nigiri_rs::__private::testcontainers::PegPair::start()
             },
         },
     }
@@ -139,6 +153,7 @@ fn start_failure_message(fixture: &FixtureParam) -> String {
             .last()
             .map(|segment| segment.ident.to_string())
             .unwrap_or_else(|| "requested".to_owned()),
+        FixtureParam::PegPair { .. } => "PegPair".to_owned(),
     };
     format!("nigiri-rs: the {named} fixture could not start; is Docker running?")
 }

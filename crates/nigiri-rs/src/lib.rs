@@ -59,6 +59,10 @@ pub use nigiri_rs_testcontainers as testcontainers;
 /// disagree. Tests are not `#[ignore]`d — if Docker is unavailable they fail loudly rather than
 /// reporting green having run nothing.
 ///
+/// A `PegPair` parameter starts a wired pair instead of a single chain: four containers whose
+/// Elements node validates peg-ins against the `bitcoind` beside it. It may be mixed with client
+/// parameters, which still produce independent stacks.
+///
 /// Two arguments are accepted: `startup_timeout = <seconds>` and `flavor = "multi_thread"`.
 #[cfg(feature = "testcontainers")]
 pub use nigiri_rs_macros::test;
