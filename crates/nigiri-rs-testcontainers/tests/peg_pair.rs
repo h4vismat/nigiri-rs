@@ -40,12 +40,49 @@ async fn a_deposit_becomes_lbtc_through_complete_peg_in() -> Result<(), BoxError
         .complete_peg_in(Amount::from_sat(100_000))
         .await?;
 
-    assert_eq!(pegged.amount, Amount::from_sat(100_000));
     assert_eq!(
         liquid_confirmations(&pair, &pegged.claim_txid).await?,
         1,
         "the claim must confirm in the Liquid block this test mined"
     );
+
+    // `pegged.amount` is `complete_peg_in`'s own `amount` argument echoed back unchanged
+    // (`PegIn { mainchain_txid, claim_txid, amount }` in nigiri-rs-core/src/peg.rs), so comparing
+    // it against the amount just passed in cannot fail no matter what was really pegged in. Prove
+    // the claim actually credited the Liquid wallet instead, parsing the amount the same way
+    // `decode_peg_out` in nigiri-rs-core/src/peg.rs reads a peg-out value: through
+    // `serde_json::Number` rather than `f64`, so the parse stays exact.
+    let received: serde_json::Value = pair
+        .liquid()
+        .rpc("gettransaction", (pegged.claim_txid.to_string(),))
+        .await?;
+    // Elements is multi-asset, so `amount` is keyed per asset label rather than a single number —
+    // the same shape `liquid_fixture.rs` already relies on for `getbalance`. L-BTC's label is
+    // "bitcoin".
+    let serde_json::Value::Number(credited) = &received["amount"]["bitcoin"] else {
+        panic!("a credited claim must report a numeric bitcoin amount: {received}");
+    };
+    let credited = Amount::from_str_in(&credited.to_string(), bitcoin::Denomination::Bitcoin)?;
+    assert!(
+        credited > Amount::ZERO,
+        "the claim must have credited the wallet with a positive amount: {received}"
+    );
+
+    // The Bitcoin node must still know the deposit this claim was built from.
+    let deposit: serde_json::Value = pair
+        .bitcoin()
+        .rpc(
+            "getrawtransaction",
+            (pegged.mainchain_txid.to_string(), true),
+        )
+        .await?;
+    assert!(
+        deposit["confirmations"]
+            .as_u64()
+            .is_some_and(|value| value > 0),
+        "the Bitcoin node must know the deposit this peg-in claimed: {deposit}"
+    );
+
     Ok(())
 }
 
@@ -79,7 +116,10 @@ async fn peg_in_driven_through_the_primitives_credits_the_liquid_wallet() -> Res
     let NigiriError::PegInImmature { have, need } = immature else {
         panic!("an immature deposit must be reported as such: {immature}");
     };
-    assert_eq!(have, 1);
+    assert_eq!(
+        have, 1,
+        "faucet mines exactly one confirming block, so the deposit must sit at depth 1"
+    );
     assert_eq!(need, peg.pegin_confirmation_depth());
 
     let mining_address = pair.bitcoin().new_address().await?.to_string();
@@ -91,6 +131,7 @@ async fn peg_in_driven_through_the_primitives_credits_the_liquid_wallet() -> Res
     // necessary but not sufficient. This is the loop `complete_peg_in` runs on a caller's behalf.
     let mut last = None;
     let mut claim = None;
+    let mut fail_fast = false;
     for attempt in 0..=CLAIM_RETRY_BLOCKS {
         if attempt > 0 {
             pair.bitcoin()
@@ -102,14 +143,30 @@ async fn peg_in_driven_through_the_primitives_credits_the_liquid_wallet() -> Res
                 claim = Some(txid);
                 break;
             }
-            Err(error) => last = Some(error),
+            // Mirrors `worth_retrying` in nigiri-rs-core/src/peg.rs: only `PegInImmature` and
+            // `RpcFailed` are worth spending another mined block on. Anything else — a dead socket,
+            // a malformed request — cannot be fixed by mining, so this breaks immediately instead
+            // of burning the whole retry budget and then reporting a maturity problem that was
+            // never real.
+            Err(error @ (NigiriError::PegInImmature { .. } | NigiriError::RpcFailed { .. })) => {
+                last = Some(error);
+            }
+            Err(error) => {
+                last = Some(error);
+                fail_fast = true;
+                break;
+            }
         }
     }
     let claim = claim.ok_or_else(|| {
-        format!(
-            "a matured deposit must be claimable within {CLAIM_RETRY_BLOCKS} blocks; last error: {}",
-            last.expect("the loop records an error on every failed attempt")
-        )
+        let error = last.expect("the loop records an error on every failed attempt");
+        if fail_fast {
+            format!("claim_peg_in failed with an error another block cannot fix: {error}")
+        } else {
+            format!(
+                "a matured deposit must be claimable within {CLAIM_RETRY_BLOCKS} blocks; last error: {error}"
+            )
+        }
     })?;
 
     assert_eq!(
@@ -124,7 +181,9 @@ async fn peg_in_driven_through_the_primitives_credits_the_liquid_wallet() -> Res
         .rpc("gettransaction", (claim.to_string(),))
         .await?;
     assert!(
-        received["details"].is_array(),
+        received["details"]
+            .as_array()
+            .is_some_and(|details| !details.is_empty()),
         "the claiming wallet must know the transaction it received: {received}"
     );
     Ok(())
@@ -162,6 +221,35 @@ async fn a_peg_out_is_released_to_the_destination_it_encodes() -> Result<(), Box
         Some(1),
         "the release must be confirmed on the mainchain side: {paid}"
     );
+
+    // A correct `PegOut` struct proves nothing by itself: assert the actual output that pays the
+    // decoded destination, at the decoded amount, exists among however many outputs the release
+    // produced. It mines its own confirming block and the wallet pays change, so there is more
+    // than one output and the payout cannot be assumed to sit at a fixed index.
+    //
+    // `scriptPubKey.address` is used first, since that is what this Bitcoin version reports;
+    // `scriptPubKey.hex` compared against the destination's own script is the fallback for a
+    // version that omits it.
+    let destination_hex = format!("{:x}", released.destination.script_pubkey());
+    let outputs = paid["vout"]
+        .as_array()
+        .ok_or_else(|| format!("a verbose getrawtransaction must report its outputs: {paid}"))?;
+    let matching_output = outputs
+        .iter()
+        .find(|output| match output["scriptPubKey"]["address"].as_str() {
+            Some(address) => address == released.destination.to_string(),
+            None => output["scriptPubKey"]["hex"].as_str() == Some(destination_hex.as_str()),
+        })
+        .ok_or_else(|| format!("no output pays {}: {outputs:#?}", released.destination))?;
+    let serde_json::Value::Number(paid_value) = &matching_output["value"] else {
+        panic!("a matching output must report a numeric value: {matching_output}");
+    };
+    let paid_amount = Amount::from_str_in(&paid_value.to_string(), bitcoin::Denomination::Bitcoin)?;
+    assert_eq!(
+        paid_amount, released.amount,
+        "the matching output must pay exactly the decoded peg-out amount: {matching_output}"
+    );
+
     Ok(())
 }
 
