@@ -102,7 +102,7 @@ let electrum_port = fixture.electrum_endpoint().port();
 
 Docker must be running; no Nigiri installation is needed. Containers, their anonymous volumes, and the network are removed when the fixture is dropped. Ports are assigned by the runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a machine pulls two pinned images per chain and is slow; later starts are ready in a few seconds. `Fixture::<Liquid>::start` starts the same way; swap the type parameter. Podman is untested.
 
-**One attribute instead of a preamble.** The same feature provides `#[nigiri_rs::test]`, which starts a fixture per parameter and hands the body a ready client. It needs the `testcontainers` feature and Docker; nothing else:
+**One attribute instead of a preamble.** The same feature provides `#[nigiri_rs::test]`, which starts a fixture per parameter and hands the body what that parameter asked for. It needs the `testcontainers` feature and Docker; nothing else:
 
 ```rust,ignore
 use nigiri_rs::{Bitcoin, NigiriClient};
@@ -120,7 +120,7 @@ async fn my_wallet_sees_its_funding(client: NigiriClient<Bitcoin>) -> Result<(),
 }
 ```
 
-One fixture is started per parameter, so a cross-chain test takes two: add a `NigiriClient<Liquid>` alongside the Bitcoin one. The chain comes from the parameter type, never an attribute argument, so the two cannot disagree. `startup_timeout = <seconds>` and `flavor = "multi_thread"` are accepted. Tests are not `#[ignore]`d — if Docker is unavailable they fail loudly rather than reporting green having run nothing.
+One fixture is started per parameter, so a cross-chain test takes two: add a `NigiriClient<Liquid>` alongside the Bitcoin one. The chain comes from the parameter type, never an attribute argument, so the two cannot disagree. A third parameter type is accepted, [`PegPair`](docs/reference-fixtures.md#pegpair), and it behaves differently on purpose: a client parameter is cloned out of a fixture the wrapper keeps alive, while a `PegPair` *is* the handle and moves into the body, because it owns its four containers and both clients together. `startup_timeout = <seconds>` and `flavor = "multi_thread"` are accepted. Tests are not `#[ignore]`d — if Docker is unavailable they fail loudly rather than reporting green having run nothing.
 
 The Electrum endpoint above is `fixture.electrum_endpoint()`, which delegates to the client. Any `NigiriClient<N>`, fixture-backed or not, exposes both endpoints a BDK or LWK wallet needs directly:
 
