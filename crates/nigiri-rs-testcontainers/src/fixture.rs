@@ -60,6 +60,7 @@ impl<C: FixtureChain> Fixture<C> {
             node_image: C::node_image_default(),
             electrs_image: C::electrs_image_default(),
             extra_node_args: Vec::new(),
+            network: None,
             chain: PhantomData,
         }
     }
@@ -85,25 +86,11 @@ impl<C: FixtureChain> Fixture<C> {
     ///
     /// Crate-private: a composite attaches its own containers to it. The name is an implementation
     /// detail of this crate's topology and is deliberately not public.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composites that call this — PegPair, LightningStack — land after it"
-        )
-    )]
     pub(crate) fn network_name(&self) -> &str {
         &self.names.network
     }
 
     /// The node's container name, which sibling containers dial it by on the fixture network.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composites that call this — PegPair, LightningStack — land after it"
-        )
-    )]
     pub(crate) fn node_container_name(&self) -> &str {
         &self.names.node
     }
@@ -114,30 +101,53 @@ impl<C: FixtureChain> Fixture<C> {
     /// indexer beside it, and those handles are private to this type. The order matches `start`'s
     /// own failure path: the indexer first, then the node, so the node's log — the service most
     /// failures come back to — ends up nearest the error text.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composites that call this — PegPair, LightningStack — land after it"
-        )
-    )]
     pub(crate) async fn attach_inner_logs(&self, error: FixtureError) -> FixtureError {
         let with_electrs =
             attach_container_log(electrs::SERVICE, error, &self.handles.electrs).await;
         attach_container_log(C::NODE_SERVICE, with_electrs, &self.handles.node).await
     }
+
+    /// The Docker ids of this fixture's containers, indexer first.
+    ///
+    /// Test-only, and only for a composite's teardown test: proving a pair removes everything it
+    /// created means naming all four containers, and these handles are private to this type.
+    #[cfg(test)]
+    pub(crate) fn container_ids(&self) -> [String; 2] {
+        [
+            self.handles.electrs.id().to_owned(),
+            self.handles.node.id().to_owned(),
+        ]
+    }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FixtureBuilder<C: FixtureChain> {
     startup_timeout: Duration,
     node_image: ContainerImage,
     electrs_image: ContainerImage,
-    /// Appended to `C::node_cmd()` by a composite that needs arguments the standalone chain does
-    /// not set. Crate-private: a composite in this crate supplies them, and a caller who wants a
+    /// Merged into `C::node_cmd()` by a composite that needs arguments the standalone chain does
+    /// not set, or needs to replace one it does — see `node::merge_node_args` for how a
+    /// composite's argument replaces the chain's own entry of the same key rather than sitting
+    /// beside it. Crate-private: a composite in this crate supplies them, and a caller who wants a
     /// differently-configured node replaces the image instead.
     extra_node_args: Vec<String>,
+    /// The network to join instead of creating one, supplied by a composite.
+    network: Option<String>,
     chain: PhantomData<C>,
+}
+
+// Written by hand rather than derived: since this branch, `extra_node_args` can carry
+// `-mainchainrpcpassword=123`, and the rest of the crate works to keep that out of any
+// caller-visible text.
+impl<C: FixtureChain> fmt::Debug for FixtureBuilder<C> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FixtureBuilder")
+            .field("startup_timeout", &self.startup_timeout)
+            .field("node_image", &self.node_image)
+            .field("electrs_image", &self.electrs_image)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The UUID-scoped names of one fixture's Docker resources.
@@ -150,11 +160,15 @@ struct TopologyNames {
 
 /// Scopes every Docker resource of one fixture to a single UUID, so concurrent fixtures cannot
 /// collide and a leaked resource is traceable to the fixture that made it.
-fn topology_names<C: FixtureChain>() -> TopologyNames {
+///
+/// Only the network is replaceable, by a composite's shared network in place of a generated one.
+/// The container names keep their own scope even when the network is shared, which is what lets
+/// two fixtures live on one network.
+fn topology_names_on<C: FixtureChain>(shared_network: Option<String>) -> TopologyNames {
     let scope = Uuid::new_v4().simple().to_string();
 
     TopologyNames {
-        network: format!("nigiri-rs-fixture-{scope}"),
+        network: shared_network.unwrap_or_else(|| format!("nigiri-rs-fixture-{scope}")),
         node: format!("{}-{scope}", C::NODE_NAME_PREFIX),
         electrs: format!("nigiri-rs-electrs-{scope}"),
     }
@@ -180,20 +194,31 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         self
     }
 
-    /// Arguments appended to the chain's own node command.
+    /// Arguments merged into the chain's own node command, not merely appended.
     ///
-    /// Crate-private, and deliberately additive: a composite extends the chain's flag vector and
-    /// must not have to restate the flags the chain owns.
+    /// Crate-private. See `node::merge_node_args` for the merge itself: a composite's argument
+    /// replaces the chain's entry of the same key rather than sitting beside it, which is what
+    /// lets `PegPair` turn the standalone chain's `-validatepegin=0` into `-validatepegin=1`
+    /// instead of shipping both.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composites that call this — PegPair, LightningStack — land after it"
-        )
-    )]
     pub(crate) fn extra_node_args(mut self, args: Vec<String>) -> Self {
         self.extra_node_args = args;
+        self
+    }
+
+    /// Attaches this fixture to a network that already exists rather than creating its own.
+    ///
+    /// Crate-private: a composite starts its first fixture, reads [`Fixture::network_name`], and
+    /// hands it here, so all four containers share one network and resolve each other by container
+    /// name. Only the network is shared — the node and indexer keep their own UUID scope, so two
+    /// fixtures on one network still cannot collide.
+    ///
+    /// The network outlives whichever fixture drops first without anything here counting
+    /// references: `testcontainers` keys created networks by name and removes one only once the
+    /// last container holding it is gone.
+    #[must_use]
+    pub(crate) fn network(mut self, name: String) -> Self {
+        self.network = Some(name);
         self
     }
 
@@ -216,7 +241,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         self.node_image.validate()?;
         self.electrs_image.validate()?;
 
-        let names = topology_names::<C>();
+        let names = topology_names_on::<C>(self.network.clone());
 
         let node = node::start_node::<C>(
             &self.node_image,
@@ -554,8 +579,8 @@ mod tests {
     // concurrent fixtures collide on the host instead of running independently.
     #[test]
     fn every_fixture_scopes_its_own_topology_names() {
-        let first = super::topology_names::<Bitcoin>();
-        let second = super::topology_names::<Bitcoin>();
+        let first = super::topology_names_on::<Bitcoin>(None);
+        let second = super::topology_names_on::<Bitcoin>(None);
 
         assert_ne!(first.network, second.network);
         assert_ne!(first.node, second.node);
@@ -663,5 +688,66 @@ mod tests {
         );
 
         drop(fixture);
+    }
+
+    // Catches a regression that lets a composite's shared network also share the container names.
+    // Two fixtures on one network still need distinct containers, or the second collides with the
+    // first on the host.
+    #[test]
+    fn a_shared_network_replaces_only_the_network_name() {
+        let shared = "nigiri-rs-fixture-shared".to_owned();
+
+        let first = super::topology_names_on::<Bitcoin>(Some(shared.clone()));
+        let second = super::topology_names_on::<Liquid>(Some(shared.clone()));
+
+        assert_eq!(first.network, shared);
+        assert_eq!(second.network, shared);
+        assert_ne!(first.node, second.node);
+        assert_ne!(first.electrs, second.electrs);
+        assert!(first.node.starts_with("nigiri-rs-bitcoind-"), "{first:?}");
+        assert!(second.node.starts_with("nigiri-rs-elements-"), "{second:?}");
+    }
+
+    // Catches a regression that makes a shared network the default, which would put every
+    // standalone fixture on one network and let unrelated tests reach each other's nodes.
+    #[test]
+    fn without_a_shared_network_a_fixture_scopes_its_own() {
+        assert!(
+            super::topology_names_on::<Bitcoin>(None)
+                .network
+                .starts_with("nigiri-rs-fixture-")
+        );
+        assert!(Fixture::<Bitcoin>::builder().network.is_none());
+        assert_eq!(
+            Fixture::<Bitcoin>::builder()
+                .network("nigiri-rs-fixture-shared".to_owned())
+                .network
+                .as_deref(),
+            Some("nigiri-rs-fixture-shared")
+        );
+    }
+
+    // Catches a regression that starts a fixture on a network other than the one it was given,
+    // which would leave a composite's containers unable to resolve each other by name.
+    #[tokio::test]
+    async fn a_fixture_started_on_a_shared_network_reports_that_network() {
+        let first = Fixture::<Bitcoin>::start()
+            .await
+            .expect("a pinned fixture must start against a real daemon");
+        let shared = first.network_name().to_owned();
+
+        let deadline = crate::deadline::Deadline::new(Duration::from_secs(120))
+            .expect("a positive deadline is valid");
+        let second = Fixture::<Bitcoin>::builder()
+            .network(shared.clone())
+            .start_under(&deadline)
+            .await
+            .expect("a second fixture must join an existing fixture network");
+
+        assert_eq!(second.network_name(), shared);
+        assert_ne!(second.node_container_name(), first.node_container_name());
+
+        drop(second);
+        drop(first);
     }
 }

@@ -297,6 +297,224 @@ supertrait.
 
 Why a sealed trait rather than an enum: [Typed networks](explanation-typed-networks.md).
 
+## `Peg`
+
+```rust
+pub struct Peg { /* private */ }
+```
+
+Derives `Debug` and `Clone`. Holds both clients **by value** — `NigiriClient` is `Clone` and cheap,
+immutable configuration plus a shared transport — so no lifetime is threaded through the signatures
+below. A `Peg` knows nothing about what started the two nodes: one assembled over services you run
+and one taken from a [`PegPair`](reference-fixtures.md#pegpair) are the same type.
+
+**Peg-in is real. Peg-out is half real.** `peg_in_request` returns a genuine
+federation-controlled address and `claim_peg_in` submits a real `claimpegin` with a real merkle
+proof, so your own claim path is exercised. `send_to_mainchain` is a genuine Elements call that burns
+L-BTC — but nothing services it, because regtest has no federation, and `release_peg_out` plays that
+part as a simulation. Read [Peg-out has no reserve](#peg-out-has-no-reserve) before asserting on
+supply.
+
+### Construction
+
+| Method | Signature |
+| --- | --- |
+| `connect` | `async fn connect(bitcoin: NigiriClient<Bitcoin>, liquid: NigiriClient<Liquid>) -> Result<Self, NigiriError>` |
+
+```rust
+use nigiri_rs::{Bitcoin, Liquid, NigiriClient, Peg};
+
+# async fn example() -> Result<(), nigiri_rs::NigiriError> {
+let peg = Peg::connect(
+    NigiriClient::<Bitcoin>::new(),
+    NigiriClient::<Liquid>::new(),
+)
+.await?;
+# let _ = peg;
+# Ok(())
+# }
+```
+
+There is deliberately no infallible constructor. `connect` reads the Liquid node's
+`getsidechaininfo` and compares its reported `parent_blockhash` against the Bitcoin node's
+`getblockhash 0`. A mismatch is `NigiriError::PegNotConfigured`, whose detail names both hashes. The
+reported `pegin_confirmation_depth` is cached at the same time, which is why the accessor for it
+below costs no round trip.
+
+#### What `connect` proves, and what it does not
+
+**A successful `connect` does not prove the two nodes can talk to each other.** Bitcoin's regtest
+genesis is a hardcoded chain parameter — the same value on every node, never generated per instance —
+and `liquidregtest` carries that same value as its parent. Two fixtures that have never heard of each
+other therefore agree on the parent chain, and `connect` accepts them. That is measured, not
+inferred: `crates/nigiri-rs-testcontainers/tests/peg_wiring.rs` starts two independent fixtures
+against a real daemon and asserts `connect` succeeds.
+
+What the comparison does catch is a Liquid node built for a **different** parent chain — one
+carrying testnet or mainnet parameters, pointed at a regtest `bitcoind`. Nothing more.
+[`PegPair`](reference-fixtures.md#pegpair) is what guarantees the pair is wired: it starts
+`elementsd` with `-validatepegin=1` aimed at its own `bitcoind`. On a `Peg` you assembled yourself,
+the first real evidence of wiring is a `claimpegin` that succeeds.
+
+### Accessors
+
+| Method | Signature | Returns |
+| --- | --- | --- |
+| `bitcoin` | `fn bitcoin(&self) -> &NigiriClient<Bitcoin>` | The Bitcoin side of the pair. |
+| `liquid` | `fn liquid(&self) -> &NigiriClient<Liquid>` | The Liquid side. |
+| `pegin_confirmation_depth` | `fn pegin_confirmation_depth(&self) -> u64` | Confirmations a deposit needs before it can be claimed, as the sidechain reported them to `connect`. |
+
+All three are synchronous, `#[must_use]`, and free — no request is made. `pegin_confirmation_depth`
+is 8 on the pinned Elements image, `blockstream/elementsd:23.3.3` — the only one pinned — and was
+also 8 on the other Elements build this was measured against. Read it rather than hardcoding it, and
+see
+[the mining note](#complete_peg_in-mines-and-how-many-blocks-is-not-fixed) for why reaching it is
+necessary but not sufficient.
+
+### Peg-in
+
+| Method | Signature |
+| --- | --- |
+| `peg_in_request` | `async fn peg_in_request(&self) -> Result<PegInRequest, NigiriError>` |
+| `claim_peg_in` | `async fn claim_peg_in(&self, mainchain_txid: &bitcoin::Txid) -> Result<elements::Txid, NigiriError>` |
+| `complete_peg_in` | `async fn complete_peg_in(&self, amount: bitcoin::Amount) -> Result<PegIn, NigiriError>` |
+
+`peg_in_request` calls `getpeginaddress`. It takes no destination: the address is derived from the
+Liquid node's own wallet, and the eventual claim credits that wallet. Moving pegged funds anywhere
+else is an ordinary transfer afterwards, not part of the peg. The returned Bitcoin address is
+network-checked against regtest; anything else is `NigiriError::InvalidResponse`.
+
+`claim_peg_in` fetches the deposit and its merkle proof from the Bitcoin node (`getrawtransaction`,
+then `gettxoutproof`) and submits `claimpegin` to the Liquid node, returning the minting Liquid
+transaction ID. The claim script is left out of the call: Elements infers it when the claiming wallet
+issued the address, which it did. If the deposit has fewer confirmations than
+`pegin_confirmation_depth`, nothing is submitted and you get
+`NigiriError::PegInImmature { have, need }` — both numbers, rather than a node error string.
+
+`complete_peg_in` runs the whole sequence and returns a `PegIn`: request an address, fund it from the
+Bitcoin wallet, mine it to maturity, claim it. It takes no address for the same reason
+`peg_in_request` does not.
+
+#### `complete_peg_in` mines, and how many blocks is not fixed
+
+A test that asserts on Bitcoin block height after a peg-in has to expect this, and cannot expect an
+exact number.
+
+1. `faucet` sends the deposit and mines **exactly one** confirming block.
+2. `pegin_confirmation_depth() - 1` further blocks are mined, reaching the reported depth. The depth
+   is read from the node, not hardcoded, so a chain with a lowered `peginconfirmationdepth` and a
+   production-shaped one both work.
+3. `claimpegin` is submitted. If it fails in a way another block could plausibly fix, **one more
+   block is mined and it is submitted again — up to twenty extra blocks.**
+
+Step 3 exists because the Liquid node's view of the mainchain lags the mainchain itself. Against a
+real Elements node reporting a depth of 8, a claim was rejected at exactly 8 and only accepted at 11.
+Retrying a block at a time adapts to however far behind the node is; a fixed margin would bake in a
+number measured once, on one machine, against one image.
+
+So one peg-in mines at least `pegin_confirmation_depth()` blocks and at most
+`pegin_confirmation_depth() + 20`. Assert `>=`, never `==`.
+
+Only `NigiriError::PegInImmature` and `NigiriError::RpcFailed` are treated as retryable; the node's
+rejection of a premature claim arrives as the latter. Any other error returns immediately rather than
+spending twenty blocks on something mining cannot fix. The decision is made on the error variant, not
+on the node's message text, which carries no compatibility promise. If the twenty blocks run out, the
+last retryable error is returned.
+
+The deposit and its merkle proof are fetched once, before the loop: once mature, neither can change,
+so every retry resubmits the same pair instead of asking the Bitcoin node again.
+
+### Peg-out
+
+| Method | Signature |
+| --- | --- |
+| `send_to_mainchain` | `async fn send_to_mainchain(&self, destination: &str, amount: bitcoin::Amount) -> Result<elements::Txid, NigiriError>` |
+| `release_peg_out` | `async fn release_peg_out(&self, liquid_txid: &elements::Txid) -> Result<PegOut, NigiriError>` |
+
+`send_to_mainchain` is a genuine Elements `sendtomainchain`: it burns L-BTC and records the Bitcoin
+destination in an output of the resulting Liquid transaction. Nothing releases the BTC on its own —
+follow it with `release_peg_out`.
+
+`destination` is `&str` rather than `bitcoin::Address` so a caller can deliberately supply a
+malformed one and exercise the failure path; every address argument in this crate is `&str` for that
+reason. The destination and the amount are treated as sensitive arguments and redacted from error
+bodies (see [Errors](reference-errors.md)).
+
+**No peg-out wallet setup is needed, and none is possible.** `initpegoutwallet` is deliberately not
+wrapped: this chain runs with PAK enforcement off, so the node rejects the call outright — there is
+no PAK entry to register — and `sendtomainchain` does not require one.
+
+`release_peg_out` reads the named Liquid transaction back with `getrawtransaction`, scans its outputs
+for the peg-out, decodes the destination and value out of it, and pays that destination on Bitcoin
+through `faucet`. **The destination comes out of the transaction, not from an argument**, so a
+consumer that encodes it wrongly gets no payout, exactly as on liquidv1.
+
+| Outcome | Result |
+| --- | --- |
+| A peg-out for this pair, decoded | `Ok(PegOut)` |
+| Its destination script is not a standard address, or its value is missing or unreadable | `NigiriError::PegOutputMalformed` |
+| Every peg-out-shaped output names a different parent chain | `NigiriError::PegOutputMalformed`, detail naming both chains |
+| No peg-out-shaped output at all | `NigiriError::PegOutputNotFound` |
+
+A wrong-chain output is skipped rather than failing the scan, since a genuine peg-out for this pair
+may follow it; the mismatch is reported only if nothing better is found. A same-chain output that
+cannot be read is reported immediately — moving past it would hide a real problem with a real
+peg-out.
+
+Like `faucet`, the release mines exactly one confirming block.
+
+#### Peg-out has no reserve
+
+**`release_peg_out` is a simulation.** The BTC it releases comes from the Bitcoin node's own wallet,
+not from a locked reserve, and it is not the BTC anyone pegged in. Total BTC on the mainchain side
+**grows with every release**, and **no 1:1 invariant holds across the pair**. Do not write a test
+that asserts one.
+
+The Liquid half stays honest — `sendtomainchain` genuinely burned the L-BTC, so the Liquid side moves
+the way it would on liquidv1. It is the mainchain side that is fictional. What you can verify here is
+your own encoding and your own claim handling, not the federation's behaviour.
+
+### Peg records
+
+All three derive `Debug`, `Clone`, `PartialEq`, `Eq`, and every field is public. Unlike the
+[response records](#response-records) below, none of them is `Deserialize`, for two different
+reasons. `PegIn` and `PegOut` are assembled by this crate from more than one call, so there is no
+single response to parse them out of. `PegInRequest` does come from one call, `getpeginaddress`, but
+its `mainchain_address` has to be network-checked against regtest on the way in — a step a derived
+`Deserialize` would skip — so it is built by hand too.
+
+```rust
+pub struct PegInRequest {
+    pub mainchain_address: bitcoin::Address,
+    pub claim_script: String,
+}
+
+pub struct PegIn {
+    pub mainchain_txid: bitcoin::Txid,
+    pub claim_txid: elements::Txid,
+    pub amount: bitcoin::Amount,
+}
+
+pub struct PegOut {
+    pub liquid_txid: elements::Txid,
+    pub destination: bitcoin::Address,
+    pub amount: bitcoin::Amount,
+    pub bitcoin_txid: bitcoin::Txid,
+}
+```
+
+| Field | What it holds |
+| --- | --- |
+| `PegInRequest::mainchain_address` | The Bitcoin address to fund. Federation-controlled, tweaked by the Liquid wallet's keys. Network-checked, unlike `BitcoinAddressInfo::address`. |
+| `PegInRequest::claim_script` | Hex claim script, retained for callers that submit their own claim. `claim_peg_in` does not pass it. |
+| `PegIn::mainchain_txid` | The Bitcoin deposit that funded the peg-in address. |
+| `PegIn::claim_txid` | The Liquid transaction that minted the L-BTC. |
+| `PegIn::amount` | The amount deposited. **L-BTC minted equals this minus network fees**, so it is not the wallet's balance change. |
+| `PegOut::liquid_txid` | The Liquid transaction that burned the L-BTC — the argument you passed in. |
+| `PegOut::destination` | The destination decoded out of the peg-out output, not supplied by you. |
+| `PegOut::amount` | The value decoded out of the peg-out output. |
+| `PegOut::bitcoin_txid` | The Bitcoin transaction **this crate** sent to simulate the release. Not a federation transaction. |
+
 ## Response records
 
 All derive `Debug`, `Clone`, `PartialEq`, `Eq`, `Deserialize`. Every field is public.
@@ -441,9 +659,10 @@ their own RPC records.
 
 ## Scope limits
 
-Peg-in and a simulated peg-out release exist on `Peg`, and `initpegoutwallet` remains unwrapped
-because PAK enforcement is off on this chain. Federation lifecycle, chain configuration, and
-cross-chain orchestration stay with the host application.
+The peg is covered above under [`Peg`](#peg): peg-in is real, and peg-out's release is a simulation
+that holds no reserve. `initpegoutwallet` is deliberately not wrapped — this chain rejects it, PAK
+enforcement being off, and `sendtomainchain` does not need it. Federation lifecycle, chain
+configuration, and cross-chain orchestration stay with the host application.
 
 ## Related
 
@@ -451,3 +670,7 @@ cross-chain orchestration stay with the host application.
 - [Errors](reference-errors.md)
 - [Fixture API](reference-fixtures.md)
 - [Typed networks](explanation-typed-networks.md)
+- [Tutorial: a round trip across Liquid's peg](tutorial-peg-round-trip.md) — the `Peg` methods above,
+  from an empty crate
+- [How to peg in and peg out](how-to-peg.md)
+- [What the peg simulates](explanation-what-the-peg-simulates.md) — which half of peg-out is real

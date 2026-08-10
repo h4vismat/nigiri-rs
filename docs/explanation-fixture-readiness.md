@@ -92,6 +92,18 @@ Hence the arrival heights: **101 for Bitcoin, 1 for Liquid.**
 Everything else is shared. Container, root RPC, `createwallet`, the wallet-scoped client, and this
 readiness loop are identical; funding is the one thing the chain trait has to supply.
 
+### A pair runs the whole thing twice
+
+A [`PegPair`](reference-fixtures.md#pegpair) is two of these stacks on one Docker network, so it runs
+this same agreement for each half — six probes, two triples — under one shared budget rather than two
+budgets side by side. Nothing about the loop changes; there is simply twice as much of it, which is
+why a pair's default budget is 120 seconds against a single fixture's 60.
+
+A pair then does one thing more before `start` returns: it pairs the two clients through
+`Peg::connect`, charged to the same clock. That check compares the Liquid node's parent chain against
+the Bitcoin node's genesis, which is a weaker statement than it sounds — see
+[what `Peg::connect` proves](reference-client.md#what-connect-proves-and-what-it-does-not).
+
 ## The guarantee, precisely
 
 When `start()` returns:

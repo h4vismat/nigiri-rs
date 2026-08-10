@@ -153,7 +153,14 @@ claim. `Peg::complete_peg_in` treats this as retryable and mines another block.
 > `peg is not configured: {detail}`
 
 `Peg::connect` compared the Liquid node's `getsidechaininfo` parent block hash against the Bitcoin
-node's genesis and they did not match: the two nodes were never wired together as a peg pair.
+node's genesis and they did not match, so the Elements node was built for a different parent chain
+than this `bitcoind` serves.
+
+It does **not** mean the two were never wired together. That comparison cannot tell a wired pair from
+two unrelated nodes in either direction: regtest's genesis is a hardcoded chain parameter, so
+independent nodes agree on it, and a genuinely wired pair still mismatches if its Elements node
+carries other chain parameters. See
+[What `connect` proves](reference-client.md#what-connect-proves-and-what-it-does-not).
 
 ## `FixtureError`
 
@@ -172,7 +179,9 @@ pub enum FixtureError {
 ```
 
 `service` is `"bitcoind"`, `"elements"`, or `"electrs"` — plus `"fixture"` on the three-way readiness
-wait, where no single container is the one at fault. `chain` is `"Bitcoin"` or `"Liquid"`.
+wait, where no single container is the one at fault, and `"peg"` on a `PegPair`'s pairing check, where
+the budget ran out verifying the two chains rather than starting either one. `chain` is `"Bitcoin"` or
+`"Liquid"`.
 
 `diagnostics` carries bounded container output where the failure happened inside a container — that
 field is why a readiness failure is usually diagnosable from the error text alone.
@@ -230,6 +239,11 @@ The startup budget ran out with the three services still disagreeing. `last_obse
 height reading, formatted `node=<n> esplora=<n> electrum=<n>`, which tells you *which* service was
 behind. On this path `service` is `"fixture"`, since the failure is the disagreement rather than any
 one container. The variant has **no source** — nothing failed, the budget simply expired.
+
+On a [`PegPair`](reference-fixtures.md#pegpair), the same variant also covers the budget running out
+while verifying the pair, after all four containers are already up. There `service` is `"peg"` and
+`last_observation` is prose rather than the height triplet — `verifying both chains report the same
+parent` — since there is only the one check, not three services to compare.
 
 Bumping `startup_timeout` is the fix when this happens on a first run that is still pulling images.
 

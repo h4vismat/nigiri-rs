@@ -1,4 +1,4 @@
-error: `#[nigiri_rs::test]` parameters must be `NigiriClient<Bitcoin>` or `NigiriClient<Liquid>`; the chain is taken from this type
+error: `#[nigiri_rs::test]` parameters must be `NigiriClient<Bitcoin>`, `NigiriClient<Liquid>`, or `PegPair`; the chain is taken from this type
  --> tests/ui/unsupported_parameter.rs:2:31
   |
 2 | async fn takes_a_string(name: String) {

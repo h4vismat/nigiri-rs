@@ -23,8 +23,11 @@
 //! # }
 //! ```
 //!
-//! The constructor verifies the pair. Two nodes that were never wired together are rejected up
-//! front rather than failing inside a later claim.
+//! The constructor checks that both nodes name the same parent chain, which is weaker than it
+//! sounds: Bitcoin's regtest genesis is a hardcoded chain parameter and `liquidregtest` carries the
+//! same value, so two nodes that were never wired together still agree and are accepted. What the
+//! check catches is an Elements node built for a *different* parent chain. Wiring is guaranteed by
+//! construction — see `nigiri-rs-testcontainers`' `PegPair` — not by [`Peg::connect`].
 
 mod output;
 
@@ -93,11 +96,21 @@ fn worth_retrying(error: &NigiriError) -> bool {
 }
 
 impl Peg {
-    /// Pairs two clients after verifying they are actually a peg pair.
+    /// Pairs two clients after checking they name the same parent chain.
     ///
     /// Reads the Liquid node's `getsidechaininfo` and compares its parent block hash against the
-    /// Bitcoin node's genesis. A mismatch means the two were never wired together, which is the
-    /// easiest mistake to make here and the hardest to diagnose later.
+    /// Bitcoin node's genesis. **This does not prove the two are wired together.** Bitcoin's
+    /// regtest genesis is a hardcoded chain parameter — identical on every node, never generated
+    /// per instance — and `liquidregtest` carries that same value as its parent, so two nodes that
+    /// have never heard of each other agree and are accepted. That is measured, not assumed:
+    /// `nigiri-rs-testcontainers/tests/peg_wiring.rs` starts two independent fixtures and asserts
+    /// this succeeds.
+    ///
+    /// What a mismatch does say is that the Elements node carries different chain parameters from
+    /// this `bitcoind` — a genuinely wired pair mismatches too if its Elements node was built for
+    /// another parent chain, so even the mismatch direction does not mean "never wired together".
+    /// Wiring is guaranteed by construction, as `nigiri-rs-testcontainers`' `PegPair` does it; on a
+    /// hand-assembled pair the first real evidence is a `claimpegin` that succeeds.
     ///
     /// There is deliberately no infallible constructor.
     pub async fn connect(

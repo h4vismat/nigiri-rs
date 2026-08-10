@@ -14,6 +14,7 @@
 use std::time::Duration;
 
 use bitcoin::Amount;
+use nigiri_rs::testcontainers::PegPair;
 use nigiri_rs::{Bitcoin, Liquid, NigiriClient};
 use serde::Deserialize;
 
@@ -196,5 +197,37 @@ async fn liquid_complete_shared_and_asset_contract(
     client
         .wait_for_confirmation(&asset_faucet_txid, Duration::from_secs(30))
         .await?;
+    Ok(())
+}
+
+// Catches a regression in the pair parameter: the wrapper must start the wired stack, hand the body
+// a `PegPair` that owns it, and keep all four containers alive for the test's duration.
+#[nigiri_rs::test(startup_timeout = 180)]
+async fn a_peg_pair_parameter_starts_a_wired_stack(peg: PegPair) -> Result<(), BoxError> {
+    let pegged = peg.peg().complete_peg_in(Amount::from_sat(100_000)).await?;
+
+    // `pegged.amount` is `complete_peg_in`'s own argument echoed back, so comparing it against the
+    // amount just passed in cannot fail no matter what was really pegged in. Ask the Liquid node
+    // about the claim instead: `-txindex=1` makes even a mempool transaction retrievable, so this
+    // needs no mined block to prove the node genuinely knows it.
+    let claim: serde_json::Value = peg
+        .liquid()
+        .rpc("getrawtransaction", (pegged.claim_txid.to_string(), 1_u64))
+        .await?;
+    assert!(
+        claim["vout"]
+            .as_array()
+            .is_some_and(|vout| !vout.is_empty()),
+        "the Liquid node must know the claim transaction and report its outputs: {claim}"
+    );
+
+    // Both halves are reachable through the pair, which is what distinguishes it from two
+    // independent stacks. `>= 101` is a floor a pair that pegged nothing already clears — 101 is
+    // also the arrival height, so this is not evidence that `complete_peg_in` mined anything.
+    // (Not sampled before and after: `block_height` is Esplora-backed and the blocks
+    // `complete_peg_in` just mined reach the indexer on its own schedule, so a before/after
+    // comparison would be flaky.)
+    assert_eq!(peg.liquid().block_height().await?, 1);
+    assert!(peg.bitcoin().block_height().await? >= 101);
     Ok(())
 }

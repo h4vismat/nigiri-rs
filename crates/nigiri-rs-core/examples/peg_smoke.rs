@@ -8,7 +8,7 @@
 //!
 //! docker run -d --name pegsmoke-btc --network pegsmoke-net \
 //!     -p 28443:18443 \
-//!     ghcr.io/getumbrel/docker-bitcoind:v30.0 \
+//!     ghcr.io/getumbrel/docker-bitcoind:v31.0 \
 //!     -chain=regtest -server=1 -txindex=1 \
 //!     -rpcbind=0.0.0.0:18443 -rpcallowip=0.0.0.0/0 \
 //!     -rpcuser=admin1 -rpcpassword=123 -fallbackfee=0.00001 -printtoconsole=1
