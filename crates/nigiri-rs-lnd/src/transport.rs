@@ -1,30 +1,36 @@
 use std::{borrow::Cow, error::Error as StdError, fmt, future::Future, sync::Arc, time::Duration};
 
+use tokio::sync::OnceCell;
 use tonic::{
     Code, Request, Response, Status,
     metadata::AsciiMetadataValue,
     transport::{Certificate, Channel, ClientTlsConfig, Endpoint},
 };
+use url::Host;
 
 use crate::{LndConfig, LndError, error::bounded};
 
 pub(crate) struct ClientInner {
-    pub(crate) channel: Channel,
+    transport: LazyChannel,
     macaroon: AsciiMetadataValue,
     pub(crate) timeout: Duration,
 }
 
 impl ClientInner {
     pub(crate) fn authenticated(config: &LndConfig) -> Result<Arc<Self>, LndError> {
-        let channel = tls_channel(config)?;
+        let transport = LazyChannel::new(tls_endpoint(config)?);
         let macaroon = lowercase_hex(config.macaroon())
             .parse()
-            .map_err(|_| invalid_transport_configuration())?;
+            .map_err(invalid_transport_configuration)?;
         Ok(Arc::new(Self {
-            channel,
+            transport,
             macaroon,
             timeout: config.timeout(),
         }))
+    }
+
+    pub(crate) async fn channel(&self) -> Channel {
+        self.transport.channel().await
     }
 }
 
@@ -39,8 +45,15 @@ impl fmt::Debug for ClientInner {
 
 #[allow(dead_code)]
 pub(crate) struct UnauthenticatedLndClient {
-    pub(crate) channel: Channel,
+    transport: LazyChannel,
     pub(crate) timeout: Duration,
+}
+
+impl UnauthenticatedLndClient {
+    #[allow(dead_code)]
+    pub(crate) async fn channel(&self) -> Channel {
+        self.transport.channel().await
+    }
 }
 
 impl fmt::Debug for UnauthenticatedLndClient {
@@ -55,9 +68,30 @@ impl fmt::Debug for UnauthenticatedLndClient {
 #[allow(dead_code)]
 pub(crate) fn unauthenticated(config: &LndConfig) -> Result<UnauthenticatedLndClient, LndError> {
     Ok(UnauthenticatedLndClient {
-        channel: tls_channel(config)?,
+        transport: LazyChannel::new(tls_endpoint(config)?),
         timeout: config.timeout(),
     })
+}
+
+struct LazyChannel {
+    endpoint: Endpoint,
+    channel: OnceCell<Channel>,
+}
+
+impl LazyChannel {
+    fn new(endpoint: Endpoint) -> Self {
+        Self {
+            endpoint,
+            channel: OnceCell::new(),
+        }
+    }
+
+    async fn channel(&self) -> Channel {
+        self.channel
+            .get_or_init(|| async { self.endpoint.connect_lazy() })
+            .await
+            .clone()
+    }
 }
 
 pub(crate) async fn authenticated_request<RequestMessage, ResponseMessage, Call, CallFuture>(
@@ -101,6 +135,7 @@ pub(crate) fn map_status(operation: &'static str, status: Status) -> LndError {
         return LndError::Transport {
             operation,
             detail: Cow::Borrowed("gRPC transport failed"),
+            source: Box::new(status),
         };
     }
     match status.code() {
@@ -126,21 +161,24 @@ fn has_transport_source(status: &Status) -> bool {
     false
 }
 
-fn tls_channel(config: &LndConfig) -> Result<Channel, LndError> {
-    let domain = config
+fn tls_endpoint(config: &LndConfig) -> Result<Endpoint, LndError> {
+    let domain = match config
         .endpoint()
-        .host_str()
-        .ok_or_else(invalid_transport_configuration)?
-        .to_owned();
+        .host()
+        .ok_or_else(|| invalid_transport_configuration(missing_endpoint_host()))?
+    {
+        Host::Domain(domain) => domain.to_owned(),
+        Host::Ipv4(address) => address.to_string(),
+        Host::Ipv6(address) => address.to_string(),
+    };
     let endpoint = Endpoint::from_shared(config.endpoint().as_str().to_owned())
-        .map_err(|_| invalid_transport_configuration())?;
+        .map_err(invalid_transport_configuration)?;
     let tls = ClientTlsConfig::new()
         .ca_certificate(Certificate::from_pem(config.certificate()))
         .domain_name(domain);
-    let endpoint = endpoint
+    endpoint
         .tls_config(tls)
-        .map_err(|_| invalid_transport_configuration())?;
-    Ok(endpoint.connect_lazy())
+        .map_err(invalid_transport_configuration)
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {
@@ -153,11 +191,19 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     output
 }
 
-fn invalid_transport_configuration() -> LndError {
+fn invalid_transport_configuration(source: impl StdError + Send + Sync + 'static) -> LndError {
     LndError::Transport {
         operation: Cow::Borrowed("configure transport"),
         detail: Cow::Borrowed("invalid HTTPS transport configuration"),
+        source: Box::new(source),
     }
+}
+
+fn missing_endpoint_host() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "validated endpoint has no host",
+    )
 }
 
 #[cfg(test)]
@@ -167,7 +213,7 @@ mod harness {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{error::Error as _, sync::Arc, time::Duration};
 
     use rcgen::CertifiedKey;
     use tokio::sync::{Mutex, oneshot};
@@ -227,13 +273,23 @@ mod tests {
 
     impl TestServer {
         async fn start(delay: Duration, status: Option<Status>) -> Self {
+            Self::start_on("127.0.0.1:0", "localhost", "localhost", delay, status).await
+        }
+
+        async fn start_on(
+            bind_address: &str,
+            endpoint_host: &str,
+            certificate_name: &str,
+            delay: Duration,
+            status: Option<Status>,
+        ) -> Self {
             let CertifiedKey { cert, signing_key } =
-                rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+                rcgen::generate_simple_self_signed(vec![certificate_name.into()]).unwrap();
             let certificate = cert.pem().into_bytes();
             let identity = Identity::from_pem(&certificate, signing_key.serialize_pem());
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind(bind_address).await.unwrap();
             let endpoint = format!(
-                "https://localhost:{}",
+                "https://{endpoint_host}:{}",
                 listener.local_addr().unwrap().port()
             );
             let last_macaroon = Arc::new(Mutex::new(None));
@@ -293,7 +349,11 @@ mod tests {
 
     async fn probe_with_transport(config: LndConfig) -> Result<String, LndError> {
         let client = LndClient::with_config(config)?;
-        let mut harness = HarnessClient::new(client.inner.channel.clone());
+        probe_with_client(client).await
+    }
+
+    async fn probe_with_client(client: LndClient) -> Result<String, LndError> {
+        let mut harness = HarnessClient::new(client.inner.channel().await);
         let response = authenticated_request(&client.inner, "probe", ProbeRequest {}, |request| {
             harness.probe(request)
         })
@@ -301,9 +361,56 @@ mod tests {
         Ok(response.into_inner().message)
     }
 
+    fn assert_source_chain_is_redacted(error: &LndError, forbidden: &[&str]) {
+        let top_level = format!("{error} {error:?}");
+        for marker in forbidden {
+            assert!(!top_level.contains(marker));
+        }
+
+        let mut source = error.source();
+        let mut depth = 0;
+        while let Some(cause) = source {
+            depth += 1;
+            let message = cause.to_string();
+            for marker in forbidden {
+                assert!(!message.contains(marker));
+            }
+            source = cause.source();
+        }
+        assert!(depth > 0, "transport errors must retain a source chain");
+    }
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn authenticated_and_unauthenticated_clients_are_send_and_sync() {
+        assert_send_sync::<LndClient>();
+        assert_send_sync::<super::UnauthenticatedLndClient>();
+    }
+
+    #[test]
+    fn unauthenticated_construction_does_not_require_a_tokio_runtime() {
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .unwrap()
+            .cert
+            .pem()
+            .into_bytes();
+        let config = LndConfig::new(
+            "https://localhost:10009",
+            certificate,
+            MACAROON.to_vec(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let transport = unauthenticated(&config).unwrap();
+
+        assert!(format!("{transport:?}").starts_with("UnauthenticatedLndClient"));
+    }
+
     async fn probe_without_authentication(config: &LndConfig) -> Result<String, LndError> {
         let transport = unauthenticated(config)?;
-        let mut harness = HarnessClient::new(transport.channel.clone());
+        let mut harness = HarnessClient::new(transport.channel().await);
         let response =
             bounded_request(transport.timeout, "probe", harness.probe(ProbeRequest {})).await?;
         Ok(response.into_inner().message)
@@ -325,6 +432,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ipv4_ip_san_is_verified_without_dns_sni() {
+        let server = TestServer::start_on(
+            "127.0.0.1:0",
+            "127.0.0.1",
+            "127.0.0.1",
+            Duration::ZERO,
+            None,
+        )
+        .await;
+
+        let response = probe_with_transport(server.config(Duration::from_secs(1)))
+            .await
+            .unwrap();
+
+        assert_eq!(response, "ready");
+    }
+
+    #[tokio::test]
+    async fn bracketed_ipv6_endpoint_verifies_an_ipv6_ip_san() {
+        let server = TestServer::start_on("[::1]:0", "[::1]", "::1", Duration::ZERO, None).await;
+
+        let response = probe_with_transport(server.config(Duration::from_secs(1)))
+            .await
+            .unwrap();
+
+        assert_eq!(response, "ready");
+    }
+
+    #[tokio::test]
+    async fn client_constructed_in_a_short_lived_runtime_works_in_another_runtime() {
+        let server = TestServer::start(Duration::ZERO, None).await;
+        let config = server.config(Duration::from_secs(1));
+        let client = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move { LndClient::with_config(config).unwrap() })
+        })
+        .join()
+        .unwrap();
+
+        let response = probe_with_client(client).await.unwrap();
+
+        assert_eq!(response, "ready");
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_calls_both_complete() {
+        let server = TestServer::start(Duration::ZERO, None).await;
+        let client = LndClient::with_config(server.config(Duration::from_secs(1))).unwrap();
+
+        let (first, second) =
+            tokio::join!(probe_with_client(client.clone()), probe_with_client(client));
+
+        assert_eq!(first.unwrap(), "ready");
+        assert_eq!(second.unwrap(), "ready");
+    }
+
+    #[test]
+    fn invalid_pem_retains_a_redacted_transport_source_chain() {
+        const PEM_MARKER: &str = "PEM-SOURCE-SECRET";
+        const MACAROON_MARKER: &[u8] = b"macaroon-source-secret";
+        const MACAROON_HEX: &str = "6d616361726f6f6e2d736f757263652d736563726574";
+        let certificate =
+            format!("-----BEGIN CERTIFICATE-----\n{PEM_MARKER}\n-----END CERTIFICATE-----\n");
+        let config = LndConfig::new(
+            "https://localhost:10009",
+            certificate.as_bytes().to_vec(),
+            MACAROON_MARKER.to_vec(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let error = LndClient::with_config(config).unwrap_err();
+
+        assert_source_chain_is_redacted(&error, &[PEM_MARKER, &certificate, MACAROON_HEX]);
+    }
+
+    #[tokio::test]
     async fn untrusted_certificate_cannot_reach_the_service() {
         let server = TestServer::start(Duration::ZERO, None).await;
         let untrusted_certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])
@@ -332,10 +519,11 @@ mod tests {
             .cert
             .pem()
             .into_bytes();
+        let untrusted_pem = String::from_utf8(untrusted_certificate.clone()).unwrap();
         let config = LndConfig::new(
             &server.endpoint,
             untrusted_certificate,
-            MACAROON.to_vec(),
+            b"macaroon-source-secret".to_vec(),
             Duration::from_secs(1),
         )
         .unwrap();
@@ -343,6 +531,14 @@ mod tests {
         let error = probe_with_transport(config).await.unwrap_err();
 
         assert!(matches!(error, LndError::Transport { .. }));
+        assert_source_chain_is_redacted(
+            &error,
+            &[
+                &untrusted_pem,
+                "macaroon-source-secret",
+                "6d616361726f6f6e2d736f757263652d736563726574",
+            ],
+        );
         assert_eq!(server.last_macaroon().await, None);
     }
 

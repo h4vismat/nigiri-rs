@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io, path::PathBuf, time::Duration};
+use std::{borrow::Cow, error::Error, io, path::PathBuf, time::Duration};
 
 use bitcoin::hashes::sha256;
 
@@ -24,6 +24,8 @@ pub enum LndError {
     Transport {
         operation: Cow<'static, str>,
         detail: Cow<'static, str>,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
     },
     /// LND rejected the configured macaroon.
     #[error("authentication failed during {operation}: {detail}")]

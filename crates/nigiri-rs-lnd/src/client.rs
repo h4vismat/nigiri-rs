@@ -27,7 +27,7 @@ impl LndClient {
     }
 
     async fn get_info(&self) -> Result<NodeInfo, LndError> {
-        let mut client = LightningClient::new(self.inner.channel.clone());
+        let mut client = LightningClient::new(self.inner.channel().await);
         let response =
             authenticated_request(&self.inner, "get info", GetInfoRequest {}, |request| {
                 client.get_info(request)
@@ -52,19 +52,36 @@ mod tests {
 
     use crate::{LndClient, LndConfig, LndError};
 
-    #[tokio::test]
-    async fn construction_is_lazy_and_wait_ready_performs_the_first_rpc() {
+    fn config() -> LndConfig {
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])
             .unwrap()
             .cert
             .pem()
             .into_bytes();
+        LndConfig::new(
+            "https://localhost:10009",
+            certificate,
+            vec![1],
+            Duration::from_millis(100),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn construction_does_not_require_a_tokio_runtime() {
+        let client = LndClient::with_config(config()).unwrap();
+
+        assert!(format!("{client:?}").starts_with("LndClient"));
+    }
+
+    #[tokio::test]
+    async fn construction_is_lazy_and_wait_ready_performs_the_first_rpc() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let config = LndConfig::new(
             format!("https://localhost:{port}"),
-            certificate,
+            config().certificate().to_vec(),
             vec![1],
             Duration::from_millis(100),
         )
