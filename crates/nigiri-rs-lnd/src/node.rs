@@ -233,6 +233,10 @@ mod tests {
     };
 
     const NODE_KEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const V2_ONION: &str = "abcdefghijklmnop.onion";
+    const V3_ONION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion";
+    const V3_ONION_UPPER_ROOT: &str =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.ONION.";
 
     #[derive(Default)]
     struct FakeNodeRpc {
@@ -501,7 +505,6 @@ mod tests {
 
     #[test]
     fn peer_hosts_serialize_to_unambiguous_lnd_endpoints() {
-        const ONION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion";
         let public_key = NODE_KEY.parse::<PublicKey>().unwrap();
 
         for (host, expected) in [
@@ -510,7 +513,7 @@ mod tests {
             ("2001:db8::1", "[2001:db8::1]:9735"),
             ("[2001:db8::1]", "[2001:db8::1]:9735"),
             (
-                ONION,
+                V3_ONION,
                 concat!(
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
                     ":9735"
@@ -523,6 +526,32 @@ mod tests {
 
             assert_eq!(request.addr.unwrap().host, expected);
         }
+    }
+
+    #[test]
+    fn outbound_peer_address_rejects_retired_v2_onion_services() {
+        let public_key = NODE_KEY.parse::<PublicKey>().unwrap();
+
+        let error = PeerAddress::new(public_key, V2_ONION, 9735).unwrap_err();
+
+        assert!(matches!(error, LndError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn outbound_v3_onion_is_canonicalized_before_serialization() {
+        let public_key = NODE_KEY.parse::<PublicKey>().unwrap();
+        let peer = PeerAddress::new(public_key, V3_ONION_UPPER_ROOT, 9735).unwrap();
+
+        let request = connect_peer_request(&peer);
+
+        assert_eq!(peer.host(), V3_ONION);
+        assert_eq!(
+            request.addr.unwrap().host,
+            concat!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+                ":9735"
+            )
+        );
     }
 
     #[test]
@@ -565,6 +594,7 @@ mod tests {
             "bob.internal:9735",
             "127.0.0.1:9735",
             "[2001:db8::1]:9735",
+            "abcdefghijklmnop.onion:9735",
             ONION_ENDPOINT,
         ] {
             let converted = peer(ProtoPeer {
