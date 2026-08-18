@@ -119,12 +119,30 @@ pub(crate) async fn bounded_request<ResponseMessage, CallFuture>(
 where
     CallFuture: Future<Output = Result<Response<ResponseMessage>, Status>>,
 {
-    match tokio::time::timeout(duration, call).await {
+    bounded_request_until(
+        tokio::time::Instant::now() + duration,
+        duration,
+        operation,
+        call,
+    )
+    .await
+}
+
+pub(crate) async fn bounded_request_until<ResponseMessage, CallFuture>(
+    deadline: tokio::time::Instant,
+    configured_duration: Duration,
+    operation: &'static str,
+    call: CallFuture,
+) -> Result<Response<ResponseMessage>, LndError>
+where
+    CallFuture: Future<Output = Result<Response<ResponseMessage>, Status>>,
+{
+    match tokio::time::timeout_at(deadline, call).await {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(status)) => Err(map_status(operation, status)),
         Err(_) => Err(LndError::Timeout {
             operation: Cow::Borrowed(operation),
-            duration,
+            duration: configured_duration,
         }),
     }
 }

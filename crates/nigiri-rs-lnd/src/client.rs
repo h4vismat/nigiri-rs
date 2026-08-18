@@ -1,11 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use crate::{
-    LndConfig, LndError, NodeInfo,
-    convert::node_info,
-    proto::lnrpc::{GetInfoRequest, lightning_client::LightningClient},
-    transport::{ClientInner, authenticated_request},
-};
+use crate::{LndConfig, LndError, NodeInfo, transport::ClientInner};
 
 /// Immutable, cheaply cloneable client for an externally managed LND node.
 #[derive(Clone)]
@@ -25,16 +20,6 @@ impl LndClient {
     pub async fn wait_ready(&self) -> Result<NodeInfo, LndError> {
         self.get_info().await
     }
-
-    async fn get_info(&self) -> Result<NodeInfo, LndError> {
-        let mut client = LightningClient::new(self.inner.channel().await);
-        let response =
-            authenticated_request(&self.inner, "get info", GetInfoRequest {}, |request| {
-                client.get_info(request)
-            })
-            .await?;
-        node_info(response.into_inner())
-    }
 }
 
 impl fmt::Debug for LndClient {
@@ -50,7 +35,11 @@ impl fmt::Debug for LndClient {
 mod tests {
     use std::time::Duration;
 
-    use crate::{LndClient, LndConfig, LndError};
+    use bitcoin::secp256k1::PublicKey;
+
+    use crate::{
+        LightningNode, LndClient, LndConfig, LndError, OpenChannelRequest, PeerAddress, Sats,
+    };
 
     fn config() -> LndConfig {
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])
@@ -94,5 +83,27 @@ mod tests {
             error,
             LndError::Status { .. } | LndError::Transport { .. } | LndError::Timeout { .. }
         ));
+    }
+
+    #[test]
+    fn lightning_node_operations_return_send_futures() {
+        fn assert_node<T: LightningNode<Error = LndError>>(_node: &T) {}
+        fn assert_send<T: Send>(_value: T) {}
+
+        let client = LndClient::with_config(config()).unwrap();
+        let public_key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            .parse::<PublicKey>()
+            .unwrap();
+        let peer = PeerAddress::new(public_key, "bob.internal", 9735).unwrap();
+        let open = OpenChannelRequest::new(public_key, Sats::new(2), Sats::new(1)).unwrap();
+
+        assert_node(&client);
+        assert_send(LightningNode::get_info(&client));
+        assert_send(LightningNode::new_address(&client));
+        assert_send(LightningNode::wallet_balance(&client));
+        assert_send(LightningNode::connect_peer(&client, &peer));
+        assert_send(LightningNode::list_peers(&client));
+        assert_send(LightningNode::open_channel(&client, open));
+        assert_send(LightningNode::list_channels(&client));
     }
 }
