@@ -12,23 +12,10 @@ use nigiri_rs_core::NigiriError;
 pub enum FixtureError {
     #[error("invalid fixture configuration: {detail}")]
     InvalidConfiguration { detail: String },
-    #[error("container runtime is unavailable")]
-    RuntimeUnavailable {
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[error("failed to start {service} from {image}: {diagnostics}")]
-    ContainerStart {
-        service: &'static str,
-        image: String,
-        diagnostics: String,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[error("failed to discover mapped {container_port} port for {service}: {diagnostics}")]
-    PortDiscovery {
-        service: &'static str,
-        container_port: u16,
+    #[error("container runtime {operation} failed for {resource}: {diagnostics}")]
+    Runtime {
+        operation: String,
+        resource: String,
         diagnostics: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -66,33 +53,18 @@ mod tests {
 
     use crate::FixtureError;
 
-    // Catches a regression that leaks runtime details into the stable unavailable-runtime message.
     #[test]
-    fn runtime_unavailable_has_stable_display_and_preserves_its_source() {
-        let error = FixtureError::RuntimeUnavailable {
-            source: Box::new(io::Error::other("connection refused")),
-        };
-
-        assert_eq!(error.to_string(), "container runtime is unavailable");
-        assert_eq!(
-            Error::source(&error).map(ToString::to_string).as_deref(),
-            Some("connection refused")
-        );
-    }
-
-    // Catches a regression that omits the failing service, image, diagnostics, or underlying cause.
-    #[test]
-    fn container_start_reports_context_and_preserves_its_source() {
-        let error = FixtureError::ContainerStart {
-            service: "bitcoind",
-            image: "registry.example/bitcoin:v1".to_owned(),
-            diagnostics: "health check timed out".to_owned(),
+    fn runtime_failure_names_the_operation_and_resource() {
+        let error = FixtureError::Runtime {
+            operation: "create container".to_owned(),
+            resource: "bitcoind".to_owned(),
+            diagnostics: "connection refused".to_owned(),
             source: Box::new(io::Error::other("connection refused")),
         };
 
         assert_eq!(
             error.to_string(),
-            "failed to start bitcoind from registry.example/bitcoin:v1: health check timed out"
+            "container runtime create container failed for bitcoind: connection refused"
         );
         assert_eq!(
             Error::source(&error).map(ToString::to_string).as_deref(),

@@ -2,7 +2,7 @@
 //! here disappears, expansions break in the consumer's crate with an error pointing at code they
 //! did not write — so the paths are pinned here, where the failure is local and legible.
 
-#![cfg(feature = "testcontainers")]
+#![cfg(feature = "fixtures")]
 
 // Catches a dropped re-export in the facade's private surface. Each path below appears verbatim in
 // generated code; naming them in type position forces the compiler to resolve them.
@@ -10,8 +10,8 @@
 fn generated_code_paths_resolve() {
     fn accepts<T>() {}
 
-    accepts::<nigiri_rs::__private::testcontainers::Fixture<nigiri_rs::Bitcoin>>();
-    accepts::<nigiri_rs::__private::testcontainers::FixtureError>();
+    accepts::<nigiri_rs::__private::fixtures::Fixture<nigiri_rs::Bitcoin>>();
+    accepts::<nigiri_rs::__private::fixtures::FixtureError>();
 
     // The generated wrapper is annotated `#[::nigiri_rs::__private::tokio::test]`, so the runtime
     // must be reachable by that path too.

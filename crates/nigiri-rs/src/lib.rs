@@ -12,12 +12,12 @@
 //!
 //! # Fixtures
 //!
-//! Enable the `testcontainers` feature to reach `testcontainers`, which provisions a throwaway
+//! Enable the `fixtures` feature to reach `fixtures`, which provisions a throwaway
 //! regtest stack per test. It is off by default because it pulls Docker client dependencies that a
 //! consumer talking to a host-owned Nigiri does not need.
 //!
 //! ```toml
-//! nigiri-rs = { version = "0.5", features = ["testcontainers"] }
+//! nigiri-rs = { version = "0.5", features = ["fixtures"] }
 //! ```
 //!
 //! # Testing a wallet against a throwaway chain
@@ -30,13 +30,13 @@ pub use nigiri_rs_core::*;
 
 /// Ephemeral Docker-backed regtest fixtures.
 ///
-/// Requires the `testcontainers` feature.
-#[cfg(feature = "testcontainers")]
-pub use nigiri_rs_testcontainers as testcontainers;
+/// Requires the `fixtures` feature.
+#[cfg(feature = "fixtures")]
+pub use nigiri_rs_fixtures as fixtures;
 
 /// Provisions a regtest stack for a test and injects a ready [`NigiriClient`].
 ///
-/// Requires the `testcontainers` feature, and Docker.
+/// Requires the `fixtures` feature, and a Docker-compatible container engine.
 ///
 /// ```no_run
 /// use nigiri_rs::{Bitcoin, NigiriClient};
@@ -64,7 +64,7 @@ pub use nigiri_rs_testcontainers as testcontainers;
 /// parameters, which still produce independent stacks.
 ///
 /// Two arguments are accepted: `startup_timeout = <seconds>` and `flavor = "multi_thread"`.
-#[cfg(feature = "testcontainers")]
+#[cfg(feature = "fixtures")]
 pub use nigiri_rs_macros::test;
 
 /// Implementation detail of `#[nigiri_rs::test]`. Not public API.
@@ -72,9 +72,9 @@ pub use nigiri_rs_macros::test;
 /// Generated code reaches every item it needs through this module, so a consumer depends only on
 /// `nigiri-rs` and never has to add `tokio` or the fixtures crate to make an expansion compile.
 /// Nothing here is covered by semver; do not reference it directly.
-#[cfg(feature = "testcontainers")]
+#[cfg(feature = "fixtures")]
 #[doc(hidden)]
 pub mod __private {
-    pub use nigiri_rs_testcontainers as testcontainers;
+    pub use nigiri_rs_fixtures as fixtures;
     pub use tokio;
 }

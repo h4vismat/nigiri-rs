@@ -49,14 +49,14 @@ fn every_published_path_still_resolves() {
 
 // Catches the fixtures being re-exported unconditionally, which would drag Docker dependencies
 // into a client-only build.
-#[cfg(feature = "testcontainers")]
+#[cfg(feature = "fixtures")]
 #[test]
 fn fixtures_are_reachable_when_the_feature_is_on() {
     fn accepts<T>() {}
-    accepts::<nigiri_rs::testcontainers::Fixture<Bitcoin>>();
-    accepts::<nigiri_rs::testcontainers::FixtureError>();
-    accepts::<nigiri_rs::testcontainers::PegPair>();
-    accepts::<nigiri_rs::testcontainers::PegPairBuilder>();
+    accepts::<nigiri_rs::fixtures::Fixture<Bitcoin>>();
+    accepts::<nigiri_rs::fixtures::FixtureError>();
+    accepts::<nigiri_rs::fixtures::PegPair>();
+    accepts::<nigiri_rs::fixtures::PegPairBuilder>();
 }
 
 // Catches a broken feature forward in the facade manifest. `bitcoin_rpc_types` is the only core

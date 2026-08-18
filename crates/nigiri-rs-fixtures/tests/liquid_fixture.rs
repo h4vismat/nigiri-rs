@@ -6,7 +6,7 @@
 //! files — this crate cannot depend on the facade the macro expands into. If you change
 //! `mint`, `faucet_asset`, or the typed RPC shapes, their proof is over there.
 
-use nigiri_rs_testcontainers::{Fixture, Liquid};
+use nigiri_rs_fixtures::{Fixture, Liquid};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 

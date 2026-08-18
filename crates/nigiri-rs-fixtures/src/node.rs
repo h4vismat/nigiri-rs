@@ -1,10 +1,6 @@
 use std::time::Duration;
 
 use nigiri_rs_core::{NigiriClient, NigiriConfig, NigiriError};
-use testcontainers::{
-    ContainerAsync, ContainerRequest, GenericImage, ImageExt, core::IntoContainerPort,
-    runners::AsyncRunner,
-};
 use url::Url;
 use uuid::Uuid;
 
@@ -14,38 +10,13 @@ use crate::{
     deadline::Deadline,
     diagnostics::{MAX_SOURCE_BYTES, redacted_head, redacted_source, redacted_tail},
     endpoint::mapped_http_url,
-    owned_start::{attach_container_log, classify_start_error, mapped_port, run_owned_start},
     readiness::RETRY_DELAY,
+    runtime::{ContainerEngine, RunningContainer, Startup, node_spec, runtime_error},
 };
 
 pub(crate) struct StartedNode {
-    pub(crate) container: ContainerAsync<GenericImage>,
+    pub(crate) container: RunningContainer,
     pub(crate) client_config: NigiriConfig,
-}
-
-pub(crate) fn request<C: FixtureChain>(
-    image: &ContainerImage,
-    network_name: &str,
-    container_name: &str,
-    extra_args: &[String],
-) -> Result<ContainerRequest<GenericImage>, FixtureError> {
-    image.validate()?;
-
-    // The entrypoint is applied here, before the request conversion, and only when the image asks
-    // for one: an image that entrypoints its own daemon must keep it, so the entrypoint travels with
-    // the image descriptor rather than being fixed per chain.
-    let mut generic = GenericImage::new(image.name().to_owned(), image.testcontainers_tag());
-    if let Some(entrypoint) = image.entrypoint() {
-        generic = generic.with_entrypoint(entrypoint);
-    }
-
-    let cmd = merge_node_args(C::node_cmd(), extra_args);
-
-    Ok(generic
-        .with_exposed_port(C::NODE_RPC_PORT.tcp())
-        .with_network(network_name)
-        .with_container_name(container_name)
-        .with_cmd(cmd))
 }
 
 /// Extends the chain's own arguments with a composite's, letting the composite win a conflict.
@@ -76,37 +47,51 @@ fn argument_key(argument: &str) -> &str {
     argument.split_once('=').map_or(argument, |(key, _)| key)
 }
 
-pub(crate) async fn start_node<C: FixtureChain>(
+pub(crate) async fn start_node<C: FixtureChain, E: ContainerEngine>(
+    startup: &mut Startup<E>,
     image: &ContainerImage,
     network_name: &str,
     container_name: &str,
     extra_args: &[String],
     deadline: &Deadline,
 ) -> Result<StartedNode, FixtureError> {
-    let container_request = request::<C>(image, network_name, container_name, extra_args)?;
-    let container = run_owned_start(
-        C::NODE_SERVICE,
-        image,
-        deadline,
-        container_name,
-        "starting node container",
-        container_request.start(),
-    )
-    .await?;
-
-    let host = deadline
-        .run(C::NODE_SERVICE, "resolving node host", container.get_host())
+    let spec = node_spec::<C>(
+        image.clone(),
+        network_name.to_owned(),
+        container_name.to_owned(),
+        extra_args.to_vec(),
+    )?;
+    let container = match deadline
+        .run(
+            C::NODE_SERVICE,
+            "starting node container",
+            startup.start_container(spec),
+        )
         .await?
-        .map_err(|error| classify_start_error(C::NODE_SERVICE, image, error))?
-        .to_string();
-    let rpc_port = mapped_port(
-        C::NODE_SERVICE,
-        &container,
-        C::NODE_RPC_PORT,
-        "resolving node RPC mapped port",
-        deadline,
-    )
-    .await?;
+    {
+        Ok(container) => container,
+        Err(error) => {
+            let error = runtime_error(C::NODE_SERVICE, error);
+            return Err(crate::runtime::attach_container_log(
+                startup,
+                C::NODE_SERVICE,
+                container_name,
+                error,
+            )
+            .await);
+        }
+    };
+
+    let host = container.host.clone();
+    let rpc_port = *container.ports.get(&C::NODE_RPC_PORT).ok_or_else(|| {
+        FixtureError::InvalidConfiguration {
+            detail: format!(
+                "container runtime omitted the mapped {} port for {}",
+                C::NODE_RPC_PORT,
+                C::NODE_SERVICE
+            ),
+        }
+    })?;
 
     let root_url = mapped_http_url(&host, rpc_port)?;
     let root_config = fixture_rpc_config::<C>(
@@ -117,7 +102,13 @@ pub(crate) async fn start_node<C: FixtureChain>(
     if let Err(not_ready) = wait_for_root_rpc::<C>(&root, deadline).await {
         // A node that never answered is the likeliest startup failure, and its own log is the
         // only thing that explains why, so the timeout carries a bounded tail of it.
-        return Err(attach_container_log(C::NODE_SERVICE, not_ready, &container).await);
+        return Err(crate::runtime::attach_container_log(
+            startup,
+            C::NODE_SERVICE,
+            &container.id,
+            not_ready,
+        )
+        .await);
     }
 
     let wallet_name = format!("nigiri-rs-{}", Uuid::new_v4().simple());
@@ -243,98 +234,17 @@ pub(crate) fn bootstrap_error(
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, io, time::Duration};
+    use std::{error::Error, time::Duration};
 
     use nigiri_rs_core::NigiriError;
-    use testcontainers::{
-        Image,
-        core::{
-            IntoContainerPort,
-            error::{ClientError, TestcontainersError},
-        },
-    };
     use url::Url;
 
-    use super::{bootstrap_error, fixture_client, fixture_rpc_config, request, wallet_rpc_url};
+    use super::{bootstrap_error, fixture_client, fixture_rpc_config, wallet_rpc_url};
     use crate::{
-        ContainerImage, FixtureError,
+        FixtureError,
         chain::FixtureChain,
         diagnostics::{MAX_DIAGNOSTIC_BYTES, MAX_SOURCE_BYTES},
-        owned_start::{classify_start_error, port_discovery_error},
     };
-
-    // Catches a regression that exposes the wrong node port or drops the topology a fixture's
-    // containers are scoped to.
-    #[test]
-    fn request_exposes_the_chains_rpc_port_on_the_fixture_topology() {
-        use nigiri_rs_core::Bitcoin;
-
-        let request = super::request::<Bitcoin>(
-            &ContainerImage::bitcoind_default(),
-            "nigiri-test-fixture",
-            "nigiri-bitcoind-fixture",
-            &[],
-        )
-        .expect("the pinned Bitcoind image is valid");
-
-        assert_eq!(request.expose_ports(), &[18_443.tcp()]);
-        // The bitcoind image entrypoints its own daemon, so the fixture must not supply one.
-        assert_eq!(request.entrypoint(), None);
-        assert_eq!(request.network().as_deref(), Some("nigiri-test-fixture"));
-        assert_eq!(
-            request.container_name().as_deref(),
-            Some("nigiri-bitcoind-fixture")
-        );
-        // Guards against a regression that passes `image.tag()` instead of
-        // `image.testcontainers_tag()`: both compile and every other assertion here would still
-        // pass, but the container would pull a floating `latest` instead of the pinned
-        // `tag@digest`, silently unpinning the image the crate's docs promise is pinned.
-        assert_eq!(
-            request.image().name(),
-            ContainerImage::bitcoind_default().name()
-        );
-        assert_eq!(
-            request.image().tag(),
-            ContainerImage::bitcoind_default().testcontainers_tag()
-        );
-    }
-
-    // Catches a regression that drops the image's entrypoint on the way into the request. Without
-    // it the Elements image runs its default `bash` and the chain's whole flag vector is discarded,
-    // which surfaces only as a node that never answers RPC.
-    #[test]
-    fn request_carries_the_images_entrypoint_when_it_declares_one() {
-        use nigiri_rs_core::Liquid;
-
-        let request = super::request::<Liquid>(
-            &ContainerImage::elements_default(),
-            "nigiri-test-fixture",
-            "nigiri-elements-fixture",
-            &[],
-        )
-        .expect("the pinned Elements image is valid");
-
-        assert_eq!(request.entrypoint(), Some("elementsd"));
-        assert_eq!(request.expose_ports(), &[18_884.tcp()]);
-    }
-
-    // Catches a regression that defers invalid image validation until Docker request startup.
-    #[test]
-    fn request_rejects_invalid_images_before_constructing_a_request() {
-        use nigiri_rs_core::Bitcoin;
-
-        let error = match request::<Bitcoin>(
-            &ContainerImage::new("", "v1"),
-            "nigiri-test-fixture",
-            "nigiri-bitcoind-fixture",
-            &[],
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("an image without a name must be rejected"),
-        };
-
-        assert!(matches!(error, FixtureError::InvalidConfiguration { .. }));
-    }
 
     // Catches a regression that lets the wallet endpoint acquire a trailing slash or loses the
     // exact wallet name path segment needed by Bitcoin Core.
@@ -373,67 +283,6 @@ mod tests {
         );
     }
 
-    // Catches a regression that boxes a raw error as a fixture source, letting error-chain
-    // formatters expose fixture credentials or an unbounded body that bounded diagnostics hide.
-    #[test]
-    fn fixture_error_sources_are_bounded_and_redacted_across_the_whole_chain() {
-        use nigiri_rs_core::Bitcoin;
-
-        let secret_body = format!(
-            "{} -rpcuser=admin1 -rpcpassword=123 admin1:123",
-            "node-error-".repeat(4_000),
-        );
-        let image = ContainerImage::bitcoind_default();
-        let errors = [
-            bootstrap_error(
-                "Bitcoin",
-                "createwallet",
-                NigiriError::InvalidResponse {
-                    operation: "bootstrap RPC".into(),
-                    detail: secret_body.clone(),
-                },
-            ),
-            classify_start_error(
-                Bitcoin::NODE_SERVICE,
-                &image,
-                TestcontainersError::other(io::Error::other(secret_body.clone())),
-            ),
-            classify_start_error(
-                Bitcoin::NODE_SERVICE,
-                &image,
-                TestcontainersError::Client(ClientError::InvalidDockerHost(secret_body.clone())),
-            ),
-            port_discovery_error(
-                Bitcoin::NODE_SERVICE,
-                Bitcoin::NODE_RPC_PORT,
-                TestcontainersError::other(io::Error::other(secret_body.clone())),
-                "mapped port unavailable",
-            ),
-        ];
-
-        for error in errors {
-            let mut cause = Error::source(&error);
-            let mut depth = 0_usize;
-
-            while let Some(source) = cause {
-                depth += 1;
-                for rendered in [source.to_string(), format!("{source:?}")] {
-                    assert!(rendered.len() <= MAX_SOURCE_BYTES, "{rendered:.64}");
-                    assert!(!rendered.contains("admin1:123"));
-                    assert!(!rendered.contains("-rpcuser=admin1"));
-                    assert!(!rendered.contains("-rpcpassword=123"));
-                }
-                cause = source.source();
-            }
-
-            assert_eq!(
-                depth, 1,
-                "a fixture source must not expose a raw cause chain"
-            );
-            assert!(!format!("{error:?}").contains("admin1:123"));
-        }
-    }
-
     // Catches a regression that exposes wallet bootstrap failures as generic client errors or
     // leaks a large credential-bearing RPC error into the fixture display.
     #[test]
@@ -465,62 +314,6 @@ mod tests {
             assert!(diagnostics.len() <= MAX_DIAGNOSTIC_BYTES);
             assert!(!diagnostics.contains("admin1:123"));
         }
-    }
-
-    // Catches a regression that replaces the chain's own flag vector instead of extending it, or
-    // that drops a composite's extra arguments. A composite adds to what the chain declares — ZMQ
-    // publishers, peg parameters — and must never have to restate the flags it does not own.
-    #[test]
-    fn request_appends_extra_arguments_after_the_chains_own() {
-        use nigiri_rs_core::Bitcoin;
-
-        let extra = [
-            "-zmqpubrawblock=tcp://0.0.0.0:28332".to_owned(),
-            "-zmqpubrawtx=tcp://0.0.0.0:28333".to_owned(),
-        ];
-
-        let request = super::request::<Bitcoin>(
-            &ContainerImage::bitcoind_default(),
-            "nigiri-test-fixture",
-            "nigiri-bitcoind-fixture",
-            &extra,
-        )
-        .expect("the pinned Bitcoind image is valid");
-
-        // `cmd()` yields `Cow<'_, str>`; `into_owned` is what produces `String`, where
-        // `to_owned` would clone the `Cow` and leave the comparison against `Vec<String>` failing
-        // to compile.
-        let cmd: Vec<String> = request.cmd().map(std::borrow::Cow::into_owned).collect();
-        let own = Bitcoin::node_cmd();
-
-        assert_eq!(
-            cmd.len(),
-            own.len() + extra.len(),
-            "the request must carry the chain's arguments and the extras, nothing else: {cmd:?}"
-        );
-        assert_eq!(&cmd[..own.len()], own.as_slice());
-        assert_eq!(&cmd[own.len()..], extra.as_slice());
-    }
-
-    // Catches a regression that makes extra arguments mandatory, which would force every existing
-    // call site to pass an empty slice for a feature it does not use.
-    #[test]
-    fn request_without_extra_arguments_is_exactly_the_chains_own() {
-        use nigiri_rs_core::Bitcoin;
-
-        let request = super::request::<Bitcoin>(
-            &ContainerImage::bitcoind_default(),
-            "nigiri-test-fixture",
-            "nigiri-bitcoind-fixture",
-            &[],
-        )
-        .expect("the pinned Bitcoind image is valid");
-
-        // `cmd()` yields `Cow<'_, str>`; `into_owned` is what produces `String`, where
-        // `to_owned` would clone the `Cow` and leave the comparison against `Vec<String>` failing
-        // to compile.
-        let cmd: Vec<String> = request.cmd().map(std::borrow::Cow::into_owned).collect();
-        assert_eq!(cmd, Bitcoin::node_cmd());
     }
 
     // Catches a regression that appends a composite's argument beside the chain's conflicting one
@@ -614,25 +407,5 @@ mod tests {
             super::merge_node_args(Liquid::node_cmd(), &[]),
             Liquid::node_cmd()
         );
-    }
-
-    // Catches a regression that stops `request` merging at all, which is the only place the merge
-    // reaches a real container.
-    #[test]
-    fn request_overrides_the_chains_conflicting_argument() {
-        use nigiri_rs_core::Liquid;
-
-        let request = super::request::<Liquid>(
-            &ContainerImage::elements_default(),
-            "nigiri-test-fixture",
-            "nigiri-elements-fixture",
-            &["-validatepegin=1".to_owned()],
-        )
-        .expect("the pinned Elements image is valid");
-
-        let cmd: Vec<String> = request.cmd().map(std::borrow::Cow::into_owned).collect();
-        assert!(cmd.contains(&"-validatepegin=1".to_owned()), "{cmd:?}");
-        assert!(!cmd.contains(&"-validatepegin=0".to_owned()), "{cmd:?}");
-        assert_eq!(cmd.len(), Liquid::node_cmd().len(), "{cmd:?}");
     }
 }

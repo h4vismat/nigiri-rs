@@ -13,7 +13,7 @@ mod liquid;
 ///
 /// Sealed: the container lifecycle, diagnostics, and teardown guarantees this crate makes
 /// depend on internals a downstream implementation could not uphold.
-pub trait FixtureChain: NigiriNetwork + Sized + private::Sealed + 'static {
+pub trait FixtureChain: NigiriNetwork + Sized + private::Sealed + Send + Sync + 'static {
     /// Names this chain's node in diagnostics, e.g. `"bitcoind"`.
     const NODE_SERVICE: &'static str;
     /// Names this chain in caller-facing error text, e.g. `"Bitcoin"`.

@@ -9,12 +9,12 @@
 //! against real use. They live in this crate rather than the fixtures crate because the fixtures
 //! crate cannot depend on the facade the macro expands into.
 
-#![cfg(feature = "testcontainers")]
+#![cfg(feature = "fixtures")]
 
 use std::time::Duration;
 
 use bitcoin::Amount;
-use nigiri_rs::testcontainers::PegPair;
+use nigiri_rs::fixtures::PegPair;
 use nigiri_rs::{Bitcoin, Liquid, NigiriClient};
 use serde::Deserialize;
 
