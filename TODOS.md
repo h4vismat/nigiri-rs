@@ -61,20 +61,6 @@ error branch attaches the node's container log to an Electrs failure, on the sta
 means an Electrs failure can arrive while the node does not yet exist, so that pairing needs
 rethinking rather than deleting. Measure the saving before committing to it.
 
-### Probe the three services concurrently in `observe_heights`
-
-**Priority:** P4
-
-`readiness::observe_heights` issues its node `getblockcount`, Esplora `block_height`, and Electrum
-`tip_height` probes strictly in sequence each poll round, though nothing in a round depends on
-another probe's result — only the combined `Heights` is compared afterwards. Every retry round
-pays the sum of three round trips instead of the longest. Each probe is already bounded by the
-shared `Deadline`, so `tokio::join!` would not change timeout semantics.
-
-The saving is unmeasured and plausibly single-digit milliseconds per round on a loopback Docker
-port, which is why this sits below the start-overlap item. Worth measuring before touching
-readiness logic, which is the most load-bearing code in the crate.
-
 ## Container images
 
 ### Move both indexer pins to a stable Mempool release

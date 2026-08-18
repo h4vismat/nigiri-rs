@@ -46,9 +46,11 @@ struct Heights {
 fn agree(&self) -> bool { /* all three equal */ }
 ```
 
-Each round issues the three probes and compares. Not equal, or a probe failed? Wait 100 ms and go
-again. That retry delay is a single shared constant, so polling cannot drift between the loops that
-use it.
+Each round issues the three independent probes concurrently and compares their results once all three
+finish. Not equal, or a probe failed? Wait 100 ms and go again. That retry delay is a single shared
+constant, so polling cannot drift between the loops that use it. Results are interpreted in node,
+Esplora, Electrum order, so whichever network response happens to arrive first cannot change which
+failure is reported.
 
 Two properties of the loop matter more than the comparison:
 
@@ -141,11 +143,10 @@ with images pulled, 1.5 for Liquid. A fixture that returned as soon as the node 
 faster and would hand you a chain you cannot query. The seconds buy a test that cannot be flaky for
 this reason.
 
-**Three probes per round, in sequence.** Each poll round pays the sum of three round trips rather
-than the longest, though nothing in a round depends on another probe's result. Running them under
-`tokio::join!` is [TODOS.md P4](../TODOS.md); the saving is unmeasured and plausibly single-digit
-milliseconds on loopback, which is why it sits below other work. Readiness is the most load-bearing
-code in the crate and is not worth touching for an unmeasured gain.
+**Three probes per round.** Each poll round pays the longest of the three round trips rather than
+their sum. They still share one deadline, and a behavioral test holds every response until all three
+requests arrive, so changing the observer back to sequential execution fails rather than silently
+reintroducing the extra latency.
 
 **The node and indexer start sequentially.** `start()` brings the node fully up — container, RPC,
 wallet, the whole 101-block fund — before starting Electrs, though there is no compile-time
