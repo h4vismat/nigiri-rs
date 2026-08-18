@@ -140,6 +140,8 @@ pub(crate) async fn create_invoice_with<R: InvoiceRpc>(
 ) -> Result<InvoiceRecord, LndError> {
     let expected_amount = request.amount();
     let request = proto_invoice_request(request)?;
+    let expected_expiry = u64::try_from(request.expiry)
+        .map_err(|_| invalid_request("validated invoice expiry unexpectedly became negative"))?;
     let response = authenticated_request(inner, "create invoice", request, |request| {
         rpc.add_invoice(request)
     })
@@ -156,6 +158,13 @@ pub(crate) async fn create_invoice_with<R: InvoiceRpc>(
         return Err(invalid_response_with_identifier(
             "create invoice",
             "created invoice amount does not match the requested amount",
+            Some(record.payment_hash().to_string()),
+        ));
+    }
+    if record.invoice().expiry_time().as_secs() != expected_expiry {
+        return Err(invalid_response_with_identifier(
+            "create invoice",
+            "created BOLT11 expiry does not match the requested expiry",
             Some(record.payment_hash().to_string()),
         ));
     }
@@ -238,7 +247,11 @@ pub(crate) async fn lookup_payment_with<R: RouterRpc>(
         },
         |request| rpc.track_payment_v2(request),
     )
-    .await?;
+    .await
+    .map_err(|error| match error {
+        LndError::Timeout { .. } => unknown_payment_outcome("lookup payment", payment_hash),
+        other => other,
+    })?;
     consume_payment_stream(
         response.into_inner(),
         deadline,
@@ -246,7 +259,7 @@ pub(crate) async fn lookup_payment_with<R: RouterRpc>(
         "lookup payment",
         payment_hash,
         None,
-        false,
+        true,
     )
     .await
 }
@@ -389,6 +402,11 @@ fn proto_send_payment_request(
     invoice: &Bolt11Invoice,
     options: PaymentOptions,
 ) -> Result<SendPaymentRequest, LndError> {
+    if invoice.amount_milli_satoshis().is_none() {
+        return Err(invalid_request(
+            "BOLT11 invoice must include an amount because no amount override is available",
+        ));
+    }
     let fee_limit_msat = signed_i64(options.fee_limit().as_u64(), "payment fee limit")?;
     let timeout_seconds =
         i32::try_from(nonzero_whole_seconds(options.timeout(), "payment timeout")?)
@@ -417,6 +435,13 @@ fn nonzero_whole_seconds(
     duration: std::time::Duration,
     field: &'static str,
 ) -> Result<u64, LndError> {
+    if duration.subsec_nanos() != 0 {
+        return Err(invalid_request(match field {
+            "invoice expiry" => "invoice expiry must use whole seconds",
+            "payment timeout" => "payment timeout must use whole seconds",
+            _ => "duration must use whole seconds",
+        }));
+    }
     let seconds = duration.as_secs();
     if seconds == 0 {
         return Err(invalid_request(match field {
@@ -486,14 +511,9 @@ mod tests {
 
     use super::{
         InvoiceRpc, PaymentStream, RouterRpc, create_invoice_with, lookup_invoice_with,
-        lookup_payment_with, pay_invoice_with,
+        lookup_payment_with, pay_invoice_with, proto_invoice_request,
     };
 
-    const PAYMENT_HASH_BYTES: [u8; 32] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
-        0x1e, 0x1f,
-    ];
     const PREIMAGE_BYTES: [u8; 32] = [9; 32];
 
     enum StreamItem {
@@ -556,6 +576,7 @@ mod tests {
         send_response: Option<Result<FakePaymentStream, Status>>,
         track_response: Option<Result<FakePaymentStream, Status>>,
         send_delay: Duration,
+        track_delay: Duration,
         send_request: Option<SendPaymentRequest>,
         track_request: Option<TrackPaymentRequest>,
     }
@@ -582,7 +603,11 @@ mod tests {
         ) -> impl Future<Output = Result<Response<Self::PaymentStream>, Status>> + Send {
             self.track_request = Some(request.into_inner());
             let response = self.track_response.take().unwrap();
-            async move { response.map(Response::new) }
+            let delay = self.track_delay;
+            async move {
+                tokio::time::sleep(delay).await;
+                response.map(Response::new)
+            }
         }
     }
 
@@ -599,25 +624,51 @@ mod tests {
     }
 
     fn invoice() -> Bolt11Invoice {
+        invoice_with(payment_hash(), Some(25_000), 1_700_000_000, 60)
+    }
+
+    fn invoice_with(
+        payment_hash: sha256::Hash,
+        amount_msat: Option<u64>,
+        timestamp: u64,
+        expiry: u64,
+    ) -> Bolt11Invoice {
         let secret_key = SecretKey::from_slice(&[42; 32]).unwrap();
-        InvoiceBuilder::new(Currency::Regtest)
+        let builder = InvoiceBuilder::new(Currency::Regtest)
             .description("nigiri-rs payment test".into())
-            .payment_hash(payment_hash())
+            .payment_hash(payment_hash)
             .payment_secret(PaymentSecret([21; 32]))
-            .amount_milli_satoshis(25_000)
-            .duration_since_epoch(Duration::from_secs(1_700_000_000))
-            .min_final_cltv_expiry_delta(18)
+            .duration_since_epoch(Duration::from_secs(timestamp))
+            .expiry_time(Duration::from_secs(expiry))
+            .min_final_cltv_expiry_delta(18);
+        let builder = match amount_msat {
+            Some(amount) => builder.amount_milli_satoshis(amount),
+            None => builder,
+        };
+        builder
             .build_signed(|message| Secp256k1::new().sign_ecdsa_recoverable(message, &secret_key))
             .unwrap()
     }
 
     fn payment_hash() -> sha256::Hash {
-        sha256::Hash::from_byte_array(PAYMENT_HASH_BYTES)
+        sha256::Hash::hash(&PREIMAGE_BYTES)
+    }
+
+    fn proto_invoice(invoice: &Bolt11Invoice, value_msat: i64, state: i32) -> ProtoInvoice {
+        ProtoInvoice {
+            r_hash: invoice.payment_hash().to_byte_array().to_vec(),
+            payment_request: invoice.to_string(),
+            value_msat,
+            creation_date: i64::try_from(invoice.duration_since_epoch().as_secs()).unwrap(),
+            expiry: i64::try_from(invoice.expiry_time().as_secs()).unwrap(),
+            state,
+            ..Default::default()
+        }
     }
 
     fn payment_update(status: payment::PaymentStatus) -> Payment {
         Payment {
-            payment_hash: payment_hash().to_string(),
+            payment_hash: hex(&payment_hash().to_byte_array()),
             payment_preimage: if status == payment::PaymentStatus::Succeeded {
                 hex(&PREIMAGE_BYTES)
             } else {
@@ -729,7 +780,7 @@ mod tests {
         assert_eq!(
             rpc.track_request,
             Some(TrackPaymentRequest {
-                payment_hash: PAYMENT_HASH_BYTES.to_vec(),
+                payment_hash: payment_hash().to_byte_array().to_vec(),
                 no_inflight_updates: true,
             })
         );
@@ -739,7 +790,7 @@ mod tests {
     fn malformed_31_byte_hash_and_terminal_preimage_are_invalid() {
         assert!(matches!(
             created_invoice(AddInvoiceResponse {
-                r_hash: PAYMENT_HASH_BYTES[..31].to_vec(),
+                r_hash: payment_hash().to_byte_array()[..31].to_vec(),
                 payment_request: invoice().to_string(),
                 ..Default::default()
             }),
@@ -747,7 +798,7 @@ mod tests {
         ));
 
         let mut malformed_hash = payment_update(payment::PaymentStatus::InFlight);
-        malformed_hash.payment_hash = hex(&PAYMENT_HASH_BYTES[..31]);
+        malformed_hash.payment_hash = hex(&payment_hash().to_byte_array()[..31]);
         assert!(matches!(
             convert_payment(malformed_hash),
             Err(LndError::InvalidResponse { .. })
@@ -758,6 +809,20 @@ mod tests {
         assert!(matches!(
             convert_payment(malformed_preimage),
             Err(LndError::InvalidResponse { .. })
+        ));
+    }
+
+    #[test]
+    fn succeeded_payment_rejects_a_preimage_that_does_not_prove_its_hash() {
+        let mut mismatched = payment_update(payment::PaymentStatus::Succeeded);
+        mismatched.payment_hash = hex(&sha256::Hash::hash(&[8; 32]).to_byte_array());
+
+        let error = convert_payment(mismatched).unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::InvalidResponse { identifier: Some(identifier), .. }
+                if identifier == sha256::Hash::hash(&[8; 32]).to_string()
         ));
     }
 
@@ -832,6 +897,97 @@ mod tests {
             LndError::OutcomeUnknown { identifier: Some(identifier), .. }
                 if identifier == payment_hash().to_string()
         ));
+    }
+
+    #[tokio::test]
+    async fn lookup_request_timeout_preserves_the_requested_hash() {
+        let mut rpc = FakeRouterRpc {
+            track_response: Some(Ok(stream([]))),
+            track_delay: Duration::from_secs(1),
+            ..Default::default()
+        };
+
+        let error = lookup_payment_with(
+            &client(Duration::from_millis(5)).inner,
+            &mut rpc,
+            payment_hash(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown { identifier: Some(identifier), .. }
+                if identifier == payment_hash().to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn lookup_timeout_before_first_terminal_update_preserves_requested_hash() {
+        let mut rpc = FakeRouterRpc {
+            track_response: Some(Ok(stream([StreamItem::Delayed(
+                Duration::from_secs(1),
+                Ok(None),
+            )]))),
+            ..Default::default()
+        };
+
+        let error = lookup_payment_with(
+            &client(Duration::from_millis(5)).inner,
+            &mut rpc,
+            payment_hash(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown { identifier: Some(identifier), .. }
+                if identifier == payment_hash().to_string()
+        ));
+        assert!(rpc.track_request.unwrap().no_inflight_updates);
+    }
+
+    #[tokio::test]
+    async fn lookup_stream_status_before_first_update_preserves_requested_hash() {
+        let mut rpc = FakeRouterRpc {
+            track_response: Some(Ok(stream([StreamItem::Ready(Err(Status::unavailable(
+                "stream lost",
+            )))]))),
+            ..Default::default()
+        };
+
+        let error = lookup_payment_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            payment_hash(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown { identifier: Some(identifier), .. }
+                if identifier == payment_hash().to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn lookup_setup_not_found_remains_a_definitive_status() {
+        let mut rpc = FakeRouterRpc {
+            track_response: Some(Err(Status::not_found("payment not initiated"))),
+            ..Default::default()
+        };
+
+        let error = lookup_payment_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            payment_hash(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, LndError::Status { .. }));
     }
 
     #[tokio::test]
@@ -945,7 +1101,7 @@ mod tests {
     fn invoice_conversions_validate_hash_amount_and_preserve_unknown_state() {
         let invoice = invoice();
         let created = created_invoice(AddInvoiceResponse {
-            r_hash: PAYMENT_HASH_BYTES.to_vec(),
+            r_hash: payment_hash().to_byte_array().to_vec(),
             payment_request: invoice.to_string(),
             ..Default::default()
         })
@@ -954,23 +1110,10 @@ mod tests {
         assert_eq!(created.amount(), Millisats::new(25_000));
         assert_eq!(created.state(), InvoiceState::Open);
 
-        let looked_up = convert_invoice(ProtoInvoice {
-            r_hash: PAYMENT_HASH_BYTES.to_vec(),
-            payment_request: invoice.to_string(),
-            value_msat: 25_000,
-            state: 91,
-            ..Default::default()
-        })
-        .unwrap();
+        let looked_up = convert_invoice(proto_invoice(&invoice, 25_000, 91)).unwrap();
         assert_eq!(looked_up.state(), InvoiceState::Unknown(91));
 
-        let error = convert_invoice(ProtoInvoice {
-            r_hash: PAYMENT_HASH_BYTES.to_vec(),
-            payment_request: invoice.to_string(),
-            value_msat: -1,
-            ..Default::default()
-        })
-        .unwrap_err();
+        let error = convert_invoice(proto_invoice(&invoice, -1, 0)).unwrap_err();
         assert!(matches!(
             error,
             LndError::InvalidResponse { identifier: Some(identifier), .. }
@@ -983,15 +1126,47 @@ mod tests {
             (2, InvoiceState::Canceled),
             (3, InvoiceState::Accepted),
         ] {
-            let converted = convert_invoice(ProtoInvoice {
-                r_hash: PAYMENT_HASH_BYTES.to_vec(),
-                payment_request: invoice.to_string(),
-                value_msat: 25_000,
-                state: raw,
-                ..Default::default()
-            })
-            .unwrap();
+            let converted = convert_invoice(proto_invoice(&invoice, 25_000, raw)).unwrap();
             assert_eq!(converted.state(), expected);
+        }
+    }
+
+    #[test]
+    fn lookup_invoice_rejects_negative_or_mismatched_time_metadata() {
+        let invoice = invoice();
+        let mut cases = Vec::new();
+
+        let mut negative_creation = proto_invoice(&invoice, 25_000, 0);
+        negative_creation.creation_date = -1;
+        cases.push(negative_creation);
+
+        let mut negative_expiry = proto_invoice(&invoice, 25_000, 0);
+        negative_expiry.expiry = -1;
+        cases.push(negative_expiry);
+
+        let mut mismatched_creation = proto_invoice(&invoice, 25_000, 0);
+        mismatched_creation.creation_date += 1;
+        cases.push(mismatched_creation);
+
+        let mut mismatched_expiry = proto_invoice(&invoice, 25_000, 0);
+        mismatched_expiry.expiry += 1;
+        cases.push(mismatched_expiry);
+
+        let mut maximum_creation = proto_invoice(&invoice, 25_000, 0);
+        maximum_creation.creation_date = i64::MAX;
+        cases.push(maximum_creation);
+
+        let mut maximum_expiry = proto_invoice(&invoice, 25_000, 0);
+        maximum_expiry.expiry = i64::MAX;
+        cases.push(maximum_expiry);
+
+        for response in cases {
+            let error = convert_invoice(response).unwrap_err();
+            assert!(matches!(
+                error,
+                LndError::InvalidResponse { identifier: Some(identifier), .. }
+                    if identifier == payment_hash().to_string()
+            ));
         }
     }
 
@@ -1045,17 +1220,11 @@ mod tests {
         let invoice = invoice();
         let mut rpc = FakeInvoiceRpc {
             add_response: Some(Ok(AddInvoiceResponse {
-                r_hash: PAYMENT_HASH_BYTES.to_vec(),
+                r_hash: payment_hash().to_byte_array().to_vec(),
                 payment_request: invoice.to_string(),
                 ..Default::default()
             })),
-            lookup_response: Some(Ok(ProtoInvoice {
-                r_hash: PAYMENT_HASH_BYTES.to_vec(),
-                payment_request: invoice.to_string(),
-                value_msat: 25_000,
-                state: 1,
-                ..Default::default()
-            })),
+            lookup_response: Some(Ok(proto_invoice(&invoice, 25_000, 1))),
             ..Default::default()
         };
         let client = client(Duration::from_secs(1));
@@ -1084,7 +1253,7 @@ mod tests {
             rpc.lookup_request,
             Some(PaymentHash {
                 r_hash_str: String::new(),
-                r_hash: PAYMENT_HASH_BYTES.to_vec(),
+                r_hash: payment_hash().to_byte_array().to_vec(),
             })
         );
     }
@@ -1118,7 +1287,7 @@ mod tests {
         let invoice = invoice();
         let mut rpc = FakeInvoiceRpc {
             add_response: Some(Ok(AddInvoiceResponse {
-                r_hash: PAYMENT_HASH_BYTES.to_vec(),
+                r_hash: payment_hash().to_byte_array().to_vec(),
                 payment_request: invoice.to_string(),
                 ..Default::default()
             })),
@@ -1139,10 +1308,91 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn create_invoice_rejects_a_response_with_a_different_expiry() {
+        let response_invoice = invoice_with(payment_hash(), Some(25_000), 1_700_000_000, 61);
+        let mut rpc = FakeInvoiceRpc {
+            add_response: Some(Ok(AddInvoiceResponse {
+                r_hash: payment_hash().to_byte_array().to_vec(),
+                payment_request: response_invoice.to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let request =
+            CreateInvoiceRequest::new(Millisats::new(25_000), "memo", Duration::from_secs(60))
+                .unwrap();
+
+        let error = create_invoice_with(&client(Duration::from_secs(1)).inner, &mut rpc, request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::InvalidResponse { identifier: Some(identifier), .. }
+                if identifier == payment_hash().to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn fractional_or_overflowing_invoice_expiry_is_rejected_before_rpc() {
+        for expiry in [
+            Duration::from_millis(1_500),
+            Duration::from_secs(i64::MAX as u64 + 1),
+        ] {
+            let mut rpc = FakeInvoiceRpc::default();
+            let request =
+                CreateInvoiceRequest::new(Millisats::new(25_000), "memo", expiry).unwrap();
+
+            let error =
+                create_invoice_with(&client(Duration::from_secs(1)).inner, &mut rpc, request)
+                    .await
+                    .unwrap_err();
+
+            assert!(matches!(error, LndError::InvalidRequest { .. }));
+            assert!(rpc.add_request.is_none());
+        }
+    }
+
+    #[test]
+    fn maximum_signed_invoice_expiry_is_preserved_without_truncation() {
+        let request = CreateInvoiceRequest::new(
+            Millisats::new(25_000),
+            "memo",
+            Duration::from_secs(i64::MAX as u64),
+        )
+        .unwrap();
+
+        let proto = proto_invoice_request(request).unwrap();
+
+        assert_eq!(proto.expiry, i64::MAX);
+    }
+
+    #[tokio::test]
+    async fn amountless_invoice_is_rejected_before_send_payment_rpc() {
+        let amountless = invoice_with(payment_hash(), None, 1_700_000_000, 60);
+        let mut rpc = FakeRouterRpc {
+            send_response: Some(Ok(stream([]))),
+            ..Default::default()
+        };
+
+        let error = pay_invoice_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            &amountless,
+            PaymentOptions::new(Millisats::new(10_000), Duration::from_secs(5)).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, LndError::InvalidRequest { .. }));
+        assert!(rpc.send_request.is_none());
+    }
+
     #[test]
     fn malformed_created_invoice_preserves_a_valid_hash_identifier() {
         let error = created_invoice(AddInvoiceResponse {
-            r_hash: PAYMENT_HASH_BYTES.to_vec(),
+            r_hash: payment_hash().to_byte_array().to_vec(),
             payment_request: "not-a-bolt11-invoice".into(),
             ..Default::default()
         })
@@ -1175,7 +1425,7 @@ mod tests {
     fn invoice_record_debug_omits_the_payment_request() {
         let payment_request = invoice().to_string();
         let record = created_invoice(AddInvoiceResponse {
-            r_hash: PAYMENT_HASH_BYTES.to_vec(),
+            r_hash: payment_hash().to_byte_array().to_vec(),
             payment_request: payment_request.clone(),
             ..Default::default()
         })

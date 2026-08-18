@@ -135,13 +135,40 @@ pub(crate) fn invoice(response: ProtoInvoice) -> Result<InvoiceRecord, LndError>
         response.value_msat,
         Some(payment_hash.to_string()),
     )?;
-    invoice_record(
+    let creation_date = response_time(
+        "lookup invoice",
+        response.creation_date,
+        "invoice creation date is negative",
+        payment_hash,
+    )?;
+    let expiry = response_time(
+        "lookup invoice",
+        response.expiry,
+        "invoice expiry is negative",
+        payment_hash,
+    )?;
+    let record = invoice_record(
         "lookup invoice",
         response.payment_request,
         payment_hash,
         Some(amount),
         invoice_state(response.state),
-    )
+    )?;
+    if record.invoice().duration_since_epoch().as_secs() != creation_date {
+        return Err(invalid_response_with_identifier(
+            "lookup invoice",
+            "invoice creation date does not match the BOLT11 timestamp",
+            Some(payment_hash.to_string()),
+        ));
+    }
+    if record.invoice().expiry_time().as_secs() != expiry {
+        return Err(invalid_response_with_identifier(
+            "lookup invoice",
+            "invoice expiry does not match the BOLT11 expiry",
+            Some(payment_hash.to_string()),
+        ));
+    }
+    Ok(record)
 }
 
 fn invoice_record(
@@ -202,12 +229,21 @@ pub(crate) fn payment(response: Payment) -> Result<PaymentRecord, LndError> {
             )
         })?)
     };
-    if state == PaymentState::Succeeded && preimage.is_none() {
-        return Err(invalid_response_with_identifier(
-            "payment",
-            "succeeded payment has no preimage",
-            identifier,
-        ));
+    if state == PaymentState::Succeeded {
+        let preimage = preimage.ok_or_else(|| {
+            invalid_response_with_identifier(
+                "payment",
+                "succeeded payment has no preimage",
+                identifier.clone(),
+            )
+        })?;
+        if sha256::Hash::hash(&preimage) != payment_hash {
+            return Err(invalid_response_with_identifier(
+                "payment",
+                "payment preimage does not prove the payment hash",
+                identifier,
+            ));
+        }
     }
     Ok(PaymentRecord::new(
         payment_hash,
@@ -250,6 +286,17 @@ fn response_millisats(
     u64::try_from(value)
         .map(Millisats::new)
         .map_err(|_| invalid_response_with_identifier(operation, "amount is negative", identifier))
+}
+
+fn response_time(
+    operation: &'static str,
+    value: i64,
+    negative_detail: &'static str,
+    payment_hash: sha256::Hash,
+) -> Result<u64, LndError> {
+    u64::try_from(value).map_err(|_| {
+        invalid_response_with_identifier(operation, negative_detail, Some(payment_hash.to_string()))
+    })
 }
 
 fn parse_preimage(value: &str) -> Result<[u8; 32], ()> {
