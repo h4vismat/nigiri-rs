@@ -66,39 +66,41 @@ pub(crate) async fn wait_for_sync<C: FixtureChain>(
     }
 }
 
-/// One round of the three heights, or a bounded description of the service that was not ready.
+/// One concurrent round of the three heights, or a bounded description of the service that was not
+/// ready.
 ///
 /// The outer error is only ever the shared deadline expiring; a service failure is an inner `Err`, so
-/// the loop above cannot mistake "not up yet" for "will never be ready".
+/// the loop above cannot mistake "not up yet" for "will never be ready". Results are interpreted in
+/// node, Esplora, Electrum order so concurrent completion order cannot change diagnostics.
 async fn observe_heights<C: FixtureChain>(
     client: &NigiriClient<C>,
     endpoint: &ElectrumEndpoint,
     deadline: &Deadline,
     observation: &str,
 ) -> Result<Result<Heights, String>, FixtureError> {
-    let node = match deadline
-        .run(
+    let (node, esplora, electrum) = tokio::join!(
+        deadline.run(
             SERVICE,
             observation,
             client.rpc::<u64, _>("getblockcount", ()),
-        )
-        .await?
-    {
+        ),
+        deadline.run(SERVICE, observation, client.block_height()),
+        electrum::tip_height(endpoint, deadline),
+    );
+
+    let node = match node? {
         Ok(height) => height,
         Err(error) => return Ok(Err(transient_observation("node", &error.into()))),
     };
 
-    let esplora = match deadline
-        .run(SERVICE, observation, client.block_height())
-        .await?
-    {
+    let esplora = match esplora? {
         Ok(height) => height,
         Err(error) => return Ok(Err(transient_observation("esplora", &error.into()))),
     };
 
     // The probe is already bounded by this deadline, so its expiry must propagate rather than be
     // retried; anything else about it is transient.
-    let electrum = match electrum::tip_height(endpoint, deadline).await {
+    let electrum = match electrum {
         Ok(height) => height,
         Err(error @ FixtureError::ReadinessTimeout { .. }) => return Err(error),
         Err(error) => return Ok(Err(transient_observation("electrum", &error))),
@@ -130,6 +132,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        sync::Barrier,
         task::JoinHandle,
     };
     use url::Url;
@@ -201,6 +204,13 @@ mod tests {
     }
 
     impl SyncStub {
+        /// Holds every first-round response until all three probes have reached their service.
+        /// A sequential observer can never pass this gate; a concurrent observer can.
+        async fn start_coordinated_round() -> Self {
+            Self::start_with_probe_barrier(vec![Round::all(101)], Some(Arc::new(Barrier::new(3))))
+                .await
+        }
+
         /// Rebuilds the client so `client.electrum_endpoint()` is what `wait_for_sync` now reads it
         /// from, keeping every other test input identical.
         fn with_electrum_endpoint(&self, endpoint: ElectrumEndpoint) -> NigiriClient<Bitcoin> {
@@ -240,8 +250,17 @@ mod tests {
         }
 
         async fn start(script: Vec<Round>) -> Self {
+            Self::start_with_probe_barrier(script, None).await
+        }
+
+        async fn start_with_probe_barrier(
+            script: Vec<Round>,
+            probe_barrier: Option<Arc<Barrier>>,
+        ) -> Self {
             let script = Arc::new(script);
             let rounds = Arc::new(AtomicUsize::new(0));
+            let esplora_rounds = Arc::new(AtomicUsize::new(0));
+            let electrum_rounds = Arc::new(AtomicUsize::new(0));
 
             let http = TcpListener::bind("127.0.0.1:0")
                 .await
@@ -259,25 +278,32 @@ mod tests {
                 .port();
 
             let http_server = {
+                let probe_barrier = probe_barrier.clone();
                 let script = Arc::clone(&script);
                 let rounds = Arc::clone(&rounds);
+                let esplora_rounds = Arc::clone(&esplora_rounds);
                 tokio::spawn(async move {
                     loop {
                         let Ok((mut stream, _)) = http.accept().await else {
                             return;
                         };
+                        let probe_barrier = probe_barrier.clone();
                         let script = Arc::clone(&script);
                         let rounds = Arc::clone(&rounds);
+                        let esplora_rounds = Arc::clone(&esplora_rounds);
                         tokio::spawn(async move {
                             let mut request = vec![0_u8; 8 * 1024];
                             let read = stream.read(&mut request).await.unwrap_or(0);
                             let request = String::from_utf8_lossy(&request[..read]).into_owned();
 
-                            // The node RPC opens each readiness round, so it is what advances the
-                            // script; the Esplora and Electrum reads that follow report the same
-                            // round, and one loop iteration therefore sees one consistent triplet.
-                            let response = if request.starts_with("POST") {
-                                let round = advance_round(&script, &rounds);
+                            let node_round = request
+                                .starts_with("POST")
+                                .then(|| advance_round(&script, &rounds));
+                            if let Some(barrier) = probe_barrier {
+                                barrier.wait().await;
+                            }
+
+                            let response = if let Some(round) = node_round {
                                 match round.node {
                                     Some(height) => json_response(&format!(
                                         "{{\"result\":{height},\"error\":null,\"id\":\"1\"}}"
@@ -285,7 +311,7 @@ mod tests {
                                     None => status_response(503, "node warming up"),
                                 }
                             } else {
-                                match current_round(&script, &rounds).esplora {
+                                match advance_round(&script, &esplora_rounds).esplora {
                                     Some(height) => text_response(&height.to_string()),
                                     None => status_response(503, "esplora warming up"),
                                 }
@@ -298,20 +324,25 @@ mod tests {
             };
 
             let electrum_server = {
+                let probe_barrier = probe_barrier.clone();
                 let script = Arc::clone(&script);
-                let rounds = Arc::clone(&rounds);
+                let electrum_rounds = Arc::clone(&electrum_rounds);
                 tokio::spawn(async move {
                     loop {
                         let Ok((mut stream, _)) = electrum.accept().await else {
                             return;
                         };
+                        let probe_barrier = probe_barrier.clone();
                         let script = Arc::clone(&script);
-                        let rounds = Arc::clone(&rounds);
+                        let electrum_rounds = Arc::clone(&electrum_rounds);
                         tokio::spawn(async move {
                             let mut request = vec![0_u8; 1024];
                             let _ = stream.read(&mut request).await;
+                            if let Some(barrier) = probe_barrier {
+                                barrier.wait().await;
+                            }
 
-                            match current_round(&script, &rounds).electrum {
+                            match advance_round(&script, &electrum_rounds).electrum {
                                 Some(height) => {
                                     let _ = stream
                                         .write_all(
@@ -368,15 +399,6 @@ mod tests {
     /// a fixture that never converges.
     fn advance_round(script: &[Round], rounds: &AtomicUsize) -> Round {
         let index = rounds.fetch_add(1, Ordering::SeqCst).min(script.len() - 1);
-        script[index]
-    }
-
-    /// The round already opened by this iteration's node RPC.
-    fn current_round(script: &[Round], rounds: &AtomicUsize) -> Round {
-        let index = rounds
-            .load(Ordering::SeqCst)
-            .saturating_sub(1)
-            .min(script.len() - 1);
         script[index]
     }
 
@@ -486,6 +508,21 @@ mod tests {
             3,
             "each disagreeing round must be retried, not accepted"
         );
+    }
+
+    // Catches a regression that drives the three independent readiness probes one after another.
+    // Each service waits until all three have received a request, so only concurrent polling can
+    // produce the agreed triplet before the shared deadline expires.
+    #[tokio::test]
+    async fn a_readiness_round_drives_all_three_probes_concurrently() {
+        let stub = SyncStub::start_coordinated_round().await;
+        let deadline = Deadline::new(Duration::from_secs(1)).expect("a positive deadline is valid");
+
+        wait_for_sync(&stub.client, &deadline)
+            .await
+            .expect("independent readiness probes must be in flight together");
+
+        assert_eq!(stub.attempts(), 1, "one agreeing round must be enough");
     }
 
     // Catches a regression that surfaces an unready service as a fixture failure instead of retrying
