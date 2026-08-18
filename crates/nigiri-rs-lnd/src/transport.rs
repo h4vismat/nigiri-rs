@@ -119,13 +119,15 @@ pub(crate) async fn bounded_request<ResponseMessage, CallFuture>(
 where
     CallFuture: Future<Output = Result<Response<ResponseMessage>, Status>>,
 {
-    bounded_request_until(
-        tokio::time::Instant::now() + duration,
-        duration,
-        operation,
-        call,
-    )
-    .await
+    bounded_request_until(operation_deadline(duration)?, duration, operation, call).await
+}
+
+pub(crate) fn operation_deadline(duration: Duration) -> Result<tokio::time::Instant, LndError> {
+    tokio::time::Instant::now()
+        .checked_add(duration)
+        .ok_or_else(|| LndError::InvalidRequest {
+            detail: Cow::Borrowed("request timeout exceeds the supported instant range"),
+        })
 }
 
 pub(crate) async fn bounded_request_until<ResponseMessage, CallFuture>(
@@ -602,6 +604,23 @@ mod tests {
                 duration
             } if operation == "probe" && duration == Duration::from_millis(20)
         ));
+    }
+
+    #[tokio::test]
+    async fn unrepresentable_timeout_returns_an_error_without_panicking() {
+        let task = tokio::spawn(async {
+            bounded_request(Duration::MAX, "probe", async {
+                Ok::<_, Status>(Response::new(()))
+            })
+            .await
+        });
+
+        let error = task
+            .await
+            .expect("deadline creation must not unwind")
+            .unwrap_err();
+
+        assert!(matches!(error, LndError::InvalidRequest { .. }));
     }
 
     #[test]

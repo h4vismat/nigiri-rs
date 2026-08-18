@@ -3,7 +3,7 @@ use std::time::Duration;
 use bitcoin::{OutPoint, hashes::sha256, secp256k1::PublicKey};
 use lightning_invoice::Bolt11Invoice;
 
-use crate::{LndError, Millisats, Sats};
+use crate::{LndError, Millisats, Sats, endpoint::normalize_peer_host};
 
 /// Information reported by an LND node.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,9 +119,11 @@ impl PeerAddress {
         if port == 0 {
             return Err(invalid("peer port must not be zero"));
         }
+        let host = normalize_peer_host(host)
+            .map_err(|()| invalid("peer host must be a valid host without a port"))?;
         Ok(Self {
             public_key,
-            host: host.to_owned(),
+            host,
             port,
         })
     }

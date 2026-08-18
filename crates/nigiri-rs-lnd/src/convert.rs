@@ -4,6 +4,7 @@ use bitcoin::{OutPoint, Txid, hashes::Hash, secp256k1::PublicKey};
 
 use crate::{
     Channel, LndError, Millisats, NodeInfo, Peer, Sats, WalletBalance,
+    endpoint::parse_peer_endpoint,
     proto::lnrpc::{
         Channel as ProtoChannel, ChannelPoint, GetInfoResponse, Peer as ProtoPeer,
         WalletBalanceResponse, channel_point,
@@ -57,10 +58,9 @@ pub(crate) fn wallet_balance(response: WalletBalanceResponse) -> Result<WalletBa
 pub(crate) fn peer(response: ProtoPeer) -> Result<Peer, LndError> {
     let public_key = PublicKey::from_str(&response.pub_key)
         .map_err(|_| invalid_response("list peers", "peer public key is malformed"))?;
-    if response.address.is_empty() {
-        return Err(invalid_response("list peers", "peer address is missing"));
-    }
-    Ok(Peer::new(public_key, response.address, true))
+    let address = parse_peer_endpoint(&response.address)
+        .map_err(|()| invalid_response("list peers", "peer address is malformed"))?;
+    Ok(Peer::new(public_key, address, true))
 }
 
 pub(crate) fn channel(response: ProtoChannel) -> Result<Channel, LndError> {

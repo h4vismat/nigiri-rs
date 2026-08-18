@@ -6,6 +6,7 @@ use tonic::{Request, Response, Status, transport::Channel as TonicChannel};
 use crate::{
     LndClient, LndError, NodeInfo, Peer, PeerAddress, WalletBalance,
     convert::{invalid_response, node_info, peer, wallet_balance as convert_wallet_balance},
+    endpoint::serialize_peer_endpoint,
     proto::lnrpc::{
         AddressType, ConnectPeerRequest, ConnectPeerResponse, GetInfoRequest, GetInfoResponse,
         LightningAddress, ListPeersRequest, ListPeersResponse, NewAddressRequest,
@@ -168,7 +169,7 @@ fn connect_peer_request(peer: &PeerAddress) -> ConnectPeerRequest {
     ConnectPeerRequest {
         addr: Some(LightningAddress {
             pubkey: peer.public_key().to_string(),
-            host: format!("{}:{}", peer.host(), peer.port()),
+            host: serialize_peer_endpoint(peer.host(), peer.port()),
         }),
         perm: false,
         timeout: 0,
@@ -227,8 +228,8 @@ mod tests {
     };
 
     use super::{
-        NodeRpc, connect_peer_with, get_info_with, list_peers_with, new_address_with,
-        wallet_address, wallet_balance_with,
+        NodeRpc, connect_peer_request, connect_peer_with, get_info_with, list_peers_with,
+        new_address_with, wallet_address, wallet_balance_with,
     };
 
     const NODE_KEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -496,5 +497,114 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, LndError::InvalidResponse { .. }));
+    }
+
+    #[test]
+    fn peer_hosts_serialize_to_unambiguous_lnd_endpoints() {
+        const ONION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion";
+        let public_key = NODE_KEY.parse::<PublicKey>().unwrap();
+
+        for (host, expected) in [
+            ("bob.internal", "bob.internal:9735"),
+            ("127.0.0.1", "127.0.0.1:9735"),
+            ("2001:db8::1", "[2001:db8::1]:9735"),
+            ("[2001:db8::1]", "[2001:db8::1]:9735"),
+            (
+                ONION,
+                concat!(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+                    ":9735"
+                ),
+            ),
+        ] {
+            let peer = PeerAddress::new(public_key, host, 9735).unwrap();
+
+            let request = connect_peer_request(&peer);
+
+            assert_eq!(request.addr.unwrap().host, expected);
+        }
+    }
+
+    #[test]
+    fn peer_address_rejects_malformed_hosts_and_embedded_ports() {
+        let public_key = NODE_KEY.parse::<PublicKey>().unwrap();
+
+        for host in [
+            "example.com:9735",
+            "127.0.0.1:9735",
+            "[::1]:9735",
+            "[::1",
+            "::1]",
+            "user@example.com",
+            "example..com",
+            "-bad.example",
+            "bad-.example",
+            "exa mple.com",
+            "999.1.1.1",
+            "short.onion",
+            "9999999999999999.ONION",
+        ] {
+            assert!(
+                matches!(
+                    PeerAddress::new(public_key, host, 9735),
+                    Err(LndError::InvalidRequest { .. })
+                ),
+                "accepted malformed peer host {host:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn peer_response_accepts_valid_endpoint_authorities() {
+        const ONION_ENDPOINT: &str = concat!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+            ":9735"
+        );
+
+        for endpoint in [
+            "bob.internal:9735",
+            "127.0.0.1:9735",
+            "[2001:db8::1]:9735",
+            ONION_ENDPOINT,
+        ] {
+            let converted = peer(ProtoPeer {
+                pub_key: NODE_KEY.into(),
+                address: endpoint.into(),
+                ..Default::default()
+            })
+            .unwrap();
+
+            assert_eq!(converted.address(), endpoint);
+        }
+    }
+
+    #[test]
+    fn peer_response_rejects_malformed_endpoint_authorities() {
+        for endpoint in [
+            "not-an-endpoint",
+            "example.com",
+            "::1:9735",
+            "[::1]",
+            "[::1]:0",
+            "example.com:0",
+            "example.com:70000",
+            "example.com:9735:1234",
+            "user@example.com:9735",
+            "short.onion:9735",
+            "9999999999999999.ONION:9735",
+            " bob.internal:9735 ",
+        ] {
+            let error = peer(ProtoPeer {
+                pub_key: NODE_KEY.into(),
+                address: endpoint.into(),
+                ..Default::default()
+            })
+            .unwrap_err();
+
+            assert!(
+                matches!(error, LndError::InvalidResponse { .. }),
+                "accepted malformed peer endpoint {endpoint:?}"
+            );
+        }
     }
 }

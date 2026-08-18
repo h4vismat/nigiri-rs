@@ -11,6 +11,7 @@ mod channel;
 mod client;
 mod config;
 mod convert;
+mod endpoint;
 mod error;
 mod node;
 mod transport;

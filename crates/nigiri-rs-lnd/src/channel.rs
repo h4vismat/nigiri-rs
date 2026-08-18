@@ -12,7 +12,7 @@ use crate::{
         channel_point as proto_channel_point, lightning_client::LightningClient,
         open_status_update,
     },
-    transport::{ClientInner, authenticated_request, bounded_request_until},
+    transport::{ClientInner, authenticated_request, bounded_request_until, operation_deadline},
 };
 
 pub(crate) trait OpenStatusStream: Send {
@@ -76,7 +76,7 @@ pub(crate) async fn open_channel_with<R: ChannelRpc>(
     request: OpenChannelRequest,
 ) -> Result<OutPoint, LndError> {
     let request = proto_open_channel_request(request)?;
-    let deadline = tokio::time::Instant::now() + inner.timeout;
+    let deadline = operation_deadline(inner.timeout)?;
     let response = authenticated_request(inner, "open channel", request, |request| {
         rpc.open_channel(request)
     })
@@ -210,7 +210,7 @@ mod tests {
 
     use crate::{
         LndClient, LndConfig, LndError, OpenChannelRequest, Sats,
-        convert::channel,
+        convert::{channel, channel_point as convert_channel_point},
         proto::lnrpc::{
             Channel as ProtoChannel, ChannelOpenUpdate, ChannelPoint, ListChannelsRequest,
             ListChannelsResponse, OpenChannelRequest as ProtoOpenChannelRequest, OpenStatusUpdate,
@@ -221,6 +221,12 @@ mod tests {
     use super::{ChannelRpc, OpenStatusStream, list_channels_with, open_channel_with};
 
     const NODE_KEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const DISPLAY_TXID: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const RAW_LND_TXID: [u8; 32] = [
+        0x1f, 0x1e, 0x1d, 0x1c, 0x1b, 0x1a, 0x19, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
+        0x10, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02,
+        0x01, 0x00,
+    ];
 
     enum StreamItem {
         Ready(Result<Option<OpenStatusUpdate>, Status>),
@@ -249,6 +255,7 @@ mod tests {
     #[derive(Default)]
     struct FakeChannelRpc {
         open_response: Option<Result<FakeStream, Status>>,
+        open_delay: Duration,
         list_response: Option<Result<ListChannelsResponse, Status>>,
         open_request: Option<ProtoOpenChannelRequest>,
         list_request: Option<ListChannelsRequest>,
@@ -263,7 +270,11 @@ mod tests {
         ) -> impl Future<Output = Result<Response<Self::OpenStatusStream>, Status>> + Send {
             self.open_request = Some(request.into_inner());
             let response = self.open_response.take().unwrap();
-            async move { response.map(Response::new) }
+            let delay = self.open_delay;
+            async move {
+                tokio::time::sleep(delay).await;
+                response.map(Response::new)
+            }
         }
 
         fn list_channels(
@@ -318,6 +329,32 @@ mod tests {
         }
     }
 
+    fn pending_raw(raw_txid: [u8; 32], output_index: u32) -> OpenStatusUpdate {
+        OpenStatusUpdate {
+            pending_chan_id: vec![2; 32],
+            update: Some(open_status_update::Update::ChanPending(PendingUpdate {
+                txid: raw_txid.to_vec(),
+                output_index,
+                fee_per_vbyte: 1,
+                local_close_tx: false,
+            })),
+        }
+    }
+
+    fn opened_string(display_txid: &str, output_index: u32) -> OpenStatusUpdate {
+        OpenStatusUpdate {
+            pending_chan_id: vec![2; 32],
+            update: Some(open_status_update::Update::ChanOpen(ChannelOpenUpdate {
+                channel_point: Some(ChannelPoint {
+                    output_index,
+                    funding_txid: Some(channel_point::FundingTxid::FundingTxidStr(
+                        display_txid.into(),
+                    )),
+                }),
+            })),
+        }
+    }
+
     fn open_request() -> OpenChannelRequest {
         OpenChannelRequest::new(
             NODE_KEY.parse::<PublicKey>().unwrap(),
@@ -366,6 +403,48 @@ mod tests {
         assert_eq!(captured_open.push_sat, 1_000_000);
         assert!(!captured_open.private);
         assert_eq!(rpc.list_request, Some(ListChannelsRequest::default()));
+    }
+
+    #[test]
+    fn channel_point_byte_and_string_encodings_have_lnd_endianness() {
+        let from_bytes = convert_channel_point(ChannelPoint {
+            output_index: 7,
+            funding_txid: Some(channel_point::FundingTxid::FundingTxidBytes(
+                RAW_LND_TXID.to_vec(),
+            )),
+        })
+        .unwrap();
+        let from_string = convert_channel_point(ChannelPoint {
+            output_index: 7,
+            funding_txid: Some(channel_point::FundingTxid::FundingTxidStr(
+                DISPLAY_TXID.into(),
+            )),
+        })
+        .unwrap();
+
+        assert_eq!(from_bytes.txid.to_string(), DISPLAY_TXID);
+        assert_eq!(from_bytes.vout, 7);
+        assert_eq!(from_string.txid.to_string(), DISPLAY_TXID);
+        assert_eq!(from_string.vout, 7);
+    }
+
+    #[tokio::test]
+    async fn pending_raw_txid_matches_opened_string_txid() {
+        let mut rpc = FakeChannelRpc {
+            open_response: Some(Ok(FakeStream(VecDeque::from([
+                StreamItem::Ready(Ok(Some(pending_raw(RAW_LND_TXID, 7)))),
+                StreamItem::Ready(Ok(Some(opened_string(DISPLAY_TXID, 7)))),
+            ])))),
+            ..Default::default()
+        };
+        let client = client(Duration::from_secs(1));
+
+        let point = open_channel_with(&client.inner, &mut rpc, open_request())
+            .await
+            .unwrap();
+
+        assert_eq!(point.txid.to_string(), DISPLAY_TXID);
+        assert_eq!(point.vout, 7);
     }
 
     #[test]
@@ -585,6 +664,44 @@ mod tests {
         assert!(
             matches!(error, LndError::OutcomeUnknown { identifier: Some(identifier), .. } if identifier == expected.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn request_and_stream_updates_share_one_absolute_deadline() {
+        let expected = point(1, 0);
+        let mut rpc = FakeChannelRpc {
+            open_response: Some(Ok(FakeStream(VecDeque::from([
+                StreamItem::Delayed(Duration::from_millis(40), Ok(Some(pending(expected)))),
+                StreamItem::Delayed(Duration::from_millis(80), Ok(Some(opened(expected)))),
+            ])))),
+            open_delay: Duration::from_millis(40),
+            ..Default::default()
+        };
+        let client = client(Duration::from_millis(120));
+
+        let error = open_channel_with(&client.inner, &mut rpc, open_request())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, LndError::OutcomeUnknown { identifier: Some(identifier), .. } if identifier == expected.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn unrepresentable_open_timeout_returns_an_error_without_panicking() {
+        let client = client(Duration::MAX);
+        let mut rpc = FakeChannelRpc::default();
+        let task = tokio::spawn(async move {
+            open_channel_with(&client.inner, &mut rpc, open_request()).await
+        });
+
+        let error = task
+            .await
+            .expect("deadline creation must not unwind")
+            .unwrap_err();
+
+        assert!(matches!(error, LndError::InvalidRequest { .. }));
     }
 
     #[tokio::test]
