@@ -12,7 +12,7 @@ bitcoin = "0.32.7"
 lightning-invoice = "0.34.1"
 prost = "0.14.1"
 thiserror = "2.0.18"
-tokio = { version = "1.50.0", features = ["fs", "time"] }
+tokio = { version = "1.50.0", features = ["fs", "io-util", "time"] }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
 url = "2.5.8"
