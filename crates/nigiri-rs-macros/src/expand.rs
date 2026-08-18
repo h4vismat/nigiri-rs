@@ -120,22 +120,22 @@ fn start_expr(fixture: &FixtureParam, args: &MacroArgs) -> TokenStream {
     match fixture {
         FixtureParam::Client { chain, .. } => match args.startup_timeout {
             Some(secs) => quote! {
-                ::nigiri_rs::__private::testcontainers::Fixture::<#chain>::builder()
+                ::nigiri_rs::__private::fixtures::Fixture::<#chain>::builder()
                     .startup_timeout(::core::time::Duration::from_secs(#secs))
                     .start()
             },
             None => quote! {
-                ::nigiri_rs::__private::testcontainers::Fixture::<#chain>::start()
+                ::nigiri_rs::__private::fixtures::Fixture::<#chain>::start()
             },
         },
         FixtureParam::PegPair { .. } => match args.startup_timeout {
             Some(secs) => quote! {
-                ::nigiri_rs::__private::testcontainers::PegPair::builder()
+                ::nigiri_rs::__private::fixtures::PegPair::builder()
                     .startup_timeout(::core::time::Duration::from_secs(#secs))
                     .start()
             },
             None => quote! {
-                ::nigiri_rs::__private::testcontainers::PegPair::start()
+                ::nigiri_rs::__private::fixtures::PegPair::start()
             },
         },
     }

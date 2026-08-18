@@ -6,7 +6,7 @@
 
 use bitcoin::Amount;
 use nigiri_rs_core::NigiriError;
-use nigiri_rs_testcontainers::PegPair;
+use nigiri_rs_fixtures::PegPair;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 

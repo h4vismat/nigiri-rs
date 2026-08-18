@@ -5,9 +5,9 @@
 //! run in parallel and mine or reorg freely without coordinating.
 //!
 //! ```no_run
-//! use nigiri_rs_testcontainers::{Bitcoin, Fixture};
+//! use nigiri_rs_fixtures::{Bitcoin, Fixture};
 //!
-//! # async fn example() -> Result<(), nigiri_rs_testcontainers::FixtureError> {
+//! # async fn example() -> Result<(), nigiri_rs_fixtures::FixtureError> {
 //! let fixture = Fixture::<Bitcoin>::start().await?;
 //! let client = fixture.client();
 //! let electrum_host = fixture.electrum_endpoint().host();
@@ -68,9 +68,9 @@ mod error;
 mod fixture;
 mod image;
 mod node;
-mod owned_start;
 mod peg_pair;
 mod readiness;
+mod runtime;
 
 pub use chain::FixtureChain;
 pub use error::FixtureError;

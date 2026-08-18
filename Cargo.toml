@@ -2,7 +2,7 @@
 members = [
     "crates/nigiri-rs",
     "crates/nigiri-rs-core",
-    "crates/nigiri-rs-testcontainers",
+    "crates/nigiri-rs-fixtures",
     "crates/nigiri-rs-macros",
 ]
 resolver = "2"

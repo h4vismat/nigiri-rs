@@ -5,7 +5,7 @@
 //! the peg documentation makes a claim about it that only a container run can settle.
 
 use nigiri_rs_core::Peg;
-use nigiri_rs_testcontainers::{Bitcoin, Fixture, Liquid};
+use nigiri_rs_fixtures::{Bitcoin, Fixture, Liquid};
 
 // Catches a regression that turns `Peg::connect` into a weaker or stronger check than the docs
 // claim. Bitcoin's regtest genesis is hardcoded in chainparams — the same value on every node,

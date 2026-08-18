@@ -4,6 +4,7 @@ use tokio::time::Instant;
 
 use crate::{FixtureError, diagnostics::redacted_tail};
 
+#[derive(Clone)]
 pub(crate) struct Deadline {
     started: Instant,
     duration: Duration,

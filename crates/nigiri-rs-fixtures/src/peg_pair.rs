@@ -23,9 +23,9 @@ const PEG_SERVICE: &str = "peg";
 ///
 /// ```no_run
 /// use bitcoin::Amount;
-/// use nigiri_rs_testcontainers::PegPair;
+/// use nigiri_rs_fixtures::PegPair;
 ///
-/// # async fn example() -> Result<(), nigiri_rs_testcontainers::FixtureError> {
+/// # async fn example() -> Result<(), nigiri_rs_fixtures::FixtureError> {
 /// let pair = PegPair::start().await?;
 /// let pegged = pair.peg().complete_peg_in(Amount::from_sat(100_000)).await?;
 /// println!("minted by {}", pegged.claim_txid);
@@ -91,6 +91,18 @@ impl PegPair {
     /// Starts the wired pair with the pinned defaults.
     pub async fn start() -> Result<Self, FixtureError> {
         Self::builder().start().await
+    }
+
+    /// Removes both stacks in dependency order and waits for cleanup to finish.
+    pub async fn shutdown(self) -> Result<(), FixtureError> {
+        let Self {
+            handles: PegHandles { liquid, bitcoin },
+            peg: _,
+        } = self;
+
+        let liquid_result = liquid.shutdown().await;
+        let bitcoin_result = bitcoin.shutdown().await;
+        liquid_result.and(bitcoin_result)
     }
 
     /// The Bitcoin side's client, pointed at `bitcoind` and its Electrs.
@@ -431,8 +443,8 @@ mod tests {
     // volume behind. A composite is where teardown is easiest to get wrong: the network belongs to
     // neither stack alone, and removing it with the first drop would strand the second.
     #[tokio::test]
-    async fn dropping_a_pair_removes_every_resource_it_created() {
-        use testcontainers::bollard::{Docker, models::MountPointTypeEnum};
+    async fn explicit_shutdown_removes_every_resource_it_created() {
+        use bollard::{Docker, models::MountPointTypeEnum};
 
         let pair = PegPair::start()
             .await
@@ -474,7 +486,9 @@ mod tests {
         }
         println!("created containers={containers:?} network={network} volumes={volumes:?}");
 
-        drop(pair);
+        pair.shutdown()
+            .await
+            .expect("explicit pair cleanup must succeed");
 
         // Removal is asynchronous, so this polls rather than asserting once.
         let mut outstanding = Vec::new();
@@ -501,7 +515,7 @@ mod tests {
 
         assert!(
             outstanding.is_empty(),
-            "dropping the pair left these behind: {outstanding:?}"
+            "shutting down the pair left these behind: {outstanding:?}"
         );
     }
 }

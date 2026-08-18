@@ -88,7 +88,7 @@ impl ContainerImage {
         Ok(())
     }
 
-    pub(crate) fn testcontainers_tag(&self) -> String {
+    pub(crate) fn reference_suffix(&self) -> String {
         match &self.digest {
             Some(digest) => format!("{}@{digest}", self.tag),
             None => self.tag.clone(),
@@ -176,7 +176,7 @@ mod tests {
             Some("sha256:89185fc2792a9824cbe18f7ad4ead02a3a9a14adf5b34eb42f60ebec36201fa0")
         );
         assert_eq!(
-            bitcoind.testcontainers_tag(),
+            bitcoind.reference_suffix(),
             "v31.0@sha256:89185fc2792a9824cbe18f7ad4ead02a3a9a14adf5b34eb42f60ebec36201fa0"
         );
         bitcoind
@@ -191,7 +191,7 @@ mod tests {
             Some("sha256:35963870c36a8da5fff8310e94df15869d0e97788bdaa11e63901cdb26fd781a")
         );
         assert_eq!(
-            electrs.testcontainers_tag(),
+            electrs.reference_suffix(),
             "v3.4.0-dev1@sha256:35963870c36a8da5fff8310e94df15869d0e97788bdaa11e63901cdb26fd781a"
         );
         electrs
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(image.name(), "registry.example/bitcoin");
         assert_eq!(image.tag(), "custom");
         assert_eq!(image.digest(), None);
-        assert_eq!(image.testcontainers_tag(), "custom");
+        assert_eq!(image.reference_suffix(), "custom");
         image
             .validate()
             .expect("an explicit image with no digest is valid");

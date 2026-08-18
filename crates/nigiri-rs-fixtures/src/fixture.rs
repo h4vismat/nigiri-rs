@@ -3,23 +3,27 @@
 use std::{fmt, marker::PhantomData, time::Duration};
 
 use nigiri_rs_core::NigiriClient;
-use testcontainers::{ContainerAsync, GenericImage};
 use uuid::Uuid;
 
 use crate::{
-    ContainerImage, ElectrumEndpoint, FixtureError, chain::FixtureChain, deadline::Deadline,
-    electrs, node, owned_start::attach_container_log, readiness,
+    ContainerImage, ElectrumEndpoint, FixtureError,
+    chain::FixtureChain,
+    deadline::Deadline,
+    electrs, node, readiness,
+    runtime::{
+        BollardEngine, ContainerEngine, RuntimeHandle, attach_container_log, runtime_error,
+        supervise,
+    },
 };
 
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A running regtest stack with a funded wallet, ready to be queried.
 ///
-/// Dropping the fixture removes everything it created. The field order is deliberate: Electrs is
-/// dropped before the node, so the indexer is gone before the node it indexes disappears underneath
-/// it.
+/// Dropping the fixture asks its lifecycle supervisor to remove everything it created.
 pub struct Fixture<C: FixtureChain> {
-    handles: ContainerHandles<ContainerAsync<GenericImage>, ContainerAsync<GenericImage>>,
+    runtime: Option<RuntimeHandle>,
+    engine: BollardEngine,
     client: NigiriClient<C>,
     /// The UUID-scoped names of everything this fixture created.
     ///
@@ -27,16 +31,7 @@ pub struct Fixture<C: FixtureChain> {
     /// dropped, and a composite reads the network and node names to attach its own containers and
     /// point them at the node.
     names: TopologyNames,
-}
-
-/// The fixture's container handles, held only for their `Drop`.
-///
-/// Declaring them in one place makes the order a property of a type a test can drop, rather than of
-/// two adjacent fields nothing checks. Rust drops fields in declaration order, so the indexer goes
-/// first and is never left pointed at a node that has already disappeared.
-struct ContainerHandles<Indexer, Node> {
-    electrs: Indexer,
-    node: Node,
+    container_ids: [String; 2],
 }
 
 // Written by hand rather than derived: the held client's configuration carries the RPC password,
@@ -82,6 +77,18 @@ impl<C: FixtureChain> Fixture<C> {
         self.client.electrum_endpoint()
     }
 
+    /// Removes every resource and waits for the container engine to confirm completion.
+    pub async fn shutdown(mut self) -> Result<(), FixtureError> {
+        let runtime = self
+            .runtime
+            .take()
+            .expect("fixture runtime is shut down once");
+        runtime
+            .shutdown()
+            .await
+            .map_err(|error| runtime_error("fixture", error))
+    }
+
     /// The Docker network every container of this fixture is attached to.
     ///
     /// Crate-private: a composite attaches its own containers to it. The name is an implementation
@@ -102,9 +109,20 @@ impl<C: FixtureChain> Fixture<C> {
     /// own failure path: the indexer first, then the node, so the node's log — the service most
     /// failures come back to — ends up nearest the error text.
     pub(crate) async fn attach_inner_logs(&self, error: FixtureError) -> FixtureError {
-        let with_electrs =
-            attach_container_log(electrs::SERVICE, error, &self.handles.electrs).await;
-        attach_container_log(C::NODE_SERVICE, with_electrs, &self.handles.node).await
+        let with_electrs = attach_engine_log(
+            &self.engine,
+            electrs::SERVICE,
+            &self.container_ids[0],
+            error,
+        )
+        .await;
+        attach_engine_log(
+            &self.engine,
+            C::NODE_SERVICE,
+            &self.container_ids[1],
+            with_electrs,
+        )
+        .await
     }
 
     /// The Docker ids of this fixture's containers, indexer first.
@@ -113,10 +131,7 @@ impl<C: FixtureChain> Fixture<C> {
     /// created means naming all four containers, and these handles are private to this type.
     #[cfg(test)]
     pub(crate) fn container_ids(&self) -> [String; 2] {
-        [
-            self.handles.electrs.id().to_owned(),
-            self.handles.node.id().to_owned(),
-        ]
+        self.container_ids.clone()
     }
 }
 
@@ -214,7 +229,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     /// fixtures on one network still cannot collide.
     ///
     /// The network outlives whichever fixture drops first without anything here counting
-    /// references: `testcontainers` keys created networks by name and removes one only once the
+    /// references: the runtime keys created networks by name and removes one only once the
     /// last container holding it is gone.
     #[must_use]
     pub(crate) fn network(mut self, name: String) -> Self {
@@ -240,57 +255,112 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     pub(crate) async fn start_under(self, deadline: &Deadline) -> Result<Fixture<C>, FixtureError> {
         self.node_image.validate()?;
         self.electrs_image.validate()?;
+        deadline.remaining_or_expired(C::NODE_SERVICE, "connecting to the container engine")?;
 
         let names = topology_names_on::<C>(self.network.clone());
+        let creates_network = self.network.is_none();
+        let engine = BollardEngine::connect()
+            .await
+            .map_err(|error| runtime_error("container engine", error))?;
+        let retained_engine = engine.clone();
+        let deadline = deadline.clone();
 
-        let node = node::start_node::<C>(
-            &self.node_image,
-            &names.network,
-            &names.node,
-            &self.extra_node_args,
-            deadline,
-        )
-        .await?;
+        let ((client, names, container_ids), runtime) =
+            supervise(engine, move |mut startup| async move {
+                if creates_network {
+                    deadline
+                        .run(
+                            "container network",
+                            "creating fixture network",
+                            startup.create_network(names.network.clone()),
+                        )
+                        .await??;
+                }
 
-        let electrs = match electrs::start_electrs::<C>(
-            &self.electrs_image,
-            &names.network,
-            &names.electrs,
-            &names.node,
-            deadline,
-        )
-        .await
-        {
-            Ok(electrs) => electrs,
-            // The node is running and holds the only account of what Electrs was pointed at.
-            Err(error) => {
-                return Err(attach_container_log(C::NODE_SERVICE, error, &node.container).await);
-            }
-        };
+                let node = node::start_node::<C, _>(
+                    &mut startup,
+                    &self.node_image,
+                    &names.network,
+                    &names.node,
+                    &self.extra_node_args,
+                    &deadline,
+                )
+                .await?;
 
-        // The node client cannot be reconfigured in place, so both endpoints Electrs just
-        // published are applied to a copy of the wallet-scoped configuration.
-        let mut client_config = node.client_config.clone();
-        client_config.esplora_url = electrs.esplora_url.clone();
-        client_config.electrum = electrs.electrum_endpoint.clone();
-        let client = node::fixture_client::<C>(client_config)?;
+                let electrs = match electrs::start_electrs::<C, _>(
+                    &mut startup,
+                    &self.electrs_image,
+                    &names.network,
+                    &names.electrs,
+                    &names.node,
+                    &deadline,
+                )
+                .await
+                {
+                    Ok(electrs) => electrs,
+                    Err(error) => {
+                        return Err(attach_container_log(
+                            &mut startup,
+                            C::NODE_SERVICE,
+                            &node.container.id,
+                            error,
+                        )
+                        .await);
+                    }
+                };
 
-        if let Err(not_ready) = readiness::wait_for_sync::<C>(&client, deadline).await {
-            // Whichever service fell behind, its own log is what explains why.
-            let with_electrs =
-                attach_container_log(electrs::SERVICE, not_ready, &electrs.container).await;
-            return Err(attach_container_log(C::NODE_SERVICE, with_electrs, &node.container).await);
-        }
+                let mut client_config = node.client_config.clone();
+                client_config.esplora_url = electrs.esplora_url.clone();
+                client_config.electrum = electrs.electrum_endpoint.clone();
+                let client = node::fixture_client::<C>(client_config)?;
+
+                if let Err(not_ready) = readiness::wait_for_sync::<C>(&client, &deadline).await {
+                    let with_electrs = attach_container_log(
+                        &mut startup,
+                        electrs::SERVICE,
+                        &electrs.container.id,
+                        not_ready,
+                    )
+                    .await;
+                    return Err(attach_container_log(
+                        &mut startup,
+                        C::NODE_SERVICE,
+                        &node.container.id,
+                        with_electrs,
+                    )
+                    .await);
+                }
+
+                let container_ids = [electrs.container.id, node.container.id];
+                Ok((client, names, container_ids))
+            })
+            .await?;
 
         Ok(Fixture {
-            handles: ContainerHandles {
-                electrs: electrs.container,
-                node: node.container,
-            },
+            runtime: Some(runtime),
+            engine: retained_engine,
             client,
             names,
+            container_ids,
         })
     }
+}
+
+async fn attach_engine_log<E: ContainerEngine>(
+    engine: &E,
+    service: &'static str,
+    id: &str,
+    error: FixtureError,
+) -> FixtureError {
+    let addition = match engine.logs(id).await {
+        Ok(logs) => crate::diagnostics::redacted_tail(&format!(
+            "{service} log:\n{logs}\n[end {service} log]"
+        )),
+        Err(failure) => crate::diagnostics::redacted_tail(&format!(
+            "could not read the {service} diagnostic log: {failure}"
+        )),
+    };
+    crate::runtime::attach_diagnostics(error, addition)
 }
 
 #[cfg(test)]
@@ -299,46 +369,8 @@ mod tests {
 
     use nigiri_rs_core::{Bitcoin, Liquid};
 
-    use super::{ContainerHandles, Fixture};
+    use super::Fixture;
     use crate::{ContainerImage, FixtureChain, FixtureError};
-
-    /// Reports the order in which the fixture released its handles.
-    struct DropOrderRecorder {
-        name: &'static str,
-        order: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
-    }
-
-    impl Drop for DropOrderRecorder {
-        fn drop(&mut self) {
-            self.order
-                .lock()
-                .expect("the recorded order is never poisoned")
-                .push(self.name);
-        }
-    }
-
-    // Catches a regression that reorders the fixture's handles. Electrs must be released before the
-    // node it indexes, or the indexer is briefly pointed at a container that no longer exists.
-    #[test]
-    fn the_indexer_handle_is_released_before_the_node_it_indexes() {
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        drop(ContainerHandles {
-            electrs: DropOrderRecorder {
-                name: "electrs",
-                order: std::sync::Arc::clone(&order),
-            },
-            node: DropOrderRecorder {
-                name: "node",
-                order: std::sync::Arc::clone(&order),
-            },
-        });
-
-        assert_eq!(
-            *order.lock().expect("the recorded order is never poisoned"),
-            ["electrs", "node"]
-        );
-    }
 
     // Catches a regression that changes what a caller gets without asking for anything: the pinned
     // images and the 60-second budget the whole design is bounded by.
@@ -416,13 +448,12 @@ mod tests {
     // Storage is asserted before the drop and absence after it, in one fixture, because starting a
     // second one to check the other half would double the slowest test in the suite.
     async fn assert_dropping_a_fixture_removes_every_resource_it_created<C: FixtureChain>() {
-        use testcontainers::bollard::{Docker, models::MountPointTypeEnum};
+        use bollard::{Docker, models::MountPointTypeEnum};
 
         let fixture = Fixture::<C>::start()
             .await
             .expect("a pinned fixture must start against a real daemon");
-        let node = fixture.handles.node.id().to_owned();
-        let electrs = fixture.handles.electrs.id().to_owned();
+        let [electrs, node] = fixture.container_ids();
         let network = fixture.names.network.clone();
 
         let docker = Docker::connect_with_local_defaults()
@@ -485,7 +516,7 @@ mod tests {
         // is fine, and mounting one Docker did not create for this container alone is not.
         let mut declared = 0_usize;
         for image in [C::node_image_default(), C::electrs_image_default()] {
-            let reference = format!("{}:{}", image.name(), image.testcontainers_tag());
+            let reference = format!("{}:{}", image.name(), image.reference_suffix());
             let inspected = docker
                 .inspect_image(&reference)
                 .await

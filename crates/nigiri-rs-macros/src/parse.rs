@@ -257,7 +257,7 @@ fn chain_of(ty: &Type) -> Result<syn::Path> {
 /// Whether a parameter names the wired pair.
 ///
 /// Matched on the last path segment, like [`chain_of`], so `PegPair` and
-/// `nigiri_rs::testcontainers::PegPair` both work. The exported type takes no generic arguments, so
+/// `nigiri_rs::fixtures::PegPair` both work. The exported type takes no generic arguments, so
 /// a `PegPair<…>` is something else and falls through to `chain_of`'s rejection rather than being
 /// accepted and expanded into code that cannot compile.
 fn is_peg_pair(ty: &Type) -> bool {
@@ -327,7 +327,7 @@ mod tests {
     fn a_peg_pair_parameter_parses_into_the_pair_variant() {
         for signature in [
             quote::quote! { async fn a_test(peg: PegPair) {} },
-            quote::quote! { async fn a_test(peg: nigiri_rs::testcontainers::PegPair) {} },
+            quote::quote! { async fn a_test(peg: nigiri_rs::fixtures::PegPair) {} },
         ] {
             let parsed = parse(proc_macro2::TokenStream::new(), signature)
                 .expect("a PegPair parameter is accepted");
