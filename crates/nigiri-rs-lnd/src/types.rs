@@ -323,12 +323,23 @@ pub enum InvoiceState {
 }
 
 /// A parsed invoice record reported by LND.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct InvoiceRecord {
     invoice: Bolt11Invoice,
     payment_hash: sha256::Hash,
     amount: Millisats,
     state: InvoiceState,
+}
+
+impl std::fmt::Debug for InvoiceRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InvoiceRecord")
+            .field("payment_hash", &self.payment_hash)
+            .field("amount", &self.amount)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl InvoiceRecord {

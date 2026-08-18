@@ -2,7 +2,8 @@
 
 use std::future::Future;
 
-use bitcoin::{Address, OutPoint, address::NetworkUnchecked};
+use bitcoin::{Address, OutPoint, address::NetworkUnchecked, hashes::sha256};
+use lightning_invoice::Bolt11Invoice;
 
 mod proto;
 
@@ -14,6 +15,7 @@ mod convert;
 mod endpoint;
 mod error;
 mod node;
+mod payment;
 mod transport;
 mod types;
 
@@ -45,6 +47,23 @@ pub trait LightningNode: Clone + Send + Sync {
         request: OpenChannelRequest,
     ) -> impl Future<Output = Result<OutPoint, Self::Error>> + Send;
     fn list_channels(&self) -> impl Future<Output = Result<Vec<Channel>, Self::Error>> + Send;
+    fn create_invoice(
+        &self,
+        request: CreateInvoiceRequest,
+    ) -> impl Future<Output = Result<InvoiceRecord, Self::Error>> + Send;
+    fn lookup_invoice(
+        &self,
+        payment_hash: sha256::Hash,
+    ) -> impl Future<Output = Result<InvoiceRecord, Self::Error>> + Send;
+    fn pay_invoice(
+        &self,
+        invoice: &Bolt11Invoice,
+        options: PaymentOptions,
+    ) -> impl Future<Output = Result<PaymentRecord, Self::Error>> + Send;
+    fn lookup_payment(
+        &self,
+        payment_hash: sha256::Hash,
+    ) -> impl Future<Output = Result<PaymentRecord, Self::Error>> + Send;
 }
 
 impl LightningNode for LndClient {
@@ -84,6 +103,35 @@ impl LightningNode for LndClient {
 
     fn list_channels(&self) -> impl Future<Output = Result<Vec<Channel>, Self::Error>> + Send {
         LndClient::list_channels(self)
+    }
+
+    fn create_invoice(
+        &self,
+        request: CreateInvoiceRequest,
+    ) -> impl Future<Output = Result<InvoiceRecord, Self::Error>> + Send {
+        LndClient::create_invoice(self, request)
+    }
+
+    fn lookup_invoice(
+        &self,
+        payment_hash: sha256::Hash,
+    ) -> impl Future<Output = Result<InvoiceRecord, Self::Error>> + Send {
+        LndClient::lookup_invoice(self, payment_hash)
+    }
+
+    fn pay_invoice(
+        &self,
+        invoice: &Bolt11Invoice,
+        options: PaymentOptions,
+    ) -> impl Future<Output = Result<PaymentRecord, Self::Error>> + Send {
+        LndClient::pay_invoice(self, invoice, options)
+    }
+
+    fn lookup_payment(
+        &self,
+        payment_hash: sha256::Hash,
+    ) -> impl Future<Output = Result<PaymentRecord, Self::Error>> + Send {
+        LndClient::lookup_payment(self, payment_hash)
     }
 }
 

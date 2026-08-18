@@ -1,13 +1,19 @@
 use std::{borrow::Cow, str::FromStr};
 
-use bitcoin::{OutPoint, Txid, hashes::Hash, secp256k1::PublicKey};
+use bitcoin::{
+    OutPoint, Txid,
+    hashes::{Hash, sha256},
+    secp256k1::PublicKey,
+};
+use lightning_invoice::Bolt11Invoice;
 
 use crate::{
-    Channel, LndError, Millisats, NodeInfo, Peer, Sats, WalletBalance,
+    Channel, InvoiceRecord, InvoiceState, LndError, Millisats, NodeInfo, PaymentRecord,
+    PaymentState, Peer, Sats, WalletBalance,
     endpoint::parse_peer_endpoint,
     proto::lnrpc::{
-        Channel as ProtoChannel, ChannelPoint, GetInfoResponse, Peer as ProtoPeer,
-        WalletBalanceResponse, channel_point,
+        AddInvoiceResponse, Channel as ProtoChannel, ChannelPoint, GetInfoResponse,
+        Invoice as ProtoInvoice, Payment, Peer as ProtoPeer, WalletBalanceResponse, channel_point,
     },
 };
 
@@ -111,6 +117,164 @@ pub(crate) fn channel_point(response: ChannelPoint) -> Result<OutPoint, LndError
     Ok(OutPoint::new(txid, response.output_index))
 }
 
+pub(crate) fn created_invoice(response: AddInvoiceResponse) -> Result<InvoiceRecord, LndError> {
+    let payment_hash = response_hash("create invoice", &response.r_hash)?;
+    invoice_record(
+        "create invoice",
+        response.payment_request,
+        payment_hash,
+        None,
+        InvoiceState::Open,
+    )
+}
+
+pub(crate) fn invoice(response: ProtoInvoice) -> Result<InvoiceRecord, LndError> {
+    let payment_hash = response_hash("lookup invoice", &response.r_hash)?;
+    let amount = response_millisats(
+        "lookup invoice",
+        response.value_msat,
+        Some(payment_hash.to_string()),
+    )?;
+    invoice_record(
+        "lookup invoice",
+        response.payment_request,
+        payment_hash,
+        Some(amount),
+        invoice_state(response.state),
+    )
+}
+
+fn invoice_record(
+    operation: &'static str,
+    payment_request: String,
+    payment_hash: sha256::Hash,
+    response_amount: Option<Millisats>,
+    state: InvoiceState,
+) -> Result<InvoiceRecord, LndError> {
+    let identifier = Some(payment_hash.to_string());
+    let invoice = Bolt11Invoice::from_str(&payment_request).map_err(|_| {
+        invalid_response_with_identifier(
+            operation,
+            "BOLT11 invoice is malformed",
+            identifier.clone(),
+        )
+    })?;
+    if invoice.payment_hash() != &payment_hash {
+        return Err(invalid_response_with_identifier(
+            operation,
+            "BOLT11 payment hash does not match the response hash",
+            identifier,
+        ));
+    }
+    let encoded_amount = invoice.amount_milli_satoshis().ok_or_else(|| {
+        invalid_response_with_identifier(
+            operation,
+            "BOLT11 invoice has no amount",
+            Some(payment_hash.to_string()),
+        )
+    })?;
+    let amount = response_amount.unwrap_or_else(|| Millisats::new(encoded_amount));
+    if amount.as_u64() != encoded_amount {
+        return Err(invalid_response_with_identifier(
+            operation,
+            "BOLT11 amount does not match the response amount",
+            Some(payment_hash.to_string()),
+        ));
+    }
+    Ok(InvoiceRecord::new(invoice, payment_hash, amount, state))
+}
+
+pub(crate) fn payment(response: Payment) -> Result<PaymentRecord, LndError> {
+    let payment_hash = sha256::Hash::from_str(&response.payment_hash)
+        .map_err(|_| invalid_response("payment", "payment hash is malformed"))?;
+    let identifier = Some(payment_hash.to_string());
+    let value = response_millisats("payment", response.value_msat, identifier.clone())?;
+    let fee = response_millisats("payment", response.fee_msat, identifier.clone())?;
+    let state = payment_state(response.status);
+    let preimage = if response.payment_preimage.is_empty() {
+        None
+    } else {
+        Some(parse_preimage(&response.payment_preimage).map_err(|()| {
+            invalid_response_with_identifier(
+                "payment",
+                "payment preimage is malformed",
+                identifier.clone(),
+            )
+        })?)
+    };
+    if state == PaymentState::Succeeded && preimage.is_none() {
+        return Err(invalid_response_with_identifier(
+            "payment",
+            "succeeded payment has no preimage",
+            identifier,
+        ));
+    }
+    Ok(PaymentRecord::new(
+        payment_hash,
+        preimage,
+        value,
+        fee,
+        state,
+    ))
+}
+
+fn invoice_state(value: i32) -> InvoiceState {
+    match value {
+        0 => InvoiceState::Open,
+        1 => InvoiceState::Settled,
+        2 => InvoiceState::Canceled,
+        3 => InvoiceState::Accepted,
+        unknown => InvoiceState::Unknown(unknown),
+    }
+}
+
+fn payment_state(value: i32) -> PaymentState {
+    match value {
+        1 | 4 => PaymentState::InFlight,
+        2 => PaymentState::Succeeded,
+        3 => PaymentState::Failed,
+        unknown => PaymentState::Unknown(unknown),
+    }
+}
+
+fn response_hash(operation: &'static str, value: &[u8]) -> Result<sha256::Hash, LndError> {
+    sha256::Hash::from_slice(value)
+        .map_err(|_| invalid_response(operation, "payment hash is malformed"))
+}
+
+fn response_millisats(
+    operation: &'static str,
+    value: i64,
+    identifier: Option<String>,
+) -> Result<Millisats, LndError> {
+    u64::try_from(value)
+        .map(Millisats::new)
+        .map_err(|_| invalid_response_with_identifier(operation, "amount is negative", identifier))
+}
+
+fn parse_preimage(value: &str) -> Result<[u8; 32], ()> {
+    if value.len() != 64 || !value.is_ascii() {
+        return Err(());
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, output) in bytes.iter_mut().enumerate() {
+        let offset = index * 2;
+        let high = hex_nibble(value.as_bytes()[offset]).ok_or(())?;
+        let low = hex_nibble(value.as_bytes()[offset + 1]).ok_or(())?;
+        *output = (high << 4) | low;
+    }
+    Ok(bytes)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn response_amount(operation: &'static str, value: i64) -> Result<Sats, LndError> {
     u64::try_from(value)
         .map(Sats::new)
@@ -122,9 +286,17 @@ fn invalid_get_info(detail: &'static str) -> LndError {
 }
 
 pub(crate) fn invalid_response(operation: &'static str, detail: &'static str) -> LndError {
+    invalid_response_with_identifier(operation, detail, None)
+}
+
+pub(crate) fn invalid_response_with_identifier(
+    operation: &'static str,
+    detail: &'static str,
+    identifier: Option<String>,
+) -> LndError {
     LndError::InvalidResponse {
         operation: Cow::Borrowed(operation),
         detail: Cow::Borrowed(detail),
-        identifier: None,
+        identifier,
     }
 }

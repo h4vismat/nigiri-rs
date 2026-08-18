@@ -35,10 +35,15 @@ impl fmt::Debug for LndClient {
 mod tests {
     use std::time::Duration;
 
-    use bitcoin::secp256k1::PublicKey;
+    use bitcoin::{
+        hashes::{Hash, sha256},
+        secp256k1::PublicKey,
+    };
+    use lightning_invoice::{Currency, InvoiceBuilder, PaymentSecret};
 
     use crate::{
-        LightningNode, LndClient, LndConfig, LndError, OpenChannelRequest, PeerAddress, Sats,
+        CreateInvoiceRequest, LightningNode, LndClient, LndConfig, LndError, Millisats,
+        OpenChannelRequest, PaymentOptions, PeerAddress, Sats,
     };
 
     fn config() -> LndConfig {
@@ -96,6 +101,29 @@ mod tests {
             .unwrap();
         let peer = PeerAddress::new(public_key, "bob.internal", 9735).unwrap();
         let open = OpenChannelRequest::new(public_key, Sats::new(2), Sats::new(1)).unwrap();
+        let payment_hash = sha256::Hash::from_byte_array([7; 32]);
+        let invoice = InvoiceBuilder::new(Currency::Regtest)
+            .description("trait future test".into())
+            .payment_hash(payment_hash)
+            .payment_secret(PaymentSecret([21; 32]))
+            .amount_milli_satoshis(1_000)
+            .duration_since_epoch(Duration::from_secs(1_700_000_000))
+            .min_final_cltv_expiry_delta(18)
+            .build_signed(|message| {
+                bitcoin::secp256k1::Secp256k1::new().sign_ecdsa_recoverable(
+                    message,
+                    &bitcoin::secp256k1::SecretKey::from_slice(&[42; 32]).unwrap(),
+                )
+            })
+            .unwrap();
+        let create = CreateInvoiceRequest::new(
+            Millisats::new(1_000),
+            "trait future test",
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let payment_options =
+            PaymentOptions::new(Millisats::new(100), Duration::from_secs(5)).unwrap();
 
         assert_node(&client);
         assert_send(LightningNode::get_info(&client));
@@ -105,5 +133,13 @@ mod tests {
         assert_send(LightningNode::list_peers(&client));
         assert_send(LightningNode::open_channel(&client, open));
         assert_send(LightningNode::list_channels(&client));
+        assert_send(LightningNode::create_invoice(&client, create));
+        assert_send(LightningNode::lookup_invoice(&client, payment_hash));
+        assert_send(LightningNode::pay_invoice(
+            &client,
+            &invoice,
+            payment_options,
+        ));
+        assert_send(LightningNode::lookup_payment(&client, payment_hash));
     }
 }

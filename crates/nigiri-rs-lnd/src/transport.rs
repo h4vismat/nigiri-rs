@@ -104,13 +104,30 @@ where
     Call: FnOnce(Request<RequestMessage>) -> CallFuture,
     CallFuture: Future<Output = Result<Response<ResponseMessage>, Status>>,
 {
+    let deadline = operation_deadline(client.timeout)?;
+    authenticated_request_until(client, deadline, client.timeout, operation, message, call).await
+}
+
+pub(crate) async fn authenticated_request_until<RequestMessage, ResponseMessage, Call, CallFuture>(
+    client: &ClientInner,
+    deadline: tokio::time::Instant,
+    configured_duration: Duration,
+    operation: &'static str,
+    message: RequestMessage,
+    call: Call,
+) -> Result<Response<ResponseMessage>, LndError>
+where
+    Call: FnOnce(Request<RequestMessage>) -> CallFuture,
+    CallFuture: Future<Output = Result<Response<ResponseMessage>, Status>>,
+{
     let mut request = Request::new(message);
     request
         .metadata_mut()
         .insert("macaroon", client.macaroon.clone());
-    bounded_request(client.timeout, operation, call(request)).await
+    bounded_request_until(deadline, configured_duration, operation, call(request)).await
 }
 
+#[allow(dead_code)]
 pub(crate) async fn bounded_request<ResponseMessage, CallFuture>(
     duration: Duration,
     operation: &'static str,
