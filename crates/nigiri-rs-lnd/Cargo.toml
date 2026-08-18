@@ -1,0 +1,22 @@
+[package]
+name = "nigiri-rs-lnd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Typed LND Lightning service client"
+repository = "https://github.com/h4vismat/nigiri-rs"
+
+[dependencies]
+bitcoin = "0.32.7"
+lightning-invoice = "0.34.1"
+prost = "0.14.1"
+thiserror = "2.0.18"
+tokio = { version = "1.50.0", features = ["fs", "time"] }
+tonic = { version = "0.14.6", features = ["tls-ring"] }
+tonic-prost = "0.14.6"
+url = "2.5.8"
+
+[build-dependencies]
+protoc-bin-vendored = "3.2.0"
+tonic-prost-build = "0.14.6"
