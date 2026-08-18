@@ -9,7 +9,11 @@ use crate::{
 };
 
 pub(crate) use engine::{BollardEngine, ContainerEngine};
-pub(crate) use spec::{electrs_spec, node_spec};
+#[allow(
+    unused_imports,
+    reason = "Task 6 specification is consumed by the Task 7 LndPair startup"
+)]
+pub(crate) use spec::{electrs_spec, lnd_spec, node_spec};
 pub(crate) use supervisor::{RunningContainer, RuntimeHandle, Startup, supervise};
 
 pub(crate) fn runtime_error(

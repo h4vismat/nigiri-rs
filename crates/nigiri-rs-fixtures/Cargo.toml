@@ -14,9 +14,12 @@ bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]
 [dependencies]
 bollard = "0.20.2"
 futures-util = "0.3.32"
+getrandom = "0.3.3"
 nigiri-rs-core = { version = "0.4.0", path = "../nigiri-rs-core" }
+nigiri-rs-lnd = { version = "0.1.0", path = "../nigiri-rs-lnd" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+tar = "0.4.44"
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "2.5.8"

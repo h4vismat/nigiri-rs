@@ -84,6 +84,32 @@ impl<E: ContainerEngine> Startup<E> {
         self.run(engine.logs(id_or_name)).await
     }
 
+    #[allow(
+        dead_code,
+        reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
+    )]
+    pub(crate) async fn read_container_file(
+        &mut self,
+        id: &str,
+        path: &str,
+        max_bytes: usize,
+    ) -> EngineResult<Vec<u8>> {
+        let engine = self.engine.clone();
+        let contents = self
+            .run(engine.read_container_file(id, path, max_bytes))
+            .await?;
+        if contents.len() > max_bytes {
+            return Err(EngineError::new(
+                "read container file",
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "container file exceeds requested byte limit",
+                ),
+            ));
+        }
+        Ok(contents)
+    }
+
     async fn run<T>(
         &mut self,
         operation: impl Future<Output = EngineResult<T>>,
@@ -338,7 +364,11 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeEngine {
         block_create: bool,
+        block_read: bool,
         create_entered: Arc<Notify>,
+        read_entered: Arc<Notify>,
+        read_contents: Arc<Mutex<Vec<u8>>>,
+        read_requests: Arc<Mutex<Vec<(String, String, usize)>>>,
         removed: Arc<Mutex<Vec<String>>>,
     }
 
@@ -385,6 +415,27 @@ mod tests {
             Ok(String::new())
         }
 
+        async fn read_container_file(
+            &self,
+            id: &str,
+            path: &str,
+            max_bytes: usize,
+        ) -> EngineResult<Vec<u8>> {
+            self.read_requests
+                .lock()
+                .expect("read request log is not poisoned")
+                .push((id.to_owned(), path.to_owned(), max_bytes));
+            self.read_entered.notify_waiters();
+            if self.block_read {
+                return std::future::pending().await;
+            }
+            Ok(self
+                .read_contents
+                .lock()
+                .expect("read contents are not poisoned")
+                .clone())
+        }
+
         async fn remove_container(&self, id_or_name: &str) -> EngineResult<()> {
             self.removed
                 .lock()
@@ -400,6 +451,102 @@ mod tests {
                 .push(id_or_name.to_owned());
             Ok(())
         }
+    }
+
+    // Catches a regression that bypasses the runtime engine, changes the requested credential
+    // path/bound, or returns bytes from a fake engine that violated the bound contract.
+    #[tokio::test]
+    async fn startup_file_reads_delegate_exactly_and_enforce_the_byte_bound() {
+        const CERT_LIMIT: usize = 1_048_576;
+        const CERT_PATH: &str = "/root/.lnd/tls.cert";
+
+        let engine = FakeEngine {
+            read_contents: Arc::new(Mutex::new(b"certificate".to_vec())),
+            ..FakeEngine::default()
+        };
+        let observed = engine.clone();
+        let (contents, runtime) = supervise(engine, |mut startup| async move {
+            startup
+                .read_container_file("alice", CERT_PATH, CERT_LIMIT)
+                .await
+        })
+        .await
+        .expect("a bounded fake-engine read succeeds");
+
+        assert_eq!(contents, b"certificate");
+        assert_eq!(
+            *observed
+                .read_requests
+                .lock()
+                .expect("read request log is not poisoned"),
+            [("alice".to_owned(), CERT_PATH.to_owned(), CERT_LIMIT)]
+        );
+        runtime.shutdown().await.expect("cleanup succeeds");
+
+        let oversized = FakeEngine {
+            read_contents: Arc::new(Mutex::new(vec![b'x'; CERT_LIMIT + 1])),
+            ..FakeEngine::default()
+        };
+        let error = match supervise(oversized, |mut startup| async move {
+            startup
+                .read_container_file("alice", CERT_PATH, CERT_LIMIT)
+                .await
+        })
+        .await
+        {
+            Ok(_) => panic!("1,048,577 bytes must be rejected at the supervisor boundary"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.operation(), "read container file");
+        assert!(!error.to_string().contains(&"x".repeat(32)));
+    }
+
+    // Catches a read wrapper that awaits the engine directly instead of using Startup's
+    // cancellation gate, which would strand fixture resources when its caller goes away.
+    #[tokio::test]
+    async fn cancelling_a_container_file_read_preserves_supervisor_cleanup() {
+        let engine = FakeEngine {
+            block_read: true,
+            ..FakeEngine::default()
+        };
+        let observed = engine.clone();
+        let entered = engine.read_entered.clone();
+
+        let caller = tokio::spawn(supervise(engine, |mut startup| async move {
+            startup.create_network("fixture-network".to_owned()).await?;
+            startup
+                .read_container_file("alice", "/root/.lnd/tls.cert", 1_048_576)
+                .await
+        }));
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the container file read must begin");
+        caller.abort();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !observed
+                    .removed
+                    .lock()
+                    .expect("removal log is not poisoned")
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the supervisor must clean up after file-read cancellation");
+
+        assert_eq!(
+            *observed
+                .removed
+                .lock()
+                .expect("removal log is not poisoned"),
+            ["fixture-network-id"]
+        );
     }
 
     #[tokio::test]

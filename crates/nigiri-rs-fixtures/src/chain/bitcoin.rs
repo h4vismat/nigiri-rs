@@ -49,6 +49,19 @@ impl InitialMiningGate {
 
 static INITIAL_MINING_GATE: InitialMiningGate = InitialMiningGate::new();
 
+#[allow(
+    dead_code,
+    reason = "Task 6 wiring is consumed by the Task 7 LndPair startup"
+)]
+pub(crate) fn bitcoin_zmq_args() -> Vec<String> {
+    use crate::lnd::{BITCOIN_ZMQ_BLOCK_PORT, BITCOIN_ZMQ_TX_PORT};
+
+    vec![
+        format!("-zmqpubrawblock=tcp://0.0.0.0:{BITCOIN_ZMQ_BLOCK_PORT}"),
+        format!("-zmqpubrawtx=tcp://0.0.0.0:{BITCOIN_ZMQ_TX_PORT}"),
+    ]
+}
+
 impl FixtureChain for Bitcoin {
     const NODE_SERVICE: &'static str = "bitcoind";
     const CHAIN_NAME: &'static str = "Bitcoin";
@@ -146,8 +159,44 @@ mod tests {
 
     use tokio::sync::{Barrier, Notify, mpsc, oneshot};
 
-    use super::InitialMiningGate;
-    use crate::deadline::Deadline;
+    use super::{InitialMiningGate, bitcoin_zmq_args};
+    use crate::{
+        deadline::Deadline,
+        lnd::{BITCOIN_ZMQ_BLOCK_PORT, BITCOIN_ZMQ_TX_PORT},
+        node::merge_node_args,
+    };
+
+    // Catches a regression that drops either LND publisher, swaps its topic/port, or lets an
+    // existing Bitcoin argument override the fixture's network-reachable endpoint.
+    #[test]
+    fn lnd_zmq_arguments_are_exact_and_win_conflicting_node_settings() {
+        let args = bitcoin_zmq_args();
+        assert_eq!(
+            args,
+            vec![
+                format!("-zmqpubrawblock=tcp://0.0.0.0:{BITCOIN_ZMQ_BLOCK_PORT}"),
+                format!("-zmqpubrawtx=tcp://0.0.0.0:{BITCOIN_ZMQ_TX_PORT}"),
+            ]
+        );
+
+        let merged = merge_node_args(
+            vec![
+                "-regtest=1".to_owned(),
+                "-zmqpubrawblock=tcp://127.0.0.1:9999".to_owned(),
+                "-printtoconsole=1".to_owned(),
+            ],
+            &args,
+        );
+        assert_eq!(
+            merged,
+            vec![
+                "-regtest=1".to_owned(),
+                "-printtoconsole=1".to_owned(),
+                "-zmqpubrawblock=tcp://0.0.0.0:28332".to_owned(),
+                "-zmqpubrawtx=tcp://0.0.0.0:28333".to_owned(),
+            ]
+        );
+    }
 
     struct ActiveMining {
         active: Arc<AtomicUsize>,

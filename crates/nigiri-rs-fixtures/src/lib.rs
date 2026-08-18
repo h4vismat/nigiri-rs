@@ -67,6 +67,11 @@ mod endpoint;
 mod error;
 mod fixture;
 mod image;
+#[allow(
+    dead_code,
+    reason = "Task 6 primitives are consumed by the Task 7 LndPair lifecycle"
+)]
+mod lnd;
 mod node;
 mod peg_pair;
 mod readiness;
