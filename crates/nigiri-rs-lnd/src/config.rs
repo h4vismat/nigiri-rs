@@ -94,18 +94,14 @@ impl fmt::Debug for LndConfig {
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<Url, LndError> {
+    let authority = original_authority(endpoint)?;
+    validate_authority(authority)?;
     let url = Url::parse(endpoint).map_err(|_| invalid("endpoint must be a valid HTTPS URL"))?;
     if url.scheme() != "https" {
         return Err(invalid("endpoint must use HTTPS"));
     }
     if url.host_str().is_none() {
         return Err(invalid("endpoint must include a host"));
-    }
-    if url.port().is_none() {
-        return Err(invalid("endpoint must include a port"));
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(invalid("endpoint must not include userinfo"));
     }
     if url.query().is_some() {
         return Err(invalid("endpoint must not include a query"));
@@ -114,6 +110,39 @@ fn validate_endpoint(endpoint: &str) -> Result<Url, LndError> {
         return Err(invalid("endpoint must not include a fragment"));
     }
     Ok(url)
+}
+
+fn original_authority(endpoint: &str) -> Result<&str, LndError> {
+    let (_, rest) = endpoint
+        .split_once("://")
+        .ok_or_else(|| invalid("endpoint must include a host"))?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    Ok(&rest[..end])
+}
+
+fn validate_authority(authority: &str) -> Result<(), LndError> {
+    if authority.contains('@') {
+        return Err(invalid("endpoint must not include userinfo"));
+    }
+
+    let port = if authority.starts_with('[') {
+        authority
+            .find(']')
+            .and_then(|end| authority.get(end + 1..))
+            .and_then(|suffix| suffix.strip_prefix(':'))
+    } else {
+        authority.rsplit_once(':').map(|(_, port)| port)
+    };
+    let Some(port) = port else {
+        return Err(invalid("endpoint must include a port"));
+    };
+    if port.is_empty()
+        || !port.bytes().all(|byte| byte.is_ascii_digit())
+        || port.parse::<u16>().is_err()
+    {
+        return Err(invalid("endpoint port must be in range"));
+    }
+    Ok(())
 }
 
 fn validate_credential(name: &'static str, length: usize, maximum: usize) -> Result<(), LndError> {

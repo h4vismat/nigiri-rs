@@ -104,6 +104,63 @@ fn configuration_applies_credential_limits_and_validates_all_endpoint_parts() {
 }
 
 #[test]
+fn configuration_accepts_an_explicit_default_https_port_but_rejects_an_omitted_port() {
+    let localhost = LndConfig::new(
+        "https://localhost:443",
+        vec![1],
+        vec![2],
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(localhost.endpoint().as_str(), "https://localhost/");
+    assert!(
+        LndConfig::new(
+            "https://[::1]:443",
+            vec![1],
+            vec![2],
+            Duration::from_secs(1),
+        )
+        .is_ok()
+    );
+    assert!(
+        LndConfig::new(
+            "https://localhost",
+            vec![1],
+            vec![2],
+            Duration::from_secs(1),
+        )
+        .is_err()
+    );
+    assert!(LndConfig::new("https://[::1]", vec![1], vec![2], Duration::from_secs(1),).is_err());
+}
+
+#[test]
+fn configuration_rejects_empty_userinfo_delimiters() {
+    assert!(
+        LndConfig::new(
+            "https://@localhost:10009",
+            vec![1],
+            vec![2],
+            Duration::from_secs(1),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn configuration_does_not_treat_an_at_sign_in_the_path_as_userinfo() {
+    assert!(
+        LndConfig::new(
+            "https://localhost:10009/path@segment",
+            vec![1],
+            vec![2],
+            Duration::from_secs(1),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn request_values_reject_invalid_inputs() {
     assert!(PeerAddress::new(public_key(), "   ", 9735).is_err());
     assert!(PeerAddress::new(public_key(), "localhost", 0).is_err());
