@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package harness;
+
+service Harness {
+  rpc Probe(ProbeRequest) returns (ProbeResponse);
+}
+
+message ProbeRequest {}
+
+message ProbeResponse {
+  string message = 1;
+}

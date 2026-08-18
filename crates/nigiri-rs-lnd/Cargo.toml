@@ -17,6 +17,10 @@ tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
 url = "2.5.8"
 
+[dev-dependencies]
+rcgen = "0.14.5"
+tokio-stream = { version = "0.1.17", features = ["net"] }
+
 [build-dependencies]
 protoc-bin-vendored = "3.2.0"
 tonic-prost-build = "0.14.6"
