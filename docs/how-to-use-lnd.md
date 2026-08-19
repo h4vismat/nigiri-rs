@@ -62,9 +62,10 @@ by your own code.
 ## Retry committed operations safely
 
 Each request is bounded by `LndConfig::timeout`; `PaymentOptions` also supplies LND's payment timeout.
-A timeout is not cancellation or rollback. `open_channel`, `create_invoice`, `pay_invoice`, and
-`lookup_payment` can return `LndError::OutcomeUnknown` when LND may have committed state. The error
-preserves a channel point or payment hash when the daemon supplied one.
+A timeout is not cancellation or rollback. Mutating calls such as `open_channel`, `create_invoice`,
+and `pay_invoice` can return `LndError::OutcomeUnknown` when LND may have committed state;
+`lookup_payment` can return it when the terminal payment state cannot be observed. The error
+preserves a channel point or payment hash when known from the request or daemon.
 
 For a payment, query by hash before retrying:
 

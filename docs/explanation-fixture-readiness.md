@@ -111,7 +111,8 @@ the Bitcoin node's genesis, which is a weaker statement than it sounds — see
 An [`LndPair`](reference-fixtures.md#lndpair) builds on one Bitcoin fixture, then adds Alice and Bob.
 Its default 180-second deadline covers the complete public `start()` call: validation, image work,
 the backing stack, both LND nodes, wallet initialization, funding, six channel confirmations,
-diagnostics, both payment probes, and bounded failure cleanup.
+diagnostics, both payment probes, and a bounded wait for failure cleanup. If that wait expires, the
+supervisor can continue cleanup under per-request Docker bounds after the public call returns.
 
 Readiness is deliberately split because an isolated LND node can be chain-synchronized while
 reporting `synced_to_graph = false`:
@@ -207,8 +208,8 @@ with competing tips.
 Worth stating explicitly, because it is the obvious alternative and it fails in a specific way.
 
 A sleep is a guess about the slowest machine that will ever run the test. Too short and it is flaky
-on CI. Too long and every fixture in the suite pays the worst case — 18 fixture-starting tests times
-five wasted seconds is a minute and a half per run, forever.
+on CI. Too long and every fixture-starting test pays the worst case — five wasted seconds per test,
+every run, forever.
 
 Polling costs the actual time, which on a warm machine is a few hundred milliseconds, and adapts to a
 slow one without anyone tuning a constant. The budget is there to bound the pathological case, not to

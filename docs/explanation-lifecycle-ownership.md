@@ -68,9 +68,10 @@ the type system: the owning value defines the intended service lifetime.
 
 For `LndPair`, dependency order is part of the contract. Bob is removed before Alice, then Electrs
 before bitcoind, and only then is the shared network removed. Startup, failure diagnostics, and
-cleanup all consume the same 180-second whole-call deadline. If cleanup cannot finish in the
-remaining budget, the public start returns on time while the dedicated supervisor continues bounded
-best-effort reverse-order cleanup rather than leaking ownership into the client handles.
+the caller's wait for cleanup all consume the same 180-second whole-call deadline. If that wait
+cannot finish in the remaining budget, the public start returns on time while the dedicated
+supervisor continues best-effort reverse-order cleanup under per-request Docker bounds rather than
+leaking ownership into the client handles.
 
 Both can be used in the same test suite.
 

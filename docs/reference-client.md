@@ -678,7 +678,7 @@ pub struct LndConfig { /* private */ }
 | `endpoint` | `fn endpoint(&self) -> &Url` | Validated HTTPS endpoint. |
 | `timeout` | `fn timeout(&self) -> Duration` | Per-operation deadline. |
 
-The endpoint requires `https`, a host, and an explicit valid port; userinfo, query, and fragment are
+The endpoint requires `https`, a host, and an explicit nonzero port; userinfo, query, and fragment are
 rejected. Credentials and timeout must be nonempty/nonzero. `MAX_TLS_CERTIFICATE_BYTES` is 1 MiB and
 `MAX_MACAROON_BYTES` is 64 KiB. File reads stop at those bounds rather than buffering unbounded data.
 

@@ -1,7 +1,8 @@
 # How to run a throwaway regtest stack
 
-Start and use a Bitcoin or Liquid regtest chain in Docker. Drop requests best-effort cleanup; use
-`shutdown().await` when cleanup errors matter, and remember that a hard kill can leave resources.
+Start and use a Bitcoin, Liquid, or ready-to-pay Lightning regtest topology in Docker. Drop requests
+best-effort cleanup; use `shutdown().await` when cleanup errors matter, and remember that a hard kill
+can leave resources.
 
 Use this when you need the fixture handle itself. If you only need a ready client in a test,
 [`#[nigiri_rs::test]`](reference-test-macro.md) does the same thing with less code.
@@ -110,8 +111,9 @@ then no longer have.
 
 `LndPair` defaults to 180 seconds. Its deadline also covers both LND starts, transient `GenSeed`
 retry, wallet initialization, funding, six confirmation blocks, post-channel graph readiness, two
-payment probes, failure diagnostics, and bounded cleanup. If cleanup exhausts the remaining time,
-the public call returns while its dedicated supervisor continues reverse-order cleanup.
+payment probes, failure diagnostics, and a bounded wait for cleanup. If that wait exhausts the
+remaining time, the public call returns while its dedicated supervisor continues reverse-order
+cleanup under per-request Docker bounds.
 
 Pre-pulling is the alternative, and it keeps your timeouts honest:
 
@@ -142,8 +144,9 @@ Starting a stack is almost entirely waiting on Docker and on the indexer catchin
 the waits is close to free: 4.47 s for this pair together against 6.30 s sequentially.
 
 Every Docker resource is scoped to a per-fixture UUID (`nigiri-rs-fixture-<uuid>`,
-`nigiri-rs-bitcoind-<uuid>`, `nigiri-rs-elements-<uuid>`, `nigiri-rs-electrs-<uuid>`), so concurrent
-fixtures cannot collide on a name.
+`nigiri-rs-bitcoind-<uuid>`, `nigiri-rs-elements-<uuid>`, `nigiri-rs-electrs-<uuid>`,
+`nigiri-rs-lnd-alice-<uuid>`, and `nigiri-rs-lnd-bob-<uuid>`), so concurrent fixtures cannot collide
+on a name.
 
 Because each fixture owns its chain, your tests need no cross-process mutation lock. A reorg in one
 is invisible to every other.
@@ -201,9 +204,9 @@ container will fail to start. The defaults are pinned by tag *and* digest for th
 
 ## Troubleshooting
 
-**`container runtime is unavailable`** — Docker isn't running, or your user can't reach the socket.
-The `Display` text is deliberately short; the real cause is in `Error::source()`. Print the full
-chain:
+**`container runtime connect to container engine failed for container engine: ...`** — Docker isn't
+running, or your user can't reach the socket. A failed daemon ping uses `ping container engine` in
+the operation field instead. The underlying cause is in `Error::source()`; print the full chain:
 
 ```rust,ignore
 let mut source: Option<&dyn std::error::Error> = Some(&error);

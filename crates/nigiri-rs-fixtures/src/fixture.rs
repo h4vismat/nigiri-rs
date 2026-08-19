@@ -273,8 +273,8 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     /// Starts the node, funds a wallet, starts Electrs, and returns only once all three services
     /// agree on the tip.
     ///
-    /// One `Deadline` covers everything after validation, so a slow phase spends budget the later
-    /// phases no longer have, rather than each phase getting a fresh clock.
+    /// One `Deadline` is created before validation and covers the complete call, so a slow phase
+    /// spends budget the later phases no longer have, rather than each phase getting a fresh clock.
     pub async fn start(self) -> Result<Fixture<C>, FixtureError> {
         let deadline = Deadline::new(self.startup_timeout)?;
         self.start_under(&deadline).await

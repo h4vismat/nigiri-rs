@@ -1,7 +1,8 @@
 # Tutorial: settle a Lightning payment
 
 This test starts a funded Bitcoin regtest stack plus two LND nodes, then settles a real BOLT11
-payment over their confirmed channel. Docker is the only external prerequisite.
+payment over their confirmed channel. You need Rust 1.88 or newer and a running Docker daemon; the
+first run pulls three pinned images.
 
 ## Add the test dependency
 

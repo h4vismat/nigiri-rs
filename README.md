@@ -6,7 +6,7 @@
 | --- | --- |
 | `nigiri-rs` | The facade. Depend on this. Re-exports Bitcoin/Liquid clients, optional Lightning APIs, and optional fixtures. |
 | `nigiri-rs-core` | The typed Bitcoin and Liquid clients. Re-exported in full by the facade. |
-| `nigiri-rs-lnd` | The host-managed LND client and protocol-level Lightning types. No Docker dependency. |
+| [`nigiri-rs-lnd`](crates/nigiri-rs-lnd/README.md) | The host-managed LND client and protocol-level Lightning types. No Docker dependency. |
 | `nigiri-rs-fixtures` | Ephemeral Docker-backed Bitcoin, Liquid, peg, and ready-to-pay Lightning fixtures. |
 | `nigiri-rs-macros` | The `#[nigiri_rs::test]` fixture attribute. |
 
@@ -18,7 +18,9 @@ Rust port.
 ephemeral regtest fixtures. A host-owned [Nigiri](https://github.com/vulpemventures/nigiri)
 environment and a host-owned LND node are compatible setups, not the only architecture.
 
-Version 0.4.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core response-type re-export. The curated network APIs retain their stronger native contracts.
+`nigiri-rs-core` 0.4.0 sends node requests directly over JSON-RPC. It retains the public,
+type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core
+response-type re-export. The curated network APIs retain their stronger native contracts.
 
 Version 0.2.0 was the breaking release that introduced network marker types selecting native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
 
@@ -62,11 +64,11 @@ starts a ready-to-pay LND pair and verifies a payment by hash.
 The host owns the complete lifecycle of services addressed by `NigiriClient` or `LndClient`. Those
 protocol clients provide readiness checks but never:
 
-- starts or stops services;
-- invokes Docker or Testcontainers;
-- provisions or deletes service data directories;
-- removes containers or volumes;
-- performs cleanup from `Drop`.
+- start or stop services;
+- invoke Docker or Testcontainers;
+- provision or delete service data directories;
+- remove containers or volumes;
+- perform cleanup from `Drop`.
 
 Host-owned Nigiri and LND remain compatible setups; start them before pointing clients at their
 endpoints. The `nigiri-rs-fixtures` companion crate provides fixture lifecycle separately.

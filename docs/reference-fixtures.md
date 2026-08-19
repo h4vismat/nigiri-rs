@@ -58,9 +58,9 @@ Keep the `Fixture` alive for as long as you use the client. `client()` returns a
 compiler enforces this — but note that `NigiriClient` is `Clone`, and a cloned client outliving its
 fixture may point at containers that cleanup has removed.
 
-Field order inside the struct is deliberate: Electrs is dropped before the node it indexes, so the
-indexer is never briefly pointed at a container that has already gone. A test in `fixture.rs` pins
-that order.
+The resource ledger records creation order and cleanup consumes its reverse, so Electrs is removed
+before the node it indexes. Tests in `runtime/resources.rs` pin that ordering independently of Rust
+struct field order.
 
 Drop also requests best-effort teardown on the panic path. A failed start inside
 `#[nigiri_rs::test]` unwinds with the other fixtures' handles dropping normally.
@@ -134,16 +134,17 @@ let fixture = Fixture::<Bitcoin>::builder()
 # }
 ```
 
-`startup_timeout` bounds **the whole startup**, not any single step within it. One shared deadline
-covers everything after validation, so a slow phase spends budget the later phases then no longer
-have. This is intentional: a per-phase clock would let a fixture take an unbounded total.
+`startup_timeout` bounds **the whole startup**, not any single step within it. One shared deadline is
+created before validation, so a slow phase spends budget the later phases then no longer have. This
+is intentional: a per-phase clock would let a fixture take an unbounded total.
 
 ### What `start` does, in order
 
-1. Validates both image descriptors. Invalid input is rejected **before Docker is asked to start
+1. Creates the shared deadline. A zero timeout is rejected here.
+2. Validates both image descriptors. Invalid input is rejected **before Docker is asked to start
    anything**.
-2. Generates UUID-scoped resource names (see [Resource naming](#resource-naming)).
-3. Creates the shared deadline. A zero timeout is rejected here.
+3. Checks the remaining budget, generates UUID-scoped resource names (see
+   [Resource naming](#resource-naming)), and connects to Docker.
 4. Starts the node container, waits for its RPC, creates the wallet, and funds it.
 5. Starts Electrs pointed at the node container by name.
 6. Applies the Esplora URL and Electrum endpoint Electrs just published to a copy of the
@@ -501,7 +502,7 @@ these specific images.
 ## `FixtureChain`
 
 ```rust
-pub trait FixtureChain: NigiriNetwork + Sized + private::Sealed + 'static {
+pub trait FixtureChain: NigiriNetwork + Sized + Send + Sync + private::Sealed + 'static {
     const NODE_SERVICE: &'static str;
     const CHAIN_NAME: &'static str;
     const NODE_RPC_PORT: u16;

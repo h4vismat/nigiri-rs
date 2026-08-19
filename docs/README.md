@@ -64,7 +64,7 @@ Why the design is shaped this way.
 | --- | --- | --- |
 | `nigiri-rs` | 0.5.0 | The facade. Re-exports core, optional LND, and optional fixtures/macro. |
 | `nigiri-rs-core` | 0.4.0 | Typed Bitcoin and Liquid clients only. No Docker or Lightning ownership. |
-| `nigiri-rs-lnd` | 0.1.0 | Host-managed LND client and protocol-level Lightning types. No Docker. |
+| [`nigiri-rs-lnd`](../crates/nigiri-rs-lnd/README.md) | 0.1.0 | Host-managed LND client and protocol-level Lightning types. No Docker. |
 | `nigiri-rs-fixtures` | 0.2.0 | Ephemeral Bitcoin, Liquid, peg, and Lightning fixtures. |
 | `nigiri-rs-macros` | 0.2.0 | `#[nigiri_rs::test]`. |
 
@@ -95,7 +95,7 @@ Every snippet in these pages assumes that dependency.
 Working against unreleased changes instead? Point at git and pin a commit for reproducibility:
 
 ```toml
-nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", rev = "86936f8", features = ["fixtures"] }
+nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", rev = "0900676", features = ["fixtures"] }
 ```
 
 ## Feature flags

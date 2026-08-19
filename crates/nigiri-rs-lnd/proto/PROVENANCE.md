@@ -13,3 +13,6 @@ under the [MIT License].
 [`v0.21.1-beta`]: https://github.com/lightningnetwork/lnd/tree/v0.21.1-beta
 [`2b87887`]: https://github.com/lightningnetwork/lnd/commit/2b87887
 [MIT License]: https://github.com/lightningnetwork/lnd/blob/v0.21.1-beta/LICENSE
+
+`test/harness.proto` is project-authored, test-only infrastructure. It is compiled separately with
+server generation and is not part of the vendored LND dependency graph above.

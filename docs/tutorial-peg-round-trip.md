@@ -1,8 +1,8 @@
 # Tutorial: a round trip across Liquid's peg
 
 You'll write tests that move value across Liquid's peg in both directions: BTC into the sidechain as
-L-BTC, and L-BTC back out as BTC. Everything runs against four containers that exist only for the
-duration of the test.
+L-BTC, and L-BTC back out as BTC. Everything runs against four containers owned for the duration of
+the test; Drop requests best-effort cleanup afterward, while a hard kill can leave resources.
 
 By the end you'll know why a peg needs a *wired* pair of nodes rather than two chains that happen to
 be running, which half of the peg is real and which half this crate is pretending, and why a peg-in

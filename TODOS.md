@@ -51,8 +51,7 @@ any point. The protocol crates `nigiri-rs-core` and `nigiri-rs-lnd` publish firs
 and the whole 101-block fund — before it calls `electrs::start_electrs`. There is no compile-time
 dependency between them: `start_electrs` takes the node's *name* as a string, computed by
 `topology_names` before either container exists. Both could run under `tokio::try_join!`, which
-would take Electrs' own container bring-up off the critical path of every one of the 18
-fixture-starting tests.
+would take Electrs' own container bring-up off the critical path of every fixture-starting test.
 
 Two things to settle before doing it, neither answerable without container runs. Electrs must
 tolerate a node whose RPC is not yet listening; its `--jsonrpc-import` daemon is expected to
@@ -113,22 +112,15 @@ Low value in practice: a `Peg::connect` timeout means a hung `getsidechaininfo` 
 already came up and passed its own readiness check, so the container log is less likely to be the
 thing that explains it than it is for a node that never started.
 
-## Documentation
+## Completed
 
 ### Make the container-cleanup one-liners safe when nothing matches
 
-**Priority:** P4
+**Completed:** v0.5.0 (2026-08-19)
 
-`docs/reference-fixtures.md` and `docs/how-to-run-a-fixture.md` both give a hard-kill cleanup recipe
-built on `docker rm -f -v $(docker ps -aq --filter ...)`. When the filter matches nothing, the
-command substitution is empty and `docker rm` exits with a usage error rather than doing nothing —
-noise at exactly the moment a reader is already confused about whether they leaked containers. The
-same shape now appears in two pages, so it is worth fixing once in both.
-
-Pre-existing style rather than something this work introduced; the peg-fixtures branch only copied it
-to a second page while documenting how to clean up a four-container pair.
-
-## Completed
+`docs/reference-fixtures.md` and `docs/how-to-run-a-fixture.md` now pipe matching resource IDs into
+guarded `while read` loops. An empty match is a no-op, container removal still includes anonymous
+volumes, and networks are removed separately.
 
 ### Give the peg API a presence in `docs/`
 

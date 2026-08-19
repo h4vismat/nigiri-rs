@@ -199,7 +199,8 @@ A configured certificate or macaroon file could not be opened/read. The path is 
 
 TLS/gRPC connection or stream transport failed. The source chain is preserved with credential
 metadata removed. The configured certificate is an exact end-entity pin, so a changed certificate
-is expected to fail here.
+is expected to fail here. A transport-source status after a mutation is dispatched is instead
+`OutcomeUnknown` because the server may already have committed it.
 
 ### `Authentication`
 
@@ -210,7 +211,10 @@ status failures so callers can stop rather than retry credentials blindly.
 
 LND returned another gRPC status. The operation and bounded status classification are retained. The
 fixture considers only a narrow set of unavailable/deadline/resource/aborted/unknown statuses
-transient during pre-commit readiness; it does not make every status retryable.
+transient during pre-commit readiness; it does not make every status retryable. After a mutation is
+dispatched, `Cancelled`, `Unknown`, `DeadlineExceeded`, `ResourceExhausted`, `Internal`, and
+`Unavailable` are classified as `OutcomeUnknown`; authentication, validation, and precondition
+failures remain definitive.
 
 ### `Timeout`
 
@@ -234,11 +238,13 @@ invoice; no other application payment is retried by the client.
 
 ### `OutcomeUnknown`
 
-LND may have committed the operation, but the final state was not observed. `identifier` carries a
-known channel point or payment hash. For payments, call `lookup_payment` by hash before retrying.
-Invoice creation may be uncertain without an identifier, and wallet initialization is uncertain
-after `InitWallet` because blindly generating a different seed could conflict with the committed
-wallet.
+LND may have committed the operation, but the final state was not observed. At the mutation boundary,
+this includes a local timeout, a transport-source status, and `Cancelled`, `Unknown`,
+`DeadlineExceeded`, `ResourceExhausted`, `Internal`, or `Unavailable`. Authentication, validation,
+and precondition failures remain definitive. `identifier` carries a known channel point or payment
+hash. For payments, call `lookup_payment` by hash before retrying. Invoice creation may be uncertain
+without an identifier, and wallet initialization is uncertain after `InitWallet` because blindly
+generating a different seed could conflict with the committed wallet.
 
 ## `FixtureError`
 
@@ -298,10 +304,14 @@ A readiness probe failed in a way that is not a timeout, for example Electrum
 
 > `{service} was not ready after {duration:?}: {last_observation}; {diagnostics}`
 
-The startup budget ran out with the three services still disagreeing. `last_observation` is the final
-height reading, formatted `node=<n> esplora=<n> electrum=<n>`, which tells you *which* service was
-behind. On this path `service` is `"fixture"`, since the failure is the disagreement rather than any
-one container. The variant has **no source** — nothing failed, the budget simply expired.
+The shared startup budget expired at a readiness boundary. The `service`, `last_observation`, and
+bounded diagnostics identify that boundary: Docker connection or creation, container startup,
+RPC/bootstrap, Electrum, LND, funding, cleanup, or a composite check. The variant has **no source** —
+nothing necessarily failed; the budget expired.
+
+For the final single-chain agreement check, `last_observation` is the final height reading, formatted
+`node=<n> esplora=<n> electrum=<n>`, which tells you *which* service was behind, and `service` is
+`"fixture"`.
 
 On a [`PegPair`](reference-fixtures.md#pegpair), the same variant also covers the budget running out
 while verifying the pair, after all four containers are already up. There `service` is `"peg"` and
