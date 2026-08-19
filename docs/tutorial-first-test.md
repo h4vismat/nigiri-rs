@@ -1,8 +1,9 @@
 # Tutorial: your first fixture-backed test
 
 You'll write a Rust test that starts a private Bitcoin regtest chain in Docker, funds an address on
-it, and checks the money arrived — then throws the whole chain away. No Nigiri installation, no
-shared node, no cleanup code.
+it, and checks the money arrived. Each test owns its chain and requests best-effort cleanup when it
+ends. No Nigiri installation or shared node. Drop cannot report cleanup errors; use explicit
+`shutdown().await` on a manually owned fixture when they matter. A hard kill can leave resources.
 
 By the end you'll understand the two ways to reach a fixture, why ports must be read rather than
 assumed, and how to do the same thing on Liquid.
@@ -26,7 +27,7 @@ Open `Cargo.toml` and add:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["fixtures"] }
 ```
 
 One dependency. `nigiri-rs` is a facade that re-exports the client, the fixtures, and the test
@@ -35,7 +36,7 @@ attribute, so you never name the three crates behind it.
 `dev-dependencies` is the right section: fixtures are a testing tool, and this keeps the Docker
 client libraries out of your release build.
 
-The `testcontainers` feature is what turns on both the fixtures and the `#[nigiri_rs::test]`
+The `fixtures` feature is what turns on both the fixtures and the `#[nigiri_rs::test]`
 attribute. Without it neither exists.
 
 ## Step 3: Write the test and run it
@@ -73,7 +74,9 @@ test a_fresh_chain_arrives_funded ... ok
 **That's a working chain.** The attribute started a Bitcoin node and an Electrs indexer in Docker,
 mined 101 blocks so the coinbase would mature, waited until node, Esplora, and Electrum all agreed on
 the tip, and handed your function a client pointed at all of it. When the test ended, both
-containers, their volumes, and their network were removed.
+containers, their volumes, and their network entered best-effort cleanup. A hard process kill can
+still leave resources. When cleanup errors matter, use the manual fixture API from step 7 and call
+`shutdown().await` on its owning handle.
 
 Height 101 is not arbitrary: Bitcoin's coinbase needs 100 confirmations to become spendable, so 101
 blocks is the smallest chain with money you can actually move.
@@ -188,7 +191,7 @@ The attribute is a convenience over a plain API. When you need the fixture handl
 override an image, or to control exactly when teardown happens — use it directly:
 
 ```rust,ignore
-use nigiri_rs::testcontainers::{Bitcoin, Fixture};
+use nigiri_rs::fixtures::{Bitcoin, Fixture};
 
 #[tokio::test]
 async fn manual_fixture() -> Result<(), Box<dyn std::error::Error>> {
@@ -197,7 +200,7 @@ async fn manual_fixture() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(client.block_height().await?, 101);
 
-    drop(fixture); // containers gone here
+    drop(fixture); // best-effort cleanup starts here
     Ok(())
 }
 ```
@@ -207,13 +210,14 @@ attribute reached tokio through `nigiri-rs` for you.
 
 **Keep the fixture alive as long as you use the client.** `client()` returns a borrow so the
 compiler enforces it, but `NigiriClient` is `Clone` — a cloned client outliving its fixture points at
-containers that no longer exist.
+containers that cleanup may already have removed.
 
 ## What you built
 
-A test suite where every test owns a private blockchain. No shared node to coordinate around, no
-cleanup step to forget, no `#[ignore]` hiding a test that never ran. Tests can mine, reorg, and
-mutate wallets in parallel, because none of them can see each other's chain.
+A test suite where every test owns a private blockchain and requests best-effort cleanup when it
+ends. Drop cannot report cleanup errors; use explicit `shutdown().await` on a manually owned fixture
+when they matter, and remember that a hard kill can leave resources. Tests can mine, reorg, and
+mutate wallets in parallel because none of them can see each other's chain.
 
 Where to go next:
 

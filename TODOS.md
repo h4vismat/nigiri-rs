@@ -18,7 +18,7 @@ This predates the 0.5.0 release rather than being caused by it — the snippets 
 was equally unpublished. Marking the release simply made the mismatch explicit, since the page now
 says out loud what the snippet was already getting wrong.
 
-Two ways out, and they are alternatives rather than steps: publish the four crates, which makes every
+Two ways out, and they are alternatives rather than steps: publish the five crates, which makes every
 existing snippet true and depends on the publish workflow below; or make the git-plus-pinned-rev form
 the primary snippet everywhere and keep the version table as a record of what the workspace contains,
 which is honest immediately and needs no release. Deliberately left as-is until that choice is made,
@@ -31,16 +31,17 @@ expires the moment it acquires one.
 
 **Priority:** P2
 
-Each of the four workspace manifests (`nigiri-rs-core`, `nigiri-rs-macros`,
-`nigiri-rs-testcontainers`, `nigiri-rs`) carries `license`, `description`, and `repository`, so
+Each of the five workspace manifests (`nigiri-rs-core`, `nigiri-rs-lnd`, `nigiri-rs-macros`,
+`nigiri-rs-fixtures`, `nigiri-rs`) carries `license`, `description`, `repository`, edition 2024,
+and MSRV 1.88, so
 every crate is shaped for publication, but nothing automates `cargo publish` on a tag. Releases
 are manual and unverified. Make it idempotent so re-running a failed release does not error.
 
 Publish order, worked out for CI dependency resolution. `nigiri-rs-macros` has no workspace
 dependency at all — only `proc-macro2`, `quote`, and `syn` — because it emits
 `::nigiri_rs::__private::…` as tokens and never compiles against the types, so it can publish at
-any point. The constraint is `nigiri-rs-core` first, then `nigiri-rs-testcontainers`, which does
-depend on it, then `nigiri-rs`, the facade, which depends on all three.
+any point. The protocol crates `nigiri-rs-core` and `nigiri-rs-lnd` publish first; then
+`nigiri-rs-fixtures`, which depends on both; then `nigiri-rs`, the facade, which depends on all four.
 
 ### Overlap the node and Electrs container starts
 
@@ -50,8 +51,7 @@ depend on it, then `nigiri-rs`, the facade, which depends on all three.
 and the whole 101-block fund — before it calls `electrs::start_electrs`. There is no compile-time
 dependency between them: `start_electrs` takes the node's *name* as a string, computed by
 `topology_names` before either container exists. Both could run under `tokio::try_join!`, which
-would take Electrs' own container bring-up off the critical path of every one of the 18
-fixture-starting tests.
+would take Electrs' own container bring-up off the critical path of every fixture-starting test.
 
 Two things to settle before doing it, neither answerable without container runs. Electrs must
 tolerate a node whose RPC is not yet listening; its `--jsonrpc-import` daemon is expected to
@@ -112,22 +112,15 @@ Low value in practice: a `Peg::connect` timeout means a hung `getsidechaininfo` 
 already came up and passed its own readiness check, so the container log is less likely to be the
 thing that explains it than it is for a node that never started.
 
-## Documentation
+## Completed
 
 ### Make the container-cleanup one-liners safe when nothing matches
 
-**Priority:** P4
+**Completed:** v0.5.0 (2026-08-19)
 
-`docs/reference-fixtures.md` and `docs/how-to-run-a-fixture.md` both give a hard-kill cleanup recipe
-built on `docker rm -f -v $(docker ps -aq --filter ...)`. When the filter matches nothing, the
-command substitution is empty and `docker rm` exits with a usage error rather than doing nothing —
-noise at exactly the moment a reader is already confused about whether they leaked containers. The
-same shape now appears in two pages, so it is worth fixing once in both.
-
-Pre-existing style rather than something this work introduced; the peg-fixtures branch only copied it
-to a second page while documenting how to clean up a four-container pair.
-
-## Completed
+`docs/reference-fixtures.md` and `docs/how-to-run-a-fixture.md` now pipe matching resource IDs into
+guarded `while read` loops. An empty match is a no-op, container removal still includes anonymous
+volumes, and networks are removed separately.
 
 ### Give the peg API a presence in `docs/`
 
@@ -151,8 +144,8 @@ a wired pair, which was not something a reader could do when this entry was writ
 `.github/workflows/ci.yml` runs formatting, Clippy with warnings denied, default- and
 all-feature target tests on Rust 1.88 and stable, all-feature doctests, and packaging checks.
 Exactly one matrix cell (stable, all-features) runs the full workspace, including the
-Docker-backed `nigiri-rs-testcontainers` suite; the other three scope to `nigiri-rs-core` and
-`nigiri-rs-macros`, neither of which needs Docker. The macro crate is in the narrow cells
+Docker-backed `nigiri-rs-fixtures` suite; the other three scope to `nigiri-rs-core`,
+`nigiri-rs-lnd`, and `nigiri-rs-macros`, none of which needs Docker. The macro crate is in the narrow cells
 deliberately: its `trybuild` suite is pure compile-fail checking, and macro diagnostics are worth
 checking against the 1.88 floor as well as stable.
 

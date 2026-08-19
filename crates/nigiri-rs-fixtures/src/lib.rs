@@ -1,4 +1,4 @@
-//! Ephemeral Bitcoin and Liquid regtest fixtures backed by Testcontainers.
+//! Ephemeral Bitcoin, Liquid, peg, and LND regtest fixtures backed by a Bollard runtime.
 //!
 //! Each fixture is one throwaway regtest stack: a node with a funded wallet, an Electrs indexer
 //! following it, and a [`nigiri_rs_core::NigiriClient`] pointed at both. Nothing is shared, so tests can
@@ -23,14 +23,24 @@
 //! validating peg-ins against the `bitcoind` beside it. Its peg-in is real; its peg-out release is
 //! simulated and holds no reserve. See [`PegPair`] and [`nigiri_rs_core::Peg`].
 //!
+//! [`LndPair`] starts a funded Bitcoin fixture and two LND nodes on its private network. It returns
+//! only after both nodes match the Bitcoin tip, share one confirmed active channel, and settle a
+//! 1,000-millisatoshi readiness payment in each direction. Its [`LndPair::channel_point`] identifies
+//! that channel without exposing LND protobuf or container types.
+//!
 //! # What a fixture requires and guarantees
 //!
 //! Docker must be running; no Nigiri installation is needed. Ports are chosen by the runtime, so read
 //! them from the client (or [`Fixture::electrum_endpoint`], which delegates to it) rather than
-//! assuming Nigiri's fixed ones. Containers, their anonymous
-//! volumes, and the network are removed when the fixture is dropped, and nothing survives the test.
+//! assuming Nigiri's fixed ones. Drop requests best-effort cleanup and waits for the runtime
+//! supervisor, but cannot report a removal failure. Call [`Fixture::shutdown`], [`PegPair::shutdown`],
+//! or [`LndPair::shutdown`] when cleanup errors matter. A hard process kill can still leave
+//! containers, volumes, or networks for manual removal.
 //! The first start on a machine pulls two pinned images per chain, which is slow; later starts reuse
 //! them and a fixture is ready in a few seconds.
+//! [`LndPair`] owns four containers and uses a 180-second default startup budget because wallet
+//! funding, six channel confirmations, graph propagation, and both readiness payments all consume
+//! one deadline.
 //!
 //! When [`Fixture::start`] returns, the node, Esplora, and Electrum all report the same tip,
 //! so the wallet's funds are queryable through any of them. That agreement is established once, at
@@ -67,6 +77,12 @@ mod endpoint;
 mod error;
 mod fixture;
 mod image;
+#[allow(
+    dead_code,
+    reason = "fixture-private LND constants support the LndPair runtime boundary"
+)]
+mod lnd;
+mod lnd_pair;
 mod node;
 mod peg_pair;
 mod readiness;
@@ -76,6 +92,7 @@ pub use chain::FixtureChain;
 pub use error::FixtureError;
 pub use fixture::{Fixture, FixtureBuilder};
 pub use image::ContainerImage;
+pub use lnd_pair::{LndPair, LndPairBuilder};
 pub use nigiri_rs_core::{Bitcoin, ElectrumEndpoint, Liquid};
 pub use peg_pair::{PegPair, PegPairBuilder};
 

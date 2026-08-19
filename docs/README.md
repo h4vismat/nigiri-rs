@@ -1,6 +1,6 @@
 # nigiri-rs documentation
 
-Typed asynchronous Bitcoin and Liquid regtest clients, with optional throwaway Docker fixtures.
+Typed asynchronous Bitcoin, Liquid, and Lightning clients, with optional throwaway Docker fixtures.
 
 The [repository README](../README.md) is the tour. These pages are the depth behind it.
 
@@ -11,6 +11,8 @@ The [repository README](../README.md) is the tour. These pages are the depth beh
 - **[Tutorial: a round trip across Liquid's peg](tutorial-peg-round-trip.md)** — BTC into the
   sidechain and back out again, against a wired four-container pair. Start here if the peg is why
   you came.
+- **[Tutorial: settle a Lightning payment](tutorial-lightning-payment.md)** — start two LND nodes
+  with a proven bidirectional channel, pay an invoice, and verify both records by payment hash.
 
 ## How-to guides
 
@@ -22,6 +24,8 @@ Task-oriented. Each one assumes you have the crate building already.
   host/port a BDK or LWK wallet needs.
 - [How to point the client at services you run](how-to-point-at-your-own-services.md) — custom
   endpoints, credentials, timeouts, and response limits.
+- [How to use a host-managed LND node](how-to-use-lnd.md) — load a pinned TLS certificate and
+  macaroon, wait for readiness, and handle uncertain payment outcomes safely.
 - [How to call any node RPC](how-to-call-any-node-rpc.md) — the typed `rpc()` escape hatch for
   methods the curated API does not wrap.
 - [How to work with Liquid assets](how-to-work-with-liquid-assets.md) — mint an asset, send it, and
@@ -33,14 +37,13 @@ Task-oriented. Each one assumes you have the crate building already.
 
 Complete, accurate, derived from the source.
 
-- [Client API](reference-client.md) — `NigiriClient`, `NigiriConfig`, `ElectrumEndpoint`, `Peg` and
-  the peg records, the response records, and the network markers.
-- [Fixture API](reference-fixtures.md) — `Fixture`, `FixtureBuilder`, `PegPair`, `PegPairBuilder`,
-  `ContainerImage`, `FixtureChain`.
+- [Client API](reference-client.md) — Bitcoin/Liquid clients plus `LndClient`, `LightningNode`,
+  Lightning request/response records, and checked amount types.
+- [Fixture API](reference-fixtures.md) — `Fixture`, `PegPair`, `LndPair`, their builders,
+  `ContainerImage`, and `FixtureChain`.
 - [`#[nigiri_rs::test]`](reference-test-macro.md) — accepted arguments, accepted signatures
-  (including `PegPair`), and every rejection with its message.
-- [Errors](reference-errors.md) — `NigiriError` and `FixtureError`, variant by variant, with what
-  triggers each.
+  (including `PegPair` and `LndPair`), and every rejection with its message.
+- [Errors](reference-errors.md) — `NigiriError`, `LndError`, and `FixtureError`, variant by variant.
 
 ## Explanation
 
@@ -51,7 +54,7 @@ Why the design is shaped this way.
 - [Typed networks](explanation-typed-networks.md) — why `Bitcoin` and `Liquid` are type parameters
   rather than an enum, and what that buys at compile time.
 - [What "ready" means](explanation-fixture-readiness.md) — why a fixture waits for three services to
-  agree on a tip before it hands you a client.
+  agree on a tip, and why `LndPair` also proves a channel in both directions.
 - [What the peg simulates](explanation-what-the-peg-simulates.md) — which half of Liquid's peg is
   real on regtest, which half this crate plays, and what that means for what you can assert.
 
@@ -59,21 +62,22 @@ Why the design is shaped this way.
 
 | Crate | Version | What it is |
 | --- | --- | --- |
-| `nigiri-rs` | 0.5.0 | The facade. Depend on this. Re-exports the client, plus fixtures and the test macro behind the `testcontainers` feature. |
-| `nigiri-rs-core` | 0.4.0 | The typed clients. No Docker dependency, no lifecycle management. |
-| `nigiri-rs-testcontainers` | 0.2.0 | Ephemeral Docker-backed regtest fixtures. |
+| `nigiri-rs` | 0.5.0 | The facade. Re-exports core, optional LND, and optional fixtures/macro. |
+| `nigiri-rs-core` | 0.4.0 | Typed Bitcoin and Liquid clients only. No Docker or Lightning ownership. |
+| [`nigiri-rs-lnd`](../crates/nigiri-rs-lnd/README.md) | 0.1.0 | Host-managed LND client and protocol-level Lightning types. No Docker. |
+| `nigiri-rs-fixtures` | 0.2.0 | Ephemeral Bitcoin, Liquid, peg, and Lightning fixtures. |
 | `nigiri-rs-macros` | 0.2.0 | `#[nigiri_rs::test]`. |
 
 Rust edition 2024, MSRV 1.88.
 
 ## Installing
 
-Depend on the facade. It re-exports everything the other three crates provide, so you name one
+Depend on the facade. It re-exports the public surfaces of the other four crates, so you name one
 dependency:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["fixtures"] }
 ```
 
 `dev-dependencies` is usually the right section: fixtures are a testing tool, and it keeps the Docker
@@ -91,17 +95,18 @@ Every snippet in these pages assumes that dependency.
 Working against unreleased changes instead? Point at git and pin a commit for reproducibility:
 
 ```toml
-nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", rev = "8579e78", features = ["testcontainers"] }
+nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", rev = "0900676", features = ["fixtures"] }
 ```
 
 ## Feature flags
 
-Both live on the `nigiri-rs` facade and are off by default.
+All live on the `nigiri-rs` facade and are off by default.
 
 | Feature | Pulls in | Enables |
 | --- | --- | --- |
-| `testcontainers` | `nigiri-rs-testcontainers`, `nigiri-rs-macros`, `tokio` | `nigiri_rs::testcontainers`, `#[nigiri_rs::test]` |
+| `lnd` | `nigiri-rs-lnd` | `LndClient`, `LightningNode`, and all project-owned Lightning types |
+| `fixtures` | `lnd`, `nigiri-rs-fixtures`, `nigiri-rs-macros`, `tokio` | `nigiri_rs::fixtures`, `#[nigiri_rs::test]`, including `LndPair` |
 | `bitcoin-rpc-types` | `corepc-types` 0.15 | `nigiri_rs::bitcoin_rpc_types`, maintained Bitcoin Core response records — pick the module matching your node (`v31` for a fixture, `v30` for Nigiri) |
 
-`testcontainers` is off by default because it pulls Docker client dependencies that a consumer
-talking to services it already runs does not need.
+`fixtures` implies `lnd` because `LndPair` returns `LndClient` values. Standalone host-managed LND
+use needs only `lnd`, so it does not pull Docker lifecycle dependencies.

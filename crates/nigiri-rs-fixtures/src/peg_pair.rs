@@ -42,9 +42,10 @@ const PEG_SERVICE: &str = "peg";
 ///
 /// # Lifetime
 ///
-/// Dropping the pair removes all four containers, their anonymous volumes, and the shared network.
-/// The Liquid stack is released first: `elementsd` holds an RPC connection to `bitcoind` and must
-/// not outlive it.
+/// Dropping the pair requests best-effort cleanup of all four containers, their anonymous volumes,
+/// and the shared network. Use [`PegPair::shutdown`] when cleanup errors matter. The Liquid stack is
+/// released first: `elementsd` holds an RPC connection to `bitcoind` and must not outlive it. A hard
+/// process kill can still leave resources for manual removal.
 pub struct PegPair {
     handles: PegHandles<Fixture<Liquid>, Fixture<Bitcoin>>,
     peg: Peg,
@@ -219,7 +220,11 @@ impl PegPairBuilder {
         {
             Ok(liquid) => liquid,
             // The Liquid half failed against a Bitcoin node whose log only that fixture holds.
-            Err(error) => return Err(bitcoin.attach_inner_logs(error).await),
+            Err(error) => {
+                let error = bitcoin.attach_inner_logs(&deadline, error).await;
+                let _ = bitcoin.shutdown_within(&deadline).await;
+                return Err(error);
+            }
         };
 
         // Run here rather than left to the first peg call: a parent-chain disagreement is then a

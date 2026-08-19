@@ -13,16 +13,15 @@ pub(crate) const RESERVED_PREFIX: &str = "__nigiri_rs_";
 
 /// The accepted fixture parameter types, named in one place.
 ///
-/// The rejection message, the documentation, and every future composite read this. With three
-/// composites in flight it would otherwise be spelled out at each site and drift.
+/// The rejection message, the documentation, and every future composite read this. It would
+/// otherwise be spelled out at each site and drift as new fixture shapes land.
 pub(crate) const ACCEPTED_PARAMETERS: &str =
-    "`NigiriClient<Bitcoin>`, `NigiriClient<Liquid>`, or `PegPair`";
+    "`NigiriClient<Bitcoin>`, `NigiriClient<Liquid>`, `PegPair`, or `LndPair`";
 
 /// One fixture the generated wrapper must start, derived from one function parameter.
 ///
-/// An enum rather than a struct because a composite parameter names no chain: `PegPair` is one
-/// such parameter, already landed, and `LightningStack` is the one still to come. Each adds a
-/// variant here and an arm at the three match sites in `expand.rs`.
+/// An enum rather than a struct because a composite parameter names no chain. Each composite adds
+/// a variant here and an arm at the match sites in `expand.rs`.
 pub(crate) enum FixtureParam {
     /// `NigiriClient<C>`, whose chain marker is taken from the type.
     Client {
@@ -32,13 +31,15 @@ pub(crate) enum FixtureParam {
     },
     /// `PegPair`, a wired Bitcoin and Liquid stack. Names no chain: it is both.
     PegPair { ident: syn::Ident },
+    /// `LndPair`, two ready-to-pay LND nodes backed by a Bitcoin stack.
+    LndPair { ident: syn::Ident },
 }
 
 impl FixtureParam {
     /// The parameter's binding, which every variant has and the expander always needs.
     pub(crate) fn ident(&self) -> &syn::Ident {
         match self {
-            Self::Client { ident, .. } | Self::PegPair { ident } => ident,
+            Self::Client { ident, .. } | Self::PegPair { ident } | Self::LndPair { ident } => ident,
         }
     }
 }
@@ -212,6 +213,11 @@ fn fixture_param(arg: &FnArg) -> Result<FixtureParam> {
             ident: pat.ident.clone(),
         });
     }
+    if is_lnd_pair(&typed.ty) {
+        return Ok(FixtureParam::LndPair {
+            ident: pat.ident.clone(),
+        });
+    }
 
     let chain = chain_of(&typed.ty)?;
 
@@ -270,6 +276,20 @@ fn is_peg_pair(ty: &Type) -> bool {
     })
 }
 
+/// Whether a parameter names the ready-to-pay Lightning pair.
+///
+/// As with [`is_peg_pair`], only the final path segment is significant and generic arguments are
+/// rejected because the exported fixture type is not generic.
+fn is_lnd_pair(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+
+    path.path.segments.last().is_some_and(|segment| {
+        segment.ident == "LndPair" && matches!(segment.arguments, PathArguments::None)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ACCEPTED_PARAMETERS, FixtureParam, parse};
@@ -303,7 +323,7 @@ mod tests {
     }
 
     // Catches a regression that spells the accepted-parameter list out at a second call site, which
-    // is how the message drifts once PegPair and LightningStack are added to it.
+    // is how the message drifts once composite fixture types are added to it.
     #[test]
     fn the_rejection_message_names_the_accepted_parameters_from_one_source() {
         // `expect_err` would require `TestFn: Debug`, which it deliberately does not derive; match
@@ -357,12 +377,48 @@ mod tests {
         assert!(error.to_string().contains(ACCEPTED_PARAMETERS), "{error}");
     }
 
+    // Catches a regression that matches only the bare spelling or tries to infer a chain marker
+    // from a pair that names none.
+    #[test]
+    fn an_lnd_pair_parameter_parses_into_the_pair_variant() {
+        for signature in [
+            quote::quote! { async fn a_test(pair: LndPair) {} },
+            quote::quote! { async fn a_test(pair: nigiri_rs::fixtures::LndPair) {} },
+        ] {
+            let parsed = parse(proc_macro2::TokenStream::new(), signature)
+                .expect("an LndPair parameter is accepted");
+
+            assert_eq!(parsed.fixtures.len(), 1);
+            let FixtureParam::LndPair { ident } = &parsed.fixtures[0] else {
+                panic!("an LndPair parameter must parse into the pair variant");
+            };
+            assert_eq!(ident.to_string(), "pair");
+        }
+    }
+
+    // Catches a broad final-segment match that would accept a different generic type and emit an
+    // invalid fixture start path.
+    #[test]
+    fn a_generic_lnd_pair_is_rejected_with_the_accepted_list() {
+        let error = match parse(
+            proc_macro2::TokenStream::new(),
+            quote::quote! {
+                async fn a_test(pair: LndPair<Bitcoin>) {}
+            },
+        ) {
+            Ok(_) => panic!("`LndPair<Bitcoin>` is not an accepted parameter"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains(ACCEPTED_PARAMETERS), "{error}");
+    }
+
     // Catches a regression that drops the pair from the one place the accepted list is spelled.
     #[test]
-    fn the_accepted_list_names_the_pair() {
-        assert!(
-            ACCEPTED_PARAMETERS.contains("PegPair"),
-            "{ACCEPTED_PARAMETERS}"
+    fn the_accepted_list_names_every_supported_fixture_exactly() {
+        assert_eq!(
+            ACCEPTED_PARAMETERS,
+            "`NigiriClient<Bitcoin>`, `NigiriClient<Liquid>`, `PegPair`, or `LndPair`"
         );
     }
 }

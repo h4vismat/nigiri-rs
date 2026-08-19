@@ -14,6 +14,17 @@ const SERVICE: &str = "fixture";
 /// Shared by every fixture readiness loop, so polling cannot drift between them.
 pub(crate) const RETRY_DELAY: Duration = Duration::from_millis(100);
 
+/// Charges one shared polling pause to the caller's original startup deadline.
+pub(crate) async fn wait_before_retry(
+    deadline: &Deadline,
+    service: &'static str,
+    observation: &str,
+) -> Result<(), FixtureError> {
+    deadline
+        .run(service, observation, tokio::time::sleep(RETRY_DELAY))
+        .await
+}
+
 /// The three heights that must agree before a fixture is queryable.
 ///
 /// The node mines; Esplora indexes what the node mined; Electrum serves what Esplora indexed. A
@@ -60,9 +71,7 @@ pub(crate) async fn wait_for_sync<C: FixtureChain>(
             Err(unavailable) => observation = unavailable,
         }
 
-        deadline
-            .run(SERVICE, &observation, tokio::time::sleep(RETRY_DELAY))
-            .await?;
+        wait_before_retry(deadline, SERVICE, &observation).await?;
     }
 }
 

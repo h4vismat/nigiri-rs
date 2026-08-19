@@ -1,6 +1,14 @@
-use crate::{ContainerImage, FixtureChain, FixtureError, node::merge_node_args};
+use std::{fmt, net::IpAddr};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+use nigiri_rs_core::Bitcoin;
+
+use crate::{
+    ContainerImage, FixtureChain, FixtureError, RPC_PASSWORD, RPC_USER,
+    lnd::{BITCOIN_ZMQ_BLOCK_PORT, BITCOIN_ZMQ_TX_PORT, LND_GRPC_PORT, LND_PEER_PORT},
+    node::merge_node_args,
+};
+
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ContainerSpec {
     pub(crate) service: &'static str,
     pub(crate) image: ContainerImage,
@@ -9,6 +17,22 @@ pub(crate) struct ContainerSpec {
     pub(crate) network: String,
     pub(crate) command: Vec<String>,
     pub(crate) exposed_ports: Vec<u16>,
+}
+
+// Commands can carry RPC credentials. Keeping the entire vector out of Debug prevents both the
+// current bitcoind/LND passwords and future secret-bearing arguments from reaching diagnostics.
+impl fmt::Debug for ContainerSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContainerSpec")
+            .field("service", &self.service)
+            .field("image", &self.image)
+            .field("entrypoint", &self.entrypoint)
+            .field("name", &self.name)
+            .field("network", &self.network)
+            .field("exposed_ports", &self.exposed_ports)
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) fn node_spec<C: FixtureChain>(
@@ -48,6 +72,51 @@ pub(crate) fn electrs_spec<C: FixtureChain>(
         network,
         command: C::electrs_cmd(node_name),
         exposed_ports: vec![C::ELECTRS_HTTP_PORT, C::ELECTRS_ELECTRUM_PORT],
+    })
+}
+
+#[allow(
+    dead_code,
+    reason = "Task 6 specification is consumed by the Task 7 LndPair startup"
+)]
+pub(crate) fn lnd_spec(
+    image: ContainerImage,
+    network: String,
+    name: String,
+    bitcoind_name: &str,
+    endpoint_host: &str,
+) -> Result<ContainerSpec, FixtureError> {
+    image.validate()?;
+    let entrypoint = image.entrypoint().map(str::to_owned);
+    let rpc_port = <Bitcoin as FixtureChain>::NODE_RPC_PORT;
+    let tls_extra = if endpoint_host.parse::<IpAddr>().is_ok() {
+        format!("--tlsextraip={endpoint_host}")
+    } else {
+        format!("--tlsextradomain={endpoint_host}")
+    };
+
+    Ok(ContainerSpec {
+        service: "lnd",
+        image,
+        entrypoint,
+        name,
+        network,
+        command: vec![
+            "--bitcoin.active".to_owned(),
+            "--bitcoin.regtest".to_owned(),
+            "--bitcoin.node=bitcoind".to_owned(),
+            format!("--bitcoind.rpchost={bitcoind_name}:{rpc_port}"),
+            format!("--bitcoind.rpcuser={RPC_USER}"),
+            format!("--bitcoind.rpcpass={RPC_PASSWORD}"),
+            format!("--bitcoind.zmqpubrawblock=tcp://{bitcoind_name}:{BITCOIN_ZMQ_BLOCK_PORT}"),
+            format!("--bitcoind.zmqpubrawtx=tcp://{bitcoind_name}:{BITCOIN_ZMQ_TX_PORT}"),
+            format!("--rpclisten=0.0.0.0:{LND_GRPC_PORT}"),
+            format!("--listen=0.0.0.0:{LND_PEER_PORT}"),
+            tls_extra,
+        ],
+        // Docker networking does not require a published port for peers on the fixture network.
+        // Only the host-facing gRPC API receives a random loopback mapping.
+        exposed_ports: vec![LND_GRPC_PORT],
     })
 }
 

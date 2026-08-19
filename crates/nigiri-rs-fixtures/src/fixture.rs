@@ -2,6 +2,7 @@
 
 use std::{fmt, marker::PhantomData, time::Duration};
 
+use futures_util::future::Either;
 use nigiri_rs_core::NigiriClient;
 use uuid::Uuid;
 
@@ -12,7 +13,7 @@ use crate::{
     electrs, node, readiness,
     runtime::{
         BollardEngine, ContainerEngine, RuntimeHandle, attach_container_log, runtime_error,
-        supervise,
+        supervise, supervise_for_coordinator,
     },
 };
 
@@ -20,7 +21,8 @@ const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A running regtest stack with a funded wallet, ready to be queried.
 ///
-/// Dropping the fixture asks its lifecycle supervisor to remove everything it created.
+/// Dropping the fixture requests best-effort cleanup from its lifecycle supervisor. Use
+/// [`Fixture::shutdown`] when cleanup errors matter; a hard process kill can still leave resources.
 pub struct Fixture<C: FixtureChain> {
     runtime: Option<RuntimeHandle>,
     engine: BollardEngine,
@@ -89,6 +91,17 @@ impl<C: FixtureChain> Fixture<C> {
             .map_err(|error| runtime_error("fixture", error))
     }
 
+    pub(crate) async fn shutdown_within(mut self, deadline: &Deadline) -> Result<(), FixtureError> {
+        let runtime = self
+            .runtime
+            .take()
+            .expect("fixture runtime is shut down once");
+        runtime
+            .shutdown_within(deadline)
+            .await
+            .map_err(|error| runtime_error("fixture", error))
+    }
+
     /// The Docker network every container of this fixture is attached to.
     ///
     /// Crate-private: a composite attaches its own containers to it. The name is an implementation
@@ -102,15 +115,28 @@ impl<C: FixtureChain> Fixture<C> {
         &self.names.node
     }
 
+    /// A clone of the already-connected engine used by a composite's sibling supervisor.
+    ///
+    /// Crate-private so the runtime remains an implementation detail and callers cannot use a
+    /// fixture as a handle for unrelated containers.
+    pub(crate) fn engine(&self) -> BollardEngine {
+        self.engine.clone()
+    }
+
     /// Adds the inner stack's container logs to a composite's failure.
     ///
     /// A composite's own daemon can only be explained together with the node it followed and the
     /// indexer beside it, and those handles are private to this type. The order matches `start`'s
     /// own failure path: the indexer first, then the node, so the node's log — the service most
     /// failures come back to — ends up nearest the error text.
-    pub(crate) async fn attach_inner_logs(&self, error: FixtureError) -> FixtureError {
+    pub(crate) async fn attach_inner_logs(
+        &self,
+        deadline: &Deadline,
+        error: FixtureError,
+    ) -> FixtureError {
         let with_electrs = attach_engine_log(
             &self.engine,
+            deadline,
             electrs::SERVICE,
             &self.container_ids[0],
             error,
@@ -118,6 +144,7 @@ impl<C: FixtureChain> Fixture<C> {
         .await;
         attach_engine_log(
             &self.engine,
+            deadline,
             C::NODE_SERVICE,
             &self.container_ids[1],
             with_electrs,
@@ -171,6 +198,12 @@ struct TopologyNames {
     network: String,
     node: String,
     electrs: String,
+}
+
+#[derive(Clone, Copy)]
+enum FixtureStartupOwner {
+    CallerDeadline,
+    CompositeCoordinator,
 }
 
 /// Scopes every Docker resource of one fixture to a single UUID, so concurrent fixtures cannot
@@ -240,8 +273,8 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     /// Starts the node, funds a wallet, starts Electrs, and returns only once all three services
     /// agree on the tip.
     ///
-    /// One `Deadline` covers everything after validation, so a slow phase spends budget the later
-    /// phases no longer have, rather than each phase getting a fresh clock.
+    /// One `Deadline` is created before validation and covers the complete call, so a slow phase
+    /// spends budget the later phases no longer have, rather than each phase getting a fresh clock.
     pub async fn start(self) -> Result<Fixture<C>, FixtureError> {
         let deadline = Deadline::new(self.startup_timeout)?;
         self.start_under(&deadline).await
@@ -253,88 +286,132 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     /// fixture spends the same budget rather than running a second one beside it. `startup_timeout`
     /// is ignored on this path: the caller's clock is the only one.
     pub(crate) async fn start_under(self, deadline: &Deadline) -> Result<Fixture<C>, FixtureError> {
+        self.start_under_with_owner(deadline, FixtureStartupOwner::CallerDeadline)
+            .await
+    }
+
+    /// Starts under a composite coordinator that exclusively owns cancellation detachment.
+    ///
+    /// The nested fixture supervisor always completes cleanup before its coordinator returns, so
+    /// only the outer public guard can detach at the shared deadline.
+    pub(crate) async fn start_under_for_coordinator(
+        self,
+        deadline: &Deadline,
+    ) -> Result<Fixture<C>, FixtureError> {
+        self.start_under_with_owner(deadline, FixtureStartupOwner::CompositeCoordinator)
+            .await
+    }
+
+    async fn start_under_with_owner(
+        self,
+        deadline: &Deadline,
+        owner: FixtureStartupOwner,
+    ) -> Result<Fixture<C>, FixtureError> {
         self.node_image.validate()?;
         self.electrs_image.validate()?;
         deadline.remaining_or_expired(C::NODE_SERVICE, "connecting to the container engine")?;
 
         let names = topology_names_on::<C>(self.network.clone());
         let creates_network = self.network.is_none();
-        let engine = BollardEngine::connect()
-            .await
+        let engine = deadline
+            .run(
+                "container engine",
+                "connecting to the container engine",
+                BollardEngine::connect(),
+            )
+            .await?
             .map_err(|error| runtime_error("container engine", error))?;
         let retained_engine = engine.clone();
-        let deadline = deadline.clone();
+        let work_deadline = deadline.clone();
+        let supervisor_deadline = deadline.clone();
 
-        let ((client, names, container_ids), runtime) =
-            supervise(engine, move |mut startup| async move {
-                if creates_network {
-                    deadline
-                        .run(
-                            "container network",
-                            "creating fixture network",
-                            startup.create_network(names.network.clone()),
-                        )
-                        .await??;
-                }
-
-                let node = node::start_node::<C, _>(
-                    &mut startup,
-                    &self.node_image,
-                    &names.network,
-                    &names.node,
-                    &self.extra_node_args,
-                    &deadline,
-                )
-                .await?;
-
-                let electrs = match electrs::start_electrs::<C, _>(
-                    &mut startup,
-                    &self.electrs_image,
-                    &names.network,
-                    &names.electrs,
-                    &names.node,
-                    &deadline,
-                )
-                .await
-                {
-                    Ok(electrs) => electrs,
-                    Err(error) => {
-                        return Err(attach_container_log(
-                            &mut startup,
-                            C::NODE_SERVICE,
-                            &node.container.id,
-                            error,
-                        )
-                        .await);
-                    }
-                };
-
-                let mut client_config = node.client_config.clone();
-                client_config.esplora_url = electrs.esplora_url.clone();
-                client_config.electrum = electrs.electrum_endpoint.clone();
-                let client = node::fixture_client::<C>(client_config)?;
-
-                if let Err(not_ready) = readiness::wait_for_sync::<C>(&client, &deadline).await {
-                    let with_electrs = attach_container_log(
-                        &mut startup,
-                        electrs::SERVICE,
-                        &electrs.container.id,
-                        not_ready,
+        let work = move |mut startup: crate::runtime::Startup<BollardEngine>| async move {
+            let deadline = work_deadline;
+            if creates_network {
+                deadline
+                    .run(
+                        "container network",
+                        "creating fixture network",
+                        startup.create_network(names.network.clone()),
                     )
-                    .await;
+                    .await??;
+            }
+
+            let node = node::start_node::<C, _>(
+                &mut startup,
+                &self.node_image,
+                &names.network,
+                &names.node,
+                &self.extra_node_args,
+                &deadline,
+            )
+            .await?;
+
+            let electrs = match electrs::start_electrs::<C, _>(
+                &mut startup,
+                &self.electrs_image,
+                &names.network,
+                &names.electrs,
+                &names.node,
+                &deadline,
+            )
+            .await
+            {
+                Ok(electrs) => electrs,
+                Err(error) => {
                     return Err(attach_container_log(
                         &mut startup,
+                        &deadline,
                         C::NODE_SERVICE,
                         &node.container.id,
-                        with_electrs,
+                        error,
                     )
                     .await);
                 }
+            };
 
-                let container_ids = [electrs.container.id, node.container.id];
-                Ok((client, names, container_ids))
-            })
-            .await?;
+            let mut client_config = node.client_config.clone();
+            client_config.esplora_url = electrs.esplora_url.clone();
+            client_config.electrum = electrs.electrum_endpoint.clone();
+            let client = node::fixture_client::<C>(client_config)?;
+
+            if let Err(not_ready) = readiness::wait_for_sync::<C>(&client, &deadline).await {
+                let with_electrs = attach_container_log(
+                    &mut startup,
+                    &deadline,
+                    electrs::SERVICE,
+                    &electrs.container.id,
+                    not_ready,
+                )
+                .await;
+                return Err(attach_container_log(
+                    &mut startup,
+                    &deadline,
+                    C::NODE_SERVICE,
+                    &node.container.id,
+                    with_electrs,
+                )
+                .await);
+            }
+
+            let container_ids = [electrs.container.id, node.container.id];
+            Ok((client, names, container_ids))
+        };
+        let supervised = match owner {
+            FixtureStartupOwner::CallerDeadline => {
+                Either::Left(supervise(engine, supervisor_deadline, work))
+            }
+            FixtureStartupOwner::CompositeCoordinator => {
+                Either::Right(supervise_for_coordinator(engine, work))
+            }
+        };
+        let ((client, names, container_ids), runtime) = deadline
+            .run(
+                C::NODE_SERVICE,
+                "starting the complete fixture topology",
+                supervised,
+            )
+            .await??;
 
         Ok(Fixture {
             runtime: Some(runtime),
@@ -348,29 +425,146 @@ impl<C: FixtureChain> FixtureBuilder<C> {
 
 async fn attach_engine_log<E: ContainerEngine>(
     engine: &E,
+    deadline: &Deadline,
     service: &'static str,
     id: &str,
     error: FixtureError,
 ) -> FixtureError {
-    let addition = match engine.logs(id).await {
-        Ok(logs) => crate::diagnostics::redacted_tail(&format!(
+    let addition = match deadline
+        .run(
+            service,
+            "reading bounded startup diagnostics",
+            engine.logs(id),
+        )
+        .await
+    {
+        Ok(Ok(logs)) => crate::diagnostics::redacted_tail(&format!(
             "{service} log:\n{logs}\n[end {service} log]"
         )),
-        Err(failure) => crate::diagnostics::redacted_tail(&format!(
+        Ok(Err(failure)) => crate::diagnostics::redacted_tail(&format!(
             "could not read the {service} diagnostic log: {failure}"
         )),
+        Err(_) => format!("skipped the {service} diagnostic log: startup deadline exhausted"),
     };
     crate::runtime::attach_diagnostics(error, addition)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::HashMap, time::Duration};
 
     use nigiri_rs_core::{Bitcoin, Liquid};
 
-    use super::Fixture;
-    use crate::{ContainerImage, FixtureChain, FixtureError};
+    use super::{Fixture, attach_engine_log};
+    use crate::{
+        ContainerImage, FixtureChain, FixtureError,
+        deadline::Deadline,
+        runtime::{ContainerEngine, ContainerSpec, EngineResult},
+    };
+
+    #[derive(Clone)]
+    struct SecretLogEngine;
+
+    impl ContainerEngine for SecretLogEngine {
+        fn endpoint_host(&self) -> &str {
+            "127.0.0.1"
+        }
+
+        async fn create_network(
+            &self,
+            _name: &str,
+            _labels: HashMap<String, String>,
+        ) -> EngineResult<String> {
+            panic!("a diagnostic-only fake does not create networks")
+        }
+
+        async fn ensure_image(&self, _spec: &ContainerSpec) -> EngineResult<()> {
+            panic!("a diagnostic-only fake does not inspect images")
+        }
+
+        async fn create_container(
+            &self,
+            _spec: &ContainerSpec,
+            _labels: HashMap<String, String>,
+        ) -> EngineResult<String> {
+            panic!("a diagnostic-only fake does not create containers")
+        }
+
+        async fn start_container(&self, _id: &str) -> EngineResult<()> {
+            panic!("a diagnostic-only fake does not start containers")
+        }
+
+        async fn mapped_port(&self, _id: &str, _container_port: u16) -> EngineResult<u16> {
+            panic!("a diagnostic-only fake has no ports")
+        }
+
+        async fn logs(&self, id: &str) -> EngineResult<String> {
+            Ok(if id == "electrs" {
+                "--bitcoind.rpcpass=inner-rpc-secret".to_owned()
+            } else {
+                "cipher_seed_mnemonic=inner mnemonic words secret-tail\n\
+                 -----BEGIN PRIVATE KEY-----\ninner-pem-secret\n-----END PRIVATE KEY-----"
+                    .to_owned()
+            })
+        }
+
+        async fn read_container_file(
+            &self,
+            _id: &str,
+            _path: &str,
+            _max_bytes: usize,
+        ) -> EngineResult<Vec<u8>> {
+            panic!("a diagnostic-only fake does not read files")
+        }
+
+        async fn remove_container(&self, _id_or_name: &str) -> EngineResult<()> {
+            panic!("a diagnostic-only fake does not remove containers")
+        }
+
+        async fn remove_network(&self, _id_or_name: &str) -> EngineResult<()> {
+            panic!("a diagnostic-only fake does not remove networks")
+        }
+    }
+
+    // Catches inner Electrs/bitcoind log attachment bypassing the same complete secret redaction
+    // used for Alice and Bob.
+    #[tokio::test]
+    async fn attached_inner_logs_redact_rpc_seed_and_private_key_material() {
+        let bare = FixtureError::ReadinessTimeout {
+            service: "lnd",
+            duration: Duration::from_secs(1),
+            last_observation: "failed".to_owned(),
+            diagnostics: String::new(),
+        };
+        let deadline = Deadline::new(Duration::from_secs(1)).unwrap();
+
+        let with_electrs =
+            attach_engine_log(&SecretLogEngine, &deadline, "electrs", "electrs", bare).await;
+        let enriched = attach_engine_log(
+            &SecretLogEngine,
+            &deadline,
+            "bitcoind",
+            "bitcoind",
+            with_electrs,
+        )
+        .await;
+        let FixtureError::ReadinessTimeout { diagnostics, .. } = enriched else {
+            panic!("diagnostic attachment must retain the original classification")
+        };
+
+        for secret in [
+            "inner-rpc-secret",
+            "inner mnemonic words secret-tail",
+            "inner-pem-secret",
+        ] {
+            assert!(
+                !diagnostics.contains(secret),
+                "{secret} leaked in {diagnostics}"
+            );
+        }
+        assert!(diagnostics.contains("electrs log"));
+        assert!(diagnostics.contains("bitcoind log"));
+    }
 
     // Catches a regression that changes what a caller gets without asking for anything: the pinned
     // images and the 60-second budget the whole design is bounded by.
@@ -698,7 +892,8 @@ mod tests {
             last_observation: "waiting for synced_to_chain".to_owned(),
             diagnostics: String::new(),
         };
-        let enriched = fixture.attach_inner_logs(bare).await;
+        let deadline = Deadline::new(Duration::from_secs(5)).unwrap();
+        let enriched = fixture.attach_inner_logs(&deadline, bare).await;
 
         let FixtureError::ReadinessTimeout {
             service,

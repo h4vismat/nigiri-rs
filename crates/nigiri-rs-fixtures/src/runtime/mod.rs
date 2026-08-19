@@ -5,12 +5,24 @@ mod supervisor;
 
 use crate::{
     FixtureError,
+    deadline::Deadline,
     diagnostics::{join_diagnostics, redacted_source, redacted_tail},
 };
 
 pub(crate) use engine::{BollardEngine, ContainerEngine};
-pub(crate) use spec::{electrs_spec, node_spec};
-pub(crate) use supervisor::{RunningContainer, RuntimeHandle, Startup, supervise};
+#[cfg(test)]
+pub(crate) use engine::{EngineError, EngineResult};
+#[cfg(test)]
+pub(crate) use spec::ContainerSpec;
+#[allow(
+    unused_imports,
+    reason = "Task 6 specification is consumed by the Task 7 LndPair startup"
+)]
+pub(crate) use spec::{electrs_spec, lnd_spec, node_spec};
+pub(crate) use supervisor::{
+    CoordinatorCancellation, RunningContainer, RuntimeHandle, Startup, coordinate_startup,
+    supervise, supervise_for_coordinator,
+};
 
 pub(crate) fn runtime_error(
     resource: impl Into<String>,
@@ -24,6 +36,10 @@ pub(crate) fn runtime_error(
         diagnostics,
         source: redacted_source(error),
     }
+}
+
+pub(crate) fn cancelled_startup_error(resource: impl Into<String>) -> FixtureError {
+    runtime_error(resource, supervisor::cancelled_error())
 }
 
 impl From<engine::EngineError> for FixtureError {
@@ -56,21 +72,52 @@ pub(crate) fn attach_diagnostics(error: FixtureError, addition: String) -> Fixtu
             last_observation,
             diagnostics: join_diagnostics(&diagnostics, &addition),
         },
+        FixtureError::Bootstrap {
+            chain,
+            operation,
+            diagnostics,
+            source,
+        } => FixtureError::Bootstrap {
+            chain,
+            operation,
+            diagnostics: join_diagnostics(&diagnostics, &addition),
+            source,
+        },
+        FixtureError::Probe {
+            service,
+            operation,
+            diagnostics,
+            source,
+        } => FixtureError::Probe {
+            service,
+            operation,
+            diagnostics: join_diagnostics(&diagnostics, &addition),
+            source,
+        },
         other => other,
     }
 }
 
 pub(crate) async fn attach_container_log<E: ContainerEngine>(
     startup: &mut Startup<E>,
+    deadline: &Deadline,
     service: &'static str,
     id_or_name: &str,
     error: FixtureError,
 ) -> FixtureError {
-    let diagnostics = match startup.logs(id_or_name).await {
-        Ok(logs) => redacted_tail(&format!("{service} log:\n{logs}\n[end {service} log]")),
-        Err(failure) => redacted_tail(&format!(
+    let diagnostics = match deadline
+        .run(
+            service,
+            "reading bounded startup diagnostics",
+            startup.logs(id_or_name),
+        )
+        .await
+    {
+        Ok(Ok(logs)) => redacted_tail(&format!("{service} log:\n{logs}\n[end {service} log]")),
+        Ok(Err(failure)) => redacted_tail(&format!(
             "could not read the {service} diagnostic log: {failure}"
         )),
+        Err(_) => format!("skipped the {service} diagnostic log: startup deadline exhausted"),
     };
     attach_diagnostics(error, diagnostics)
 }

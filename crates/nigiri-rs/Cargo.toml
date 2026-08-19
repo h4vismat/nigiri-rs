@@ -4,7 +4,7 @@ version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "Typed Bitcoin and Liquid regtest clients, with optional ephemeral Docker fixtures"
+description = "Typed Bitcoin, Liquid, and Lightning regtest clients with optional Docker fixtures"
 repository = "https://github.com/h4vismat/nigiri-rs"
 
 [package.metadata.docs.rs]
@@ -13,11 +13,13 @@ all-features = true
 [features]
 default = []
 bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]
-fixtures = ["dep:nigiri-rs-fixtures", "dep:nigiri-rs-macros", "dep:tokio"]
+lnd = ["dep:nigiri-rs-lnd"]
+fixtures = ["lnd", "dep:nigiri-rs-fixtures", "dep:nigiri-rs-macros", "dep:tokio"]
 
 [dependencies]
 nigiri-rs-core = { version = "0.4.0", path = "../nigiri-rs-core" }
 nigiri-rs-fixtures = { version = "0.2.0", path = "../nigiri-rs-fixtures", optional = true }
+nigiri-rs-lnd = { version = "0.1.0", path = "../nigiri-rs-lnd", optional = true }
 nigiri-rs-macros = { version = "0.2.0", path = "../nigiri-rs-macros", optional = true }
 # Re-exported through `__private` so generated code can annotate its wrapper with `#[tokio::test]`
 # without the consumer adding tokio themselves. `macros` supplies the attribute; `rt` and

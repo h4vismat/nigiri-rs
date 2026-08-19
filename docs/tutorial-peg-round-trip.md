@@ -1,8 +1,8 @@
 # Tutorial: a round trip across Liquid's peg
 
 You'll write tests that move value across Liquid's peg in both directions: BTC into the sidechain as
-L-BTC, and L-BTC back out as BTC. Everything runs against four containers that exist only for the
-duration of the test.
+L-BTC, and L-BTC back out as BTC. Everything runs against four containers owned for the duration of
+the test; Drop requests best-effort cleanup afterward, while a hard kill can leave resources.
 
 By the end you'll know why a peg needs a *wired* pair of nodes rather than two chains that happen to
 be running, which half of the peg is real and which half this crate is pretending, and why a peg-in
@@ -29,7 +29,7 @@ Open `Cargo.toml` and add:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["fixtures"] }
 bitcoin = "0.32"
 serde_json = "1"
 ```
@@ -43,7 +43,7 @@ you'll ask a node a question the curated API doesn't wrap.
 Create `tests/peg.rs`:
 
 ```rust,ignore
-use nigiri_rs::testcontainers::PegPair;
+use nigiri_rs::fixtures::PegPair;
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -276,7 +276,9 @@ confirmation depth, lagging node view and all — and its peg-out path is exerci
 federation that behaves like the real one in the way that matters: it reads the destination out of
 your transaction, so encoding it wrongly pays nobody.
 
-Four containers per test, removed when the test ends. No shared node, no cleanup step.
+Four containers per test. Drop requests and joins best-effort cleanup when the test ends, but cannot
+report cleanup errors; use `PegPair::shutdown().await` when they matter. A hard kill can leave
+resources. No shared node.
 
 Where to go next:
 

@@ -5,8 +5,9 @@
 //!
 //! To have the services provisioned for you, use the companion `nigiri-rs-fixtures`
 //! crate in this workspace. It starts a throwaway Bitcoin or Liquid regtest stack per test,
-//! hands back a client already pointed at it, and removes everything on drop. It
-//! needs Docker and no Nigiri installation. This crate does not depend on it.
+//! hands back a client already pointed at it, and requests best-effort cleanup on drop. Its
+//! explicit shutdown method reports cleanup errors. It needs Docker and no Nigiri installation.
+//! This crate does not depend on it.
 //!
 //! # Clients
 //!

@@ -74,6 +74,7 @@ pub(crate) async fn start_node<C: FixtureChain, E: ContainerEngine>(
             let error = runtime_error(C::NODE_SERVICE, error);
             return Err(crate::runtime::attach_container_log(
                 startup,
+                deadline,
                 C::NODE_SERVICE,
                 container_name,
                 error,
@@ -104,6 +105,7 @@ pub(crate) async fn start_node<C: FixtureChain, E: ContainerEngine>(
         // only thing that explains why, so the timeout carries a bounded tail of it.
         return Err(crate::runtime::attach_container_log(
             startup,
+            deadline,
             C::NODE_SERVICE,
             &container.id,
             not_ready,

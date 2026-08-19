@@ -105,14 +105,16 @@ fn started_ident(index: usize) -> syn::Ident {
 /// Binds what the body asked for.
 ///
 /// A client is cloned so the fixture handle stays owned by the wrapper and keeps the containers
-/// alive for the test's duration. A `PegPair` *is* that handle — it owns its four containers and
-/// both clients together — so it moves into the binding instead of being cloned out of one.
+/// alive for the test's duration. A pair *is* that handle — it owns all of its containers and
+/// clients together — so it moves into the binding instead of being cloned out of one.
 fn bind_fixture(fixture: &FixtureParam, index: usize) -> TokenStream {
     let handle = handle_ident(index);
     let binding = fixture.ident();
     match fixture {
         FixtureParam::Client { .. } => quote! { let #binding = #handle.client().clone(); },
-        FixtureParam::PegPair { .. } => quote! { let #binding = #handle; },
+        FixtureParam::PegPair { .. } | FixtureParam::LndPair { .. } => {
+            quote! { let #binding = #handle; }
+        }
     }
 }
 
@@ -138,6 +140,16 @@ fn start_expr(fixture: &FixtureParam, args: &MacroArgs) -> TokenStream {
                 ::nigiri_rs::__private::fixtures::PegPair::start()
             },
         },
+        FixtureParam::LndPair { .. } => match args.startup_timeout {
+            Some(secs) => quote! {
+                ::nigiri_rs::__private::fixtures::LndPair::builder()
+                    .startup_timeout(::core::time::Duration::from_secs(#secs))
+                    .start()
+            },
+            None => quote! {
+                ::nigiri_rs::__private::fixtures::LndPair::start()
+            },
+        },
     }
 }
 
@@ -154,6 +166,7 @@ fn start_failure_message(fixture: &FixtureParam) -> String {
             .map(|segment| segment.ident.to_string())
             .unwrap_or_else(|| "requested".to_owned()),
         FixtureParam::PegPair { .. } => "PegPair".to_owned(),
+        FixtureParam::LndPair { .. } => "LndPair".to_owned(),
     };
     format!("nigiri-rs: the {named} fixture could not start; is Docker running?")
 }

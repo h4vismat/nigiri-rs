@@ -1,11 +1,11 @@
-//! Procedural macros for `nigiri-rs`.
+//! Procedural macros that inject ready clients or owning `PegPair`/`LndPair` fixtures for `nigiri-rs`.
 
 mod expand;
 mod parse;
 
 use proc_macro::TokenStream;
 
-/// Provisions a regtest stack for a test and injects a ready client.
+/// Provisions regtest stacks and injects ready clients or owning `PegPair`/`LndPair` handles.
 ///
 /// See the `nigiri-rs` crate documentation for usage.
 #[proc_macro_attribute]

@@ -1,10 +1,10 @@
 # Error reference
 
-Two `#[non_exhaustive]` error enums. `NigiriError` comes from the client; `FixtureError` comes from
-starting a fixture and wraps the former. Neither enum is closed: each grows variants as the crate
-grows, so a downstream match must carry a wildcard arm (`_ => ...`) or it will not compile.
+Three `#[non_exhaustive]` error enums. `NigiriError` is the Bitcoin/Liquid boundary, `LndError` is
+the Lightning boundary, and `FixtureError` is lifecycle/bootstrap and can retain either protocol
+error as a source. None is closed, so a downstream match needs a wildcard arm.
 
-Both derive `Debug` and implement `std::error::Error` through `thiserror`. Where a variant has a
+All implement `std::error::Error` through `thiserror`. Where a variant has a
 `source`, `Error::source()` returns it — always check the chain, the `Display` text is deliberately
 short.
 
@@ -162,26 +162,108 @@ independent nodes agree on it, and a genuinely wired pair still mismatches if it
 carries other chain parameters. See
 [What `connect` proves](reference-client.md#what-connect-proves-and-what-it-does-not).
 
+## `LndError`
+
+```rust
+#[non_exhaustive]
+pub enum LndError {
+    InvalidRequest { detail: Cow<'static, str> },
+    CredentialRead { path: PathBuf, source: io::Error },
+    Transport { operation: Cow<'static, str>, detail: Cow<'static, str>, source: Box<dyn Error + Send + Sync> },
+    Authentication { operation: Cow<'static, str>, detail: Cow<'static, str> },
+    Status { operation: Cow<'static, str>, detail: Cow<'static, str> },
+    Timeout { operation: Cow<'static, str>, duration: Duration },
+    InvalidResponse { operation: Cow<'static, str>, detail: Cow<'static, str>, identifier: Option<String> },
+    PaymentFailed { payment_hash: sha256::Hash, reason: Cow<'static, str> },
+    OutcomeUnknown { operation: Cow<'static, str>, identifier: Option<String> },
+}
+```
+
+`Debug` is manual and contains only the safe `Display` text. Operation labels and daemon text are
+bounded; raw metadata, macaroons, certificate bodies, wallet passwords, seed words, invoices, and
+payment preimages are never included.
+
+### `InvalidRequest`
+
+Caller input was rejected before an RPC: an invalid HTTPS endpoint, empty/oversized credential,
+zero timeout, invalid peer address or channel/invoice/payment request, checked amount overflow,
+sub-satoshi conversion, missing BOLT11 amount, non-whole-second duration, or value beyond LND's
+signed request range.
+
+### `CredentialRead`
+
+A configured certificate or macaroon file could not be opened/read. The path is retained and the
+`io::Error` is the source; file content is not retained. An over-limit file is `InvalidRequest`.
+
+### `Transport`
+
+TLS/gRPC connection or stream transport failed. The source chain is preserved with credential
+metadata removed. The configured certificate is an exact end-entity pin, so a changed certificate
+is expected to fail here. A transport-source status after a mutation is dispatched is instead
+`OutcomeUnknown` because the server may already have committed it.
+
+### `Authentication`
+
+LND rejected the macaroon (`Unauthenticated` or `PermissionDenied`). It is separate from general
+status failures so callers can stop rather than retry credentials blindly.
+
+### `Status`
+
+LND returned another gRPC status. The operation and bounded status classification are retained. The
+fixture considers only a narrow set of unavailable/deadline/resource/aborted/unknown statuses
+transient during pre-commit readiness; it does not make every status retryable. After a mutation is
+dispatched, `Cancelled`, `Unknown`, `DeadlineExceeded`, `ResourceExhausted`, `Internal`, and
+`Unavailable` are classified as `OutcomeUnknown`; authentication, validation, and precondition
+failures remain definitive.
+
+### `Timeout`
+
+The operation exceeded `LndConfig::timeout`. This means the response was not observed, not that LND
+canceled or rolled back work. Operations that may have committed remap the error to
+`OutcomeUnknown` when appropriate.
+
+### `InvalidResponse`
+
+LND returned a response that cannot satisfy the public domain model: malformed identifiers,
+negative/inconsistent amounts, wrong invoice/payment hash, changed channel point, missing terminal
+stream state, or contradictory terminal updates. `identifier` preserves a safe channel point,
+transaction ID, or payment hash when available.
+
+### `PaymentFailed`
+
+LND reported a terminal failed payment. The payment hash and bounded normalized reason are present.
+This is distinct from uncertainty. `LndPair` retries its reverse startup probe only when this reason
+is exactly `no route` or `insufficient balance`, after revalidating the channel and with a fresh
+invoice; no other application payment is retried by the client.
+
+### `OutcomeUnknown`
+
+LND may have committed the operation, but the final state was not observed. At the mutation boundary,
+this includes a local timeout, a transport-source status, and `Cancelled`, `Unknown`,
+`DeadlineExceeded`, `ResourceExhausted`, `Internal`, or `Unavailable`. Authentication, validation,
+and precondition failures remain definitive. `identifier` carries a known channel point or payment
+hash. For payments, call `lookup_payment` by hash before retrying. Invoice creation may be uncertain
+without an identifier, and wallet initialization is uncertain after `InitWallet` because blindly
+generating a different seed could conflict with the committed wallet.
+
 ## `FixtureError`
 
 ```rust
 #[non_exhaustive]
 pub enum FixtureError {
     InvalidConfiguration { detail: String },
-    RuntimeUnavailable { source: Box<dyn Error + Send + Sync> },
-    ContainerStart { service: &'static str, image: String, diagnostics: String, source: ... },
-    PortDiscovery { service: &'static str, container_port: u16, diagnostics: String, source: ... },
+    Runtime { operation: String, resource: String, diagnostics: String, source: Box<dyn Error + Send + Sync> },
     Bootstrap { chain: &'static str, operation: &'static str, diagnostics: String, source: ... },
     Probe { service: &'static str, operation: &'static str, diagnostics: String, source: ... },
     ReadinessTimeout { service: &'static str, duration: Duration, last_observation: String, diagnostics: String },
     Client(NigiriError),
+    Lightning(LndError),
 }
 ```
 
-`service` is `"bitcoind"`, `"elements"`, or `"electrs"` — plus `"fixture"` on the three-way readiness
-wait, where no single container is the one at fault, and `"peg"` on a `PegPair`'s pairing check, where
-the budget ran out verifying the two chains rather than starting either one. `chain` is `"Bitcoin"` or
-`"Liquid"`.
+Service/resource labels include `bitcoind`, `elements`, `electrs`, `fixture`, `peg`, `lnd-alice`,
+`lnd-bob`, `lightning-channel`, `LND pair`, and `fixture cleanup` according to the failed boundary.
+`chain` is `Bitcoin`, `Liquid`, or `Lightning`.
 
 `diagnostics` carries bounded container output where the failure happened inside a container — that
 field is why a readiness failure is usually diagnosable from the error text alone.
@@ -190,55 +272,46 @@ field is why a readiness failure is usually diagnosable from the error text alon
 
 > `invalid fixture configuration: {detail}`
 
-Rejected **before Docker is asked to start anything**: an empty image name or tag, a malformed
-digest, a blank image entrypoint, a zero startup timeout.
+Rejected **before Docker is asked to start anything**: an empty image name/tag, malformed digest,
+blank entrypoint, zero/unrepresentable startup timeout, or invalid LND allocation/range arithmetic.
 
-### `RuntimeUnavailable`
+### `Runtime`
 
-> `container runtime is unavailable`
+> `container runtime {operation} failed for {resource}: {diagnostics}`
 
-The Docker daemon could not be reached. The `Display` text is stable and says nothing else on
-purpose; the real cause is the source.
-
-**This is what you get when Docker is not running.**
-
-### `ContainerStart`
-
-> `failed to start {service} from {image}: {diagnostics}`
-
-The container was created but did not come up. `image` is the full descriptor including digest, which
-matters when a pinned image has been replaced.
-
-### `PortDiscovery`
-
-> `failed to discover mapped {container_port} port for {service}: {diagnostics}`
-
-The container is running but Docker did not report a host-side mapping for the port. Rare; usually a
-daemon-level problem.
+One runtime shape covers daemon connection, image, network, container, port, bounded file-read, log,
+and cleanup failures. `operation` and `resource` locate the step; bounded redacted diagnostics and
+the underlying source retain details. An unavailable Docker daemon is represented here, not by a
+separate public variant.
 
 ### `Bootstrap`
 
 > `{chain} wallet bootstrap failed during {operation}: {diagnostics}`
 
-Funding the wallet failed. `operation` names the step — `getnewaddress`, `generatetoaddress`,
-`rescanblockchain`. The chain is named because a two-chain test run otherwise could not say which
-stack failed.
+Wallet/bootstrap or composite protocol work failed. For Bitcoin/Liquid, operations include wallet
+creation/funding. For LND, `chain` is `Lightning`, diagnostics are bounded and redacted, and the
+source chain contains `FixtureError::Lightning(LndError)` so typed classification is preserved.
+Only transient `GenSeed` failures retry; `InitWallet` and later committed operations do not.
 
 ### `Probe`
 
 > `{service} {operation} probe failed: {diagnostics}`
 
-A readiness probe failed in a way that is not a timeout, for example the Electrum
-`blockchain.headers.subscribe` call erroring outright.
+A readiness probe failed in a way that is not a timeout, for example Electrum
+`blockchain.headers.subscribe` or an LND/Bitcoin observation that is classified as permanent.
 
 ### `ReadinessTimeout`
 
 > `{service} was not ready after {duration:?}: {last_observation}; {diagnostics}`
 
-The startup budget ran out with the three services still disagreeing. `last_observation` is the final
-height reading, formatted `node=<n> esplora=<n> electrum=<n>`, which tells you *which* service was
-behind. On this path `service` is `"fixture"`, since the failure is the disagreement rather than any
-one container. The variant has **no source** — nothing failed, the budget simply expired.
+The shared startup budget expired at a readiness boundary. The `service`, `last_observation`, and
+bounded diagnostics identify that boundary: Docker connection or creation, container startup,
+RPC/bootstrap, Electrum, LND, funding, cleanup, or a composite check. The variant has **no source** —
+nothing necessarily failed; the budget expired.
+
+For the final single-chain agreement check, `last_observation` is the final height reading, formatted
+`node=<n> esplora=<n> electrum=<n>`, which tells you *which* service was behind, and `service` is
+`"fixture"`.
 
 On a [`PegPair`](reference-fixtures.md#pegpair), the same variant also covers the budget running out
 while verifying the pair, after all four containers are already up. There `service` is `"peg"` and
@@ -247,12 +320,26 @@ parent` — since there is only the one check, not three services to compare.
 
 Bumping `startup_timeout` is the fix when this happens on a first run that is still pulling images.
 
+For `LndPair`, the duration is the original whole-call budget (180 seconds by default), and the last
+observation names `lnd-alice`, `lnd-bob`, or `lightning-channel` state. The same deadline bounds
+failure diagnostics and cleanup. Exhausted public cleanup can detach from its supervisor thread;
+reverse-order cleanup continues there without extending the public call beyond the configured
+deadline.
+
 ### `Client`
 
 > transparent
 
 A `NigiriError` from the fixture's own client, wrapped via `#[from]`. Its `Display` is the inner
 error's, unchanged.
+
+### `Lightning`
+
+> `Lightning client failed: {source}`
+
+An `LndError` retained as the source. Direct conversions use this tuple variant. During LND startup,
+the outer `Bootstrap` adds the operation and redacted container diagnostics while preserving this
+typed inner source.
 
 ## Related
 

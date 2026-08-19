@@ -1,7 +1,8 @@
-//! Typed Bitcoin and Liquid regtest clients, with optional ephemeral Docker fixtures.
+//! Typed Bitcoin/Liquid regtest clients and optional host-managed LND support, with Docker fixtures.
 //!
-//! This crate is a facade. The client lives in `nigiri-rs-core` and is re-exported here in full,
-//! so every path published at 0.2.0 still resolves:
+//! This crate is a facade. The Bitcoin/Liquid client lives in `nigiri-rs-core`; optional Lightning
+//! clients and protocol types live in `nigiri-rs-lnd`. Their public APIs are re-exported here, while
+//! every path published at 0.2.0 still resolves:
 //!
 //! ```
 //! use nigiri_rs::{Bitcoin, NigiriClient};
@@ -27,6 +28,12 @@
 //! compiles with the feature enabled.
 
 pub use nigiri_rs_core::*;
+
+/// Host-managed LND clients and protocol-level Lightning types.
+///
+/// Requires the `lnd` feature.
+#[cfg(feature = "lnd")]
+pub use nigiri_rs_lnd::*;
 
 /// Ephemeral Docker-backed regtest fixtures.
 ///
@@ -60,7 +67,8 @@ pub use nigiri_rs_fixtures as fixtures;
 /// reporting green having run nothing.
 ///
 /// A `PegPair` parameter starts a wired pair instead of a single chain: four containers whose
-/// Elements node validates peg-ins against the `bitcoind` beside it. It may be mixed with client
+/// Elements node validates peg-ins against the `bitcoind` beside it. An `LndPair` parameter starts
+/// two ready-to-pay LND nodes on a funded Bitcoin fixture. Either pair may be mixed with client
 /// parameters, which still produce independent stacks.
 ///
 /// Two arguments are accepted: `startup_timeout = <seconds>` and `flavor = "multi_thread"`.

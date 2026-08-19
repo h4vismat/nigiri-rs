@@ -1,7 +1,7 @@
 # `#[nigiri_rs::test]` reference
 
 An attribute macro that provisions a regtest stack per parameter and hands the test body a ready
-client. Requires the `testcontainers` feature and Docker.
+client or owning pair. Requires the `fixtures` feature and Docker.
 
 ```rust,ignore
 use nigiri_rs::{Bitcoin, NigiriClient};
@@ -20,18 +20,20 @@ It replaces the `#[tokio::test]` attribute — do not write both.
 
 The macro rewrites your function into a parameterless `#[tokio::test]` wrapper that:
 
-1. Starts one fixture per parameter — a `Fixture` for a client parameter, a `PegPair` for a pair.
-2. Binds each client parameter to a **clone** of that fixture's client. A `PegPair` parameter is
-   bound to the pair itself, by move.
+1. Starts one fixture per parameter — a `Fixture` for a client parameter, or the requested
+   `PegPair`/`LndPair` composite.
+2. Binds each client parameter to a **clone** of that fixture's client. Pair parameters are bound to
+   their owning handle, by move.
 3. Calls your original body, now an inner `async fn`, with those bindings.
 
-Fixture handles stay owned by the wrapper, which is what keeps the containers alive for the test's
-duration and tears them down when it ends — including on the panic path. A `PegPair` is the
-exception, and only in mechanism: it already *is* the handle for its four containers, so moving it
-into the body keeps them alive for exactly as long.
+Fixture handles stay owned by the wrapper, which keeps containers alive for the test and requests
+best-effort cleanup on normal return or panic. Drop cannot report cleanup errors; use manually owned
+fixtures and explicit `shutdown().await` when they matter. A hard kill can leave resources.
+`PegPair` and `LndPair` already are their four-container handles, so moving either into the body
+keeps its topology alive for exactly as long.
 
 Generated code reaches everything it needs through `nigiri_rs::__private`, so **your crate needs
-only `nigiri-rs`**. You do not add `tokio` or `nigiri-rs-testcontainers` to make an expansion
+only `nigiri-rs`**. You do not add `tokio` or `nigiri-rs-fixtures` to make an expansion
 compile. (`__private` is `#[doc(hidden)]` and not covered by semver. Do not reference it.)
 
 ## Arguments
@@ -40,7 +42,7 @@ Two, both optional.
 
 | Argument | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `startup_timeout` | integer, seconds | 60, or 120 for a `PegPair` | Passed to `FixtureBuilder::startup_timeout` — or `PegPairBuilder::startup_timeout` — for every fixture in the test. Omitted, each fixture keeps its own default. |
+| `startup_timeout` | integer, seconds | 60 (`Fixture`), 120 (`PegPair`), 180 (`LndPair`) | Passed to the corresponding builder for every fixture in the test. Omitted, each keeps its own default. |
 | `flavor` | string | current-thread | Forwarded to `#[tokio::test(flavor = ...)]`. |
 
 ```rust,ignore
@@ -69,14 +71,15 @@ The function must be `async`. Beyond that:
 | One `NigiriClient<Bitcoin>` | Yes | One Bitcoin fixture. |
 | One `NigiriClient<Liquid>` | Yes | One Liquid fixture. |
 | One `PegPair` | Yes | One wired Bitcoin and Liquid pair — four containers. |
+| One `LndPair` | Yes | One Bitcoin/Electrs stack plus two ready-to-pay LND nodes — four containers. |
 | Two or more parameters, any mix | Yes | One fixture or pair each, **started concurrently**. |
 | Any return type | Yes | Preserved verbatim, including `Result<_, _>`. |
 | Other attributes on the fn | Yes | Preserved and re-emitted below the runtime attribute. |
 
 Parameter types may be written as `NigiriClient<Bitcoin>` or fully qualified as
 `nigiri_rs::NigiriClient<Bitcoin>` — the chain is read from the last path segment, so either import
-style works. `PegPair` and `nigiri_rs::testcontainers::PegPair` are matched the same way. `PegPair`
-takes no type arguments, so a `PegPair<Bitcoin>` is some other type and is rejected.
+style works. `PegPair`/`LndPair` and their `nigiri_rs::fixtures::*` paths are matched the same way.
+Pair types take no generic arguments, so `LndPair<Bitcoin>` and `PegPair<Bitcoin>` are rejected.
 
 ### A `PegPair` parameter
 
@@ -87,7 +90,7 @@ something the wrapper keeps.
 
 ```rust,ignore
 use bitcoin::Amount;
-use nigiri_rs::testcontainers::PegPair;
+use nigiri_rs::fixtures::PegPair;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -134,6 +137,41 @@ Without a `startup_timeout` argument a `PegPair` parameter gets `PegPair::start(
 pair's own 120-second default rather than the 60 seconds a `Fixture` defaults to. With the argument,
 the value applies to every fixture in the test, pair included.
 
+### An `LndPair` parameter
+
+`LndPair` also moves into the body. It returns Alice, Bob, the backing Bitcoin client, and the
+confirmed channel point from one owner. Its default is 180 seconds. Startup has already settled two
+1,000-msat public readiness invoices in opposite directions, so macro tests must identify their own
+payment and invoice records by hash rather than assume empty histories.
+
+```rust,ignore
+use std::time::Duration;
+use nigiri_rs::fixtures::LndPair;
+use nigiri_rs::{CreateInvoiceRequest, InvoiceState, Millisats, PaymentOptions, PaymentState};
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+#[nigiri_rs::test(startup_timeout = 240)]
+async fn settles_a_real_payment(pair: LndPair) -> Result<(), BoxError> {
+    let invoice = pair.bob().create_invoice(CreateInvoiceRequest::new(
+        Millisats::new(25_000),
+        "macro payment",
+        Duration::from_secs(60),
+    )?).await?;
+    let hash = invoice.payment_hash();
+    let payment = pair.alice().pay_invoice(
+        invoice.invoice(),
+        PaymentOptions::new(Millisats::new(10_000), Duration::from_secs(30))?,
+    ).await?;
+    assert_eq!(payment.payment_hash(), hash);
+    assert_eq!(payment.state(), PaymentState::Succeeded);
+    let settled = pair.bob().lookup_invoice(hash).await?;
+    assert_eq!(settled.payment_hash(), hash);
+    assert_eq!(settled.state(), InvoiceState::Settled);
+    Ok(())
+}
+```
+
 ### Concurrency
 
 With two or more parameters the fixtures start under `tokio::join!` rather than one after another.
@@ -148,7 +186,9 @@ A single fixture is emitted sequentially — joining one future buys nothing —
 no startup code at all.
 
 If one start fails, the others still finish; the wrapper then panics on the first failure and the
-remaining handles drop as the panic unwinds, running the same teardown a successful test would.
+remaining handles drop as the panic unwinds, requesting the same best-effort teardown as a
+successful test. Drop cannot report cleanup errors; use manually owned fixtures and explicit
+`shutdown().await` when they matter. A hard kill can leave resources.
 
 ## Rejections
 
@@ -164,7 +204,7 @@ All of these are compile errors with the message shown. Six are pinned by `trybu
 | Takes `self` | ``#[nigiri_rs::test]` cannot be applied to a method taking `self`` |
 | Non-identifier pattern in a parameter | `each parameter must be a plain name, so the generated wrapper can bind it` |
 | Parameter named `__nigiri_rs_*` | `parameter names beginning `__nigiri_rs_` are reserved for the code `#[nigiri_rs::test]` generates; rename this parameter` |
-| Parameter is not an accepted fixture type | ``#[nigiri_rs::test]` parameters must be `NigiriClient<Bitcoin>`, `NigiriClient<Liquid>`, or `PegPair`; the chain is taken from this type` |
+| Parameter is not an accepted fixture type | ``#[nigiri_rs::test]` parameters must be `NigiriClient<Bitcoin>`, `NigiriClient<Liquid>`, `PegPair`, or `LndPair`; the chain is taken from this type` |
 | Unknown attribute argument | ``unknown argument `x`; `#[nigiri_rs::test]` accepts `startup_timeout` and `flavor`. The chain is taken from the parameter type, not from an argument.`` |
 | `startup_timeout` not an integer | ``startup_timeout` takes a number of seconds, e.g. `#[nigiri_rs::test(startup_timeout = 120)]`` |
 | `flavor` not a string | ``flavor` takes a string, e.g. `flavor = "multi_thread"`` |
@@ -186,8 +226,8 @@ If Docker is unavailable, a generated test **fails loudly** with:
 nigiri-rs: the Bitcoin fixture could not start; is Docker running?
 ```
 
-The chain is named because concurrent starts mean more than one can fail, and "the fixture" would
-not say which. A pair names itself: `the PegPair fixture could not start`.
+The chain is named because concurrent starts mean more than one can fail. A pair names itself:
+`the PegPair fixture could not start` or `the LndPair fixture could not start`.
 
 ## Testing the macro itself
 

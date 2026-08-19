@@ -14,8 +14,11 @@
 use std::time::Duration;
 
 use bitcoin::Amount;
-use nigiri_rs::fixtures::PegPair;
-use nigiri_rs::{Bitcoin, Liquid, NigiriClient};
+use nigiri_rs::fixtures::{LndPair, PegPair};
+use nigiri_rs::{
+    Bitcoin, CreateInvoiceRequest, InvoiceState, Liquid, Millisats, NigiriClient, PaymentOptions,
+    PaymentState,
+};
 use serde::Deserialize;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -229,5 +232,35 @@ async fn a_peg_pair_parameter_starts_a_wired_stack(peg: PegPair) -> Result<(), B
     // comparison would be flaky.)
     assert_eq!(peg.liquid().block_height().await?, 1);
     assert!(peg.bitcoin().block_height().await? >= 101);
+    Ok(())
+}
+
+// Catches a regression that fails to move the owning pair into the body: the injected pair must
+// keep its ready channel alive throughout this real payment.
+#[nigiri_rs::test(startup_timeout = 240)]
+async fn an_lnd_pair_parameter_settles_a_real_payment(pair: LndPair) -> Result<(), BoxError> {
+    let invoice = pair
+        .bob()
+        .create_invoice(CreateInvoiceRequest::new(
+            Millisats::new(25_000),
+            "nigiri-rs macro smoke",
+            Duration::from_secs(60),
+        )?)
+        .await?;
+    let payment_hash = invoice.payment_hash();
+
+    let payment = pair
+        .alice()
+        .pay_invoice(
+            invoice.invoice(),
+            PaymentOptions::new(Millisats::new(10_000), Duration::from_secs(30))?,
+        )
+        .await?;
+    assert_eq!(payment.payment_hash(), payment_hash);
+    assert_eq!(payment.state(), PaymentState::Succeeded);
+
+    let settled = pair.bob().lookup_invoice(payment_hash).await?;
+    assert_eq!(settled.payment_hash(), payment_hash);
+    assert_eq!(settled.state(), InvoiceState::Settled);
     Ok(())
 }
