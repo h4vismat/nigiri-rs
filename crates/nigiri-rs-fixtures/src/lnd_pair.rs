@@ -68,7 +68,7 @@ trait LndPairEnvironment: Clone + Send + Sync + 'static {
     type Connector: LndNodeConnector;
     type BitcoinTip: BitcoinTip;
 
-    async fn start_bitcoin(
+    async fn start_bitcoin_for_coordinator(
         &self,
         bitcoind_image: ContainerImage,
         electrs_image: ContainerImage,
@@ -100,7 +100,7 @@ impl LndPairEnvironment for RealLndPairEnvironment {
     type Connector = RealLndConnector;
     type BitcoinTip = NigiriClient<Bitcoin>;
 
-    async fn start_bitcoin(
+    async fn start_bitcoin_for_coordinator(
         &self,
         bitcoind_image: ContainerImage,
         electrs_image: ContainerImage,
@@ -110,7 +110,7 @@ impl LndPairEnvironment for RealLndPairEnvironment {
             .node_image(bitcoind_image)
             .electrs_image(electrs_image)
             .extra_node_args(bitcoin_zmq_args())
-            .start_under(deadline)
+            .start_under_for_coordinator(deadline)
             .await
     }
 
@@ -311,6 +311,22 @@ impl LndPairBuilder {
     where
         R: LndPairEnvironment,
     {
+        self.start_with_environment_and_handoff(environment, std::future::ready(()))
+            .await
+    }
+
+    async fn start_with_environment_and_handoff<R, H>(
+        &self,
+        environment: R,
+        before_handoff_ack: H,
+    ) -> Result<
+        StartedLndPair<<R::Connector as LndNodeConnector>::Client, R::BitcoinStack>,
+        FixtureError,
+    >
+    where
+        R: LndPairEnvironment,
+        H: Future<Output = ()>,
+    {
         self.validate()?;
         let deadline = Deadline::new(self.startup_timeout)?;
         let bitcoind_image = self.bitcoind_image.clone();
@@ -324,7 +340,7 @@ impl LndPairBuilder {
             move |mut cancellation: CoordinatorCancellation| async move {
                 let bitcoin = tokio::select! {
                     biased;
-                    bitcoin = environment.start_bitcoin(
+                    bitcoin = environment.start_bitcoin_for_coordinator(
                         bitcoind_image,
                         bitcoin_electrs_image,
                         &work_deadline,
@@ -376,10 +392,28 @@ impl LndPairBuilder {
                     nodes: started,
                 })
             },
+            before_handoff_ack,
         );
         deadline
             .run("LND pair", "coordinating complete LND startup", coordinated)
             .await?
+    }
+
+    #[cfg(test)]
+    async fn start_with_environment_before_handoff_ack<R, H>(
+        &self,
+        environment: R,
+        before_ack: H,
+    ) -> Result<
+        StartedLndPair<<R::Connector as LndNodeConnector>::Client, R::BitcoinStack>,
+        FixtureError,
+    >
+    where
+        R: LndPairEnvironment,
+        H: Future<Output = ()>,
+    {
+        self.start_with_environment_and_handoff(environment, before_ack)
+            .await
     }
 
     fn validate(&self) -> Result<(), FixtureError> {
@@ -1120,7 +1154,10 @@ mod tests {
         ContainerImage, FixtureError,
         deadline::Deadline,
         lnd::TLS_CERT_PATH,
-        runtime::{ContainerEngine, ContainerSpec, EngineError, EngineResult},
+        runtime::{
+            ContainerEngine, ContainerSpec, EngineError, EngineResult, lnd_spec,
+            supervise_for_coordinator,
+        },
     };
 
     #[derive(Clone, Copy)]
@@ -1519,7 +1556,7 @@ mod tests {
         type Connector = FakeConnector;
         type BitcoinTip = FakeBitcoinTip;
 
-        async fn start_bitcoin(
+        async fn start_bitcoin_for_coordinator(
             &self,
             _bitcoind_image: ContainerImage,
             _electrs_image: ContainerImage,
@@ -1574,6 +1611,85 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct BackingStartupEnvironment {
+        engine: FakeEngine,
+        started: Arc<Notify>,
+    }
+
+    impl LndPairEnvironment for BackingStartupEnvironment {
+        type BitcoinStack = FakeBitcoinStack;
+        type Engine = FakeEngine;
+        type Connector = FakeConnector;
+        type BitcoinTip = FakeBitcoinTip;
+
+        async fn start_bitcoin_for_coordinator(
+            &self,
+            _bitcoind_image: ContainerImage,
+            _electrs_image: ContainerImage,
+            _deadline: &Deadline,
+        ) -> Result<Self::BitcoinStack, FixtureError> {
+            let bitcoind = lnd_spec(
+                ContainerImage::lnd_default(),
+                "backing-network".to_owned(),
+                "bitcoind".to_owned(),
+                "bitcoind",
+                "127.0.0.1",
+            )?;
+            let electrs = lnd_spec(
+                ContainerImage::lnd_default(),
+                "backing-network".to_owned(),
+                "electrs".to_owned(),
+                "bitcoind",
+                "127.0.0.1",
+            )?;
+            let started = Arc::clone(&self.started);
+            let supervised =
+                supervise_for_coordinator(self.engine.clone(), move |mut startup| async move {
+                    let (bitcoind, electrs) = startup.start_container_pair(bitcoind, electrs).await;
+                    bitcoind?;
+                    electrs?;
+                    started.notify_one();
+                    std::future::pending::<Result<(), FixtureError>>().await
+                });
+            let _ = supervised.await?;
+            unreachable!("the backing-startup cancellation test never completes startup")
+        }
+
+        fn engine(&self, _bitcoin: &Self::BitcoinStack) -> Self::Engine {
+            panic!("the cancellation test never finishes backing startup")
+        }
+
+        fn network_name(&self, _bitcoin: &Self::BitcoinStack) -> String {
+            panic!("the cancellation test never finishes backing startup")
+        }
+
+        fn node_container_name(&self, _bitcoin: &Self::BitcoinStack) -> String {
+            panic!("the cancellation test never finishes backing startup")
+        }
+
+        fn bitcoin_tip(&self, _bitcoin: &Self::BitcoinStack) -> Self::BitcoinTip {
+            panic!("the cancellation test never finishes backing startup")
+        }
+
+        fn connector(&self) -> Self::Connector {
+            panic!("the cancellation test never finishes backing startup")
+        }
+
+        async fn attach_inner_logs(
+            &self,
+            _bitcoin: &Self::BitcoinStack,
+            _deadline: &Deadline,
+            _error: FixtureError,
+        ) -> FixtureError {
+            panic!("the cancellation test never finishes backing startup")
+        }
+
+        async fn shutdown_bitcoin(&self, _bitcoin: Self::BitcoinStack) -> Result<(), FixtureError> {
+            panic!("the cancellation test never finishes backing startup")
+        }
+    }
+
     // Catches public builder cancellation dropping the backing fixture on the caller while LND
     // cleanup is still detached. The one composite owner must return at the shared deadline and
     // eventually remove Bob, Alice, Electrs, then bitcoind without concurrent ledgers.
@@ -1622,6 +1738,194 @@ mod tests {
         .await
         .expect("the detached composite coordinator must eventually remove all four containers");
         let removed = removed.lock().unwrap().clone();
+        assert!(removed[0].contains("bob"), "{removed:?}");
+        assert!(removed[1].contains("alice"), "{removed:?}");
+        assert_eq!(&removed[2..], ["electrs", "bitcoind"], "{removed:?}");
+    }
+
+    // Catches backing startup using an independently deadline-detachable supervisor after the
+    // public coordinator exists. Cancellation must detach only the coordinator while that owner
+    // waits for nested Electrs/bitcoind cleanup to finish in dependency order.
+    #[tokio::test]
+    async fn builder_backing_startup_cancellation_has_one_bounded_owner() {
+        let mut engine = FakeEngine::new();
+        engine.removal_delay = Duration::from_millis(300);
+        let removed = Arc::clone(&engine.removed);
+        let started = Arc::new(Notify::new());
+        let environment = BackingStartupEnvironment {
+            engine,
+            started: Arc::clone(&started),
+        };
+        let task = tokio::spawn(async move {
+            LndPair::builder()
+                .startup_timeout(Duration::from_millis(100))
+                .start_with_environment(environment)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("both backing resources must start before cancellation");
+        let cancelled_at = std::time::Instant::now();
+        task.abort();
+        let cancellation = match task.await {
+            Err(error) => error,
+            Ok(_) => panic!("aborting during backing startup must cancel the public builder"),
+        };
+        assert!(cancellation.is_cancelled());
+        assert!(
+            cancelled_at.elapsed() < Duration::from_millis(250),
+            "backing cleanup held the public caller past its deadline: {:?}",
+            cancelled_at.elapsed()
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if removed.lock().unwrap().len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached coordinator must finish both backing removals");
+        assert_eq!(
+            *removed.lock().unwrap(),
+            ["electrs-id", "bitcoind-id"],
+            "each backing resource must be removed exactly once"
+        );
+    }
+
+    // Catches a successful composite payload sitting unacknowledged in the result channel. If
+    // receiver cancellation drops its armed runtimes on the caller, abort waits for all four slow
+    // removals instead of returning within the shared deadline.
+    #[tokio::test]
+    async fn builder_success_handoff_cancellation_is_bounded_and_returns_ownership_once() {
+        let mut engine = FakeEngine::new();
+        engine.removal_delay = Duration::from_millis(300);
+        let removed = Arc::clone(&engine.removed);
+        let environment = FakeLndPairEnvironment {
+            engine,
+            connector: FakeConnector::succeeding(),
+            backing_removal_delay: Duration::from_millis(300),
+        };
+        let handoff_published = Arc::new(Notify::new());
+        let observed_publication = Arc::clone(&handoff_published);
+
+        let task = tokio::spawn(async move {
+            LndPair::builder()
+                .startup_timeout(Duration::from_millis(100))
+                .start_with_environment_before_handoff_ack(environment, async move {
+                    handoff_published.notify_one();
+                    std::future::pending().await
+                })
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), observed_publication.notified())
+            .await
+            .expect("the coordinator must publish successful ownership before the deadline");
+        let cancelled_at = std::time::Instant::now();
+        task.abort();
+        let cancellation = match task.await {
+            Err(error) => error,
+            Ok(_) => panic!("aborting the unacknowledged success handoff must cancel it"),
+        };
+        assert!(cancellation.is_cancelled());
+        assert!(
+            cancelled_at.elapsed() < Duration::from_millis(250),
+            "unacknowledged success was dropped on the public caller: {:?}",
+            cancelled_at.elapsed()
+        );
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if removed.lock().unwrap().len() == 4 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the coordinator must eventually clean every returned resource exactly once");
+        let removed = removed.lock().unwrap().clone();
+        assert_eq!(removed.len(), 4, "{removed:?}");
+        assert!(removed[0].contains("bob"), "{removed:?}");
+        assert!(removed[1].contains("alice"), "{removed:?}");
+        assert_eq!(&removed[2..], ["electrs", "bitcoind"], "{removed:?}");
+    }
+
+    // Catches unwind between successful publication and acknowledgement dropping armed handles
+    // on the caller. The task panic remains prompt while the coordinator owns eventual cleanup.
+    #[tokio::test]
+    async fn builder_success_handoff_panic_returns_ownership_to_coordinator() {
+        let mut engine = FakeEngine::new();
+        engine.removal_delay = Duration::from_millis(300);
+        let removed = Arc::clone(&engine.removed);
+        let environment = FakeLndPairEnvironment {
+            engine,
+            connector: FakeConnector::succeeding(),
+            backing_removal_delay: Duration::from_millis(300),
+        };
+
+        let panicked_at = std::time::Instant::now();
+        let task = tokio::spawn(async move {
+            LndPair::builder()
+                .startup_timeout(Duration::from_millis(100))
+                .start_with_environment_before_handoff_ack(environment, async move {
+                    panic!("simulated caller panic before ownership acknowledgement")
+                })
+                .await
+        });
+        let panic = match task.await {
+            Err(error) => error,
+            Ok(_) => panic!("the caller-side handoff hook must panic"),
+        };
+        assert!(panic.is_panic());
+        assert!(
+            panicked_at.elapsed() < Duration::from_millis(250),
+            "pre-ack panic synchronously dropped armed handles: {:?}",
+            panicked_at.elapsed()
+        );
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if removed.lock().unwrap().len() == 4 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the coordinator must recover ownership after pre-ack panic");
+        let removed = removed.lock().unwrap().clone();
+        assert_eq!(removed.len(), 4, "{removed:?}");
+        assert!(removed[0].contains("bob"), "{removed:?}");
+        assert!(removed[1].contains("alice"), "{removed:?}");
+        assert_eq!(&removed[2..], ["electrs", "bitcoind"], "{removed:?}");
+    }
+
+    // Catches acknowledgement leaving a second coordinator-owned copy behind or failing to move
+    // the one armed composite into the successfully returned caller value.
+    #[tokio::test]
+    async fn builder_success_acknowledgement_transfers_ownership_exactly_once() {
+        let engine = FakeEngine::new();
+        let removed = Arc::clone(&engine.removed);
+        let environment = FakeLndPairEnvironment {
+            engine,
+            connector: FakeConnector::succeeding(),
+            backing_removal_delay: Duration::ZERO,
+        };
+
+        let started = LndPair::builder()
+            .start_with_environment(environment)
+            .await
+            .expect("the fake composite reaches its successful acknowledged handoff");
+        assert!(removed.lock().unwrap().is_empty());
+        drop(started);
+
+        let removed = removed.lock().unwrap().clone();
+        assert_eq!(removed.len(), 4, "{removed:?}");
         assert!(removed[0].contains("bob"), "{removed:?}");
         assert!(removed[1].contains("alice"), "{removed:?}");
         assert_eq!(&removed[2..], ["electrs", "bitcoind"], "{removed:?}");

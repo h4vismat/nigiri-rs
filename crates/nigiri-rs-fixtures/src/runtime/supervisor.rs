@@ -345,6 +345,29 @@ impl Drop for ThreadCompletion {
     }
 }
 
+struct PendingHandoff<T> {
+    value: Arc<Mutex<Option<T>>>,
+    acknowledged: Option<oneshot::Sender<()>>,
+}
+
+impl<T> PendingHandoff<T> {
+    fn acknowledge(mut self) -> T {
+        let value = take_handoff_value(&self.value)
+            .expect("successful startup ownership is transferred once");
+        if let Some(acknowledged) = self.acknowledged.take() {
+            let _ = acknowledged.send(());
+        }
+        value
+    }
+}
+
+fn take_handoff_value<T>(value: &Mutex<Option<T>>) -> Option<T> {
+    value
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
 pub(crate) struct CoordinatorCancellation {
     receiver: watch::Receiver<bool>,
 }
@@ -516,12 +539,17 @@ where
 /// Dropping the caller signals cancellation and waits only through the shared deadline. The work
 /// itself remains on the coordinator thread after detachment and is responsible for sequencing
 /// dependent cleanup before returning.
-pub(crate) async fn coordinate_startup<T, F, Fut, X>(deadline: Deadline, work: F) -> Result<T, X>
+pub(crate) async fn coordinate_startup<T, F, Fut, X, H>(
+    deadline: Deadline,
+    work: F,
+    before_ack: H,
+) -> Result<T, X>
 where
     T: Send + 'static,
     F: FnOnce(CoordinatorCancellation) -> Fut + Send + 'static,
     Fut: Future<Output = Result<T, X>> + 'static,
     X: From<EngineError> + Send + 'static,
+    H: Future<Output = ()>,
 {
     let (cancel_sender, cancel_receiver) = watch::channel(false);
     let (result_sender, result_receiver) = oneshot::channel();
@@ -546,6 +574,7 @@ where
                 }
             };
 
+            let handoff_cancellation = cancel_receiver.clone();
             let outcome = runtime.block_on(
                 AssertUnwindSafe(work(CoordinatorCancellation {
                     receiver: cancel_receiver,
@@ -553,7 +582,37 @@ where
                 .catch_unwind(),
             );
             let result = match outcome {
-                Ok(result) => result,
+                Ok(Ok(value)) => {
+                    let value = Arc::new(Mutex::new(Some(value)));
+                    let coordinator_value = Arc::clone(&value);
+                    let (acknowledged_sender, acknowledged_receiver) = oneshot::channel();
+                    let handoff = PendingHandoff {
+                        value,
+                        acknowledged: Some(acknowledged_sender),
+                    };
+                    if result_sender.send(Ok(handoff)).is_err() {
+                        drop(take_handoff_value(&coordinator_value));
+                        return;
+                    }
+
+                    runtime.block_on(async move {
+                        let mut cancelled = handoff_cancellation;
+                        tokio::select! {
+                            biased;
+                            acknowledged = acknowledged_receiver => {
+                                if acknowledged.is_err() {
+                                    drop(take_handoff_value(&coordinator_value));
+                                }
+                            }
+                            changed = cancelled.changed() => {
+                                let _ = changed;
+                                drop(take_handoff_value(&coordinator_value));
+                            }
+                        }
+                    });
+                    return;
+                }
+                Ok(Err(error)) => Err(error),
                 Err(payload) => {
                     let message = payload
                         .downcast_ref::<&str>()
@@ -586,6 +645,13 @@ where
                 std::io::Error::other("composite coordinator stopped before startup completed"),
             )));
         }
+    };
+    let result = match result {
+        Ok(handoff) => {
+            before_ack.await;
+            Ok(handoff.acknowledge())
+        }
+        Err(error) => Err(error),
     };
     cancellation.join_completed();
     result

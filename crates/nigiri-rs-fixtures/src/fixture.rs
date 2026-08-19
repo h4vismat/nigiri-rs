@@ -2,6 +2,7 @@
 
 use std::{fmt, marker::PhantomData, time::Duration};
 
+use futures_util::future::Either;
 use nigiri_rs_core::NigiriClient;
 use uuid::Uuid;
 
@@ -12,7 +13,7 @@ use crate::{
     electrs, node, readiness,
     runtime::{
         BollardEngine, ContainerEngine, RuntimeHandle, attach_container_log, runtime_error,
-        supervise,
+        supervise, supervise_for_coordinator,
     },
 };
 
@@ -198,6 +199,12 @@ struct TopologyNames {
     electrs: String,
 }
 
+#[derive(Clone, Copy)]
+enum FixtureStartupOwner {
+    CallerDeadline,
+    CompositeCoordinator,
+}
+
 /// Scopes every Docker resource of one fixture to a single UUID, so concurrent fixtures cannot
 /// collide and a leaked resource is traceable to the fixture that made it.
 ///
@@ -278,6 +285,27 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     /// fixture spends the same budget rather than running a second one beside it. `startup_timeout`
     /// is ignored on this path: the caller's clock is the only one.
     pub(crate) async fn start_under(self, deadline: &Deadline) -> Result<Fixture<C>, FixtureError> {
+        self.start_under_with_owner(deadline, FixtureStartupOwner::CallerDeadline)
+            .await
+    }
+
+    /// Starts under a composite coordinator that exclusively owns cancellation detachment.
+    ///
+    /// The nested fixture supervisor always completes cleanup before its coordinator returns, so
+    /// only the outer public guard can detach at the shared deadline.
+    pub(crate) async fn start_under_for_coordinator(
+        self,
+        deadline: &Deadline,
+    ) -> Result<Fixture<C>, FixtureError> {
+        self.start_under_with_owner(deadline, FixtureStartupOwner::CompositeCoordinator)
+            .await
+    }
+
+    async fn start_under_with_owner(
+        self,
+        deadline: &Deadline,
+        owner: FixtureStartupOwner,
+    ) -> Result<Fixture<C>, FixtureError> {
         self.node_image.validate()?;
         self.electrs_image.validate()?;
         deadline.remaining_or_expired(C::NODE_SERVICE, "connecting to the container engine")?;
@@ -296,7 +324,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
         let work_deadline = deadline.clone();
         let supervisor_deadline = deadline.clone();
 
-        let supervised = supervise(engine, supervisor_deadline, move |mut startup| async move {
+        let work = move |mut startup: crate::runtime::Startup<BollardEngine>| async move {
             let deadline = work_deadline;
             if creates_network {
                 deadline
@@ -367,7 +395,15 @@ impl<C: FixtureChain> FixtureBuilder<C> {
 
             let container_ids = [electrs.container.id, node.container.id];
             Ok((client, names, container_ids))
-        });
+        };
+        let supervised = match owner {
+            FixtureStartupOwner::CallerDeadline => {
+                Either::Left(supervise(engine, supervisor_deadline, work))
+            }
+            FixtureStartupOwner::CompositeCoordinator => {
+                Either::Right(supervise_for_coordinator(engine, work))
+            }
+        };
         let ((client, names, container_ids), runtime) = deadline
             .run(
                 C::NODE_SERVICE,

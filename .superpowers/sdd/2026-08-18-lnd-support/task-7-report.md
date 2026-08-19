@@ -53,6 +53,17 @@ creation, payments, and a public channel point remain Task 8 work.
   only the outer coordinator may detach at the shared deadline, and it does not begin
   Electrs/bitcoind teardown until LND teardown finishes. This removes the unbounded backing-fixture
   drop from the caller and preserves cross-stack order after either cancellation or startup error.
+- Successful composite publication now uses a two-phase acknowledged handoff. The coordinator
+  retains a shared `Option<T>` containing both armed runtimes; the queued payload contains only an
+  access token and acknowledgement sender. The caller synchronously takes the value and sends the
+  acknowledgement with no intervening await. Receiver cancellation, caller panic, or publication
+  failure before acknowledgement leaves the value in coordinator-owned storage for ordered
+  cleanup, so Tokio oneshot receiver drop can no longer join runtime threads on the public caller.
+- Backing Bitcoin startup has a coordinator-only fixture mode whose nested supervisor always joins
+  cleanup completely. `LndPairBuilder` uses that mode after creating its outer coordinator, making
+  the coordinator guard the only deadline-detachable guard during engine connection, backing
+  startup, LND startup, and the successful handoff. Standalone `Fixture::start` and composite paths
+  outside this LND builder retain their prior deadline-owned behavior.
 
 ## TDD evidence
 
@@ -88,6 +99,17 @@ returns that abort within 150 ms and eventually records the exact Bob, Alice, El
 sequence. A second builder-level regression pins the same sequence and typed Lightning cause for
 ordinary startup failure.
 
+The final correctness-review RED pass reproduced the successful-result handoff race
+deterministically: after the coordinator published a fully armed fake pair but before caller-side
+acknowledgement, aborting the public task took about 1.216 seconds because four 300-ms removals ran
+on that caller. With the two-phase handoff, the same abort returns within the 100-ms shared budget
+and the coordinator eventually records Bob, Alice, Electrs, bitcoind exactly once. A pre-ack panic
+regression exercises the same recovery path, while a normal-success regression proves ownership is
+transferred to and cleaned by the caller exactly once. The backing-startup RED pass first failed to
+compile because no coordinator-owned backing-start interface existed. Its completed regression
+aborts while both backing resources are live, returns within the public budget, and observes exact
+Electrs-then-bitcoind cleanup under the coordinator-only nested supervisor.
+
 The full workspace feature run also exposed a rustls test-harness integration bug: tonic's
 production client path selects its compiled provider explicitly, but tonic's in-process TLS server
 asks rustls for a process default. Workspace feature unification enables ring through tonic and
@@ -116,10 +138,11 @@ public Task 3 contract are unchanged; the feature-unified regression passes.
 
 - `cargo test --workspace --all-targets --all-features --locked` — passed, including all Docker-backed
   Bitcoin, Liquid, peg, macro, LND, protocol-baseline, and fixture suites; the LND library ran 87
-  unit tests and the fixture library ran 124 unit tests.
-- `cargo test -p nigiri-rs-fixtures lnd_pair::tests --locked` — 17 passed, including symmetric
+  unit tests and the fixture library ran 128 unit tests.
+- `cargo test -p nigiri-rs-fixtures lnd_pair::tests --locked` — 21 passed, including symmetric
   fail-fast permanent failures, transient retry classification, blocked diagnostics, bounded
-  composite cancellation, exact cross-stack cleanup order, and eventual cleanup.
+  composite cancellation before/during/after backing and LND startup, acknowledged success and
+  pre-ack panic, exact cross-stack cleanup order, and eventual cleanup.
 - `cargo test -p nigiri-rs-fixtures runtime::supervisor::tests --locked` — 6 passed.
 - `cargo test -p nigiri-rs-fixtures diagnostics::tests --locked` — 12 passed.
 - `cargo test -p nigiri-rs-lnd wallet_unlocker --locked` — 6 passed.
@@ -138,3 +161,4 @@ above pass without adding production dependencies or language features beyond th
 - `feat(fixtures): initialize an LND node pair`
 - `fix(fixtures): harden LND startup failure boundaries`
 - `fix(fixtures): coordinate LND startup teardown`
+- `fix(fixtures): acknowledge LND startup ownership transfer`
