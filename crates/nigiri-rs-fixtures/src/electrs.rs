@@ -48,6 +48,7 @@ pub(crate) async fn start_electrs<C: FixtureChain, E: ContainerEngine>(
             let error = runtime_error(SERVICE, error);
             return Err(crate::runtime::attach_container_log(
                 startup,
+                deadline,
                 SERVICE,
                 container_name,
                 error,

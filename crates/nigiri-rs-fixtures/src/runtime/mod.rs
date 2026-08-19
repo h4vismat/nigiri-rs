@@ -5,12 +5,13 @@ mod supervisor;
 
 use crate::{
     FixtureError,
+    deadline::Deadline,
     diagnostics::{join_diagnostics, redacted_source, redacted_tail},
 };
 
-#[cfg(test)]
-pub(crate) use engine::EngineResult;
 pub(crate) use engine::{BollardEngine, ContainerEngine};
+#[cfg(test)]
+pub(crate) use engine::{EngineError, EngineResult};
 #[cfg(test)]
 pub(crate) use spec::ContainerSpec;
 #[allow(
@@ -92,15 +93,24 @@ pub(crate) fn attach_diagnostics(error: FixtureError, addition: String) -> Fixtu
 
 pub(crate) async fn attach_container_log<E: ContainerEngine>(
     startup: &mut Startup<E>,
+    deadline: &Deadline,
     service: &'static str,
     id_or_name: &str,
     error: FixtureError,
 ) -> FixtureError {
-    let diagnostics = match startup.logs(id_or_name).await {
-        Ok(logs) => redacted_tail(&format!("{service} log:\n{logs}\n[end {service} log]")),
-        Err(failure) => redacted_tail(&format!(
+    let diagnostics = match deadline
+        .run(
+            service,
+            "reading bounded startup diagnostics",
+            startup.logs(id_or_name),
+        )
+        .await
+    {
+        Ok(Ok(logs)) => redacted_tail(&format!("{service} log:\n{logs}\n[end {service} log]")),
+        Ok(Err(failure)) => redacted_tail(&format!(
             "could not read the {service} diagnostic log: {failure}"
         )),
+        Err(_) => format!("skipped the {service} diagnostic log: startup deadline exhausted"),
     };
     attach_diagnostics(error, diagnostics)
 }

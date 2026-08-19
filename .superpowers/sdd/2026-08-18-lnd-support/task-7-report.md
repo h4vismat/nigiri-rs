@@ -24,6 +24,25 @@
 No public container name/ID or runtime engine handle was exposed. Channel funding, channel
 creation, payments, and a public channel point remain Task 8 work.
 
+## Correctness-review fixes
+
+- Fixture diagnostics now redact the complete structured value for the real `rpcpass` option and
+  wallet-password punctuation variants, the complete line for seed/mnemonic fields, and complete
+  PEM private-key blocks. Redaction runs over the full input before bounding, remains idempotent,
+  and is exercised in direct diagnostics plus Alice, Bob, Electrs, and bitcoind log attachment.
+- TLS-certificate polling retries only missing/not-yet-available file states. Oversize, malformed
+  archive/framing/path, and metadata failures return immediately with runtime classification and a
+  bounded source. LND synchronization retries transport/availability statuses only; permanent
+  authentication, invalid-request, invalid-response, and other protocol failures immediately keep
+  the `Bootstrap { chain: "Lightning" } -> FixtureError::Lightning -> LndError` source chain.
+- A representable absolute Tokio `Instant` is now validated before Docker. The same `Deadline`
+  bounds engine connection, topology startup, failure diagnostics, and cleanup coordination. If
+  failure cleanup completes while budget remains, the caller joins it. At expiry, diagnostics are
+  skipped or cancelled, shutdown is signalled, and the dedicated supervisor thread is detached so
+  the public startup call returns on time while the supervisor continues best-effort reverse-order
+  cleanup in the background. Normal post-start explicit and implicit shutdown still waits for
+  cleanup.
+
 ## TDD evidence
 
 The initial focused tests failed on the absent `WalletUnlockerRpc`, `initialize_wallet`,
@@ -38,6 +57,14 @@ client creation, backing-bitcoind synchronization, typed/redacted dependency dia
 deterministic shutdown, ownership order, and caller cancellation. A strengthened cancellation test
 first failed because aborting the caller could return before delayed container removals completed;
 the supervisor now owns and joins its cleanup thread from the cancellation guard.
+
+The correctness-review RED pass then exposed all three reported boundaries: exact RPC/seed/private
+key fixtures remained visible; terminal certificate and `GetInfo` failures were retried; an
+unrepresentable `Duration::MAX` was accepted, a blocked diagnostic read outlived the whole-call
+clock, and 30-ms caller cancellation waited about 506 ms for two delayed removals. The GREEN pass
+adds faithful terminal/transient fakes, paused-time blocking diagnostics, and delayed cleanup. The
+last case returns within its caller budget and then observes Bob-before-Alice cleanup complete in
+the detached supervisor.
 
 The full workspace feature run also exposed a rustls test-harness integration bug: tonic's
 production client path selects its compiled provider explicitly, but tonic's in-process TLS server
@@ -65,12 +92,17 @@ public Task 3 contract are unchanged; the feature-unified regression passes.
 
 ## Verification
 
-- `cargo test --workspace --all-targets --all-features` — passed, including all Docker-backed
+- `cargo test --workspace --all-targets --all-features --locked` — passed, including all Docker-backed
   Bitcoin, Liquid, peg, macro, LND, protocol-baseline, and fixture suites; the LND library ran 87
-  unit tests and the fixture library ran 111 unit tests.
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — passed.
-- `cargo test --doc --workspace --all-features` — passed.
-- `cargo doc --workspace --all-features --no-deps` — passed.
+  unit tests and the fixture library ran 120 unit tests.
+- `cargo test -p nigiri-rs-fixtures lnd_pair::tests --locked` — 13 passed, including permanent and
+  transient retry classification, blocked diagnostics, bounded cancellation, and eventual cleanup.
+- `cargo test -p nigiri-rs-fixtures runtime::supervisor::tests --locked` — 6 passed.
+- `cargo test -p nigiri-rs-fixtures diagnostics::tests --locked` — 12 passed.
+- `cargo test -p nigiri-rs-lnd wallet_unlocker --locked` — 6 passed.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` — passed.
+- `cargo test --doc --workspace --all-features --locked` — passed.
+- `cargo doc --workspace --all-features --no-deps --locked` — passed.
 - `cargo fmt --all -- --check` — passed.
 - `git diff --check` — passed.
 
@@ -80,4 +112,5 @@ above pass without adding production dependencies or language features beyond th
 
 ## Commit
 
-`feat(fixtures): initialize an LND node pair`
+- `feat(fixtures): initialize an LND node pair`
+- `fix(fixtures): harden LND startup failure boundaries`

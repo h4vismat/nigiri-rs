@@ -62,6 +62,26 @@ impl EngineError {
                 .downcast_ref::<io::Error>()
                 .is_some_and(|source| source.kind() == io::ErrorKind::Interrupted)
     }
+
+    /// A bounded file read may be retried only when Docker reports that the path is not present
+    /// yet. Archive framing, metadata, path, and size failures are permanent safety violations.
+    pub(crate) fn is_transient_file_unavailable(&self) -> bool {
+        self.operation == "read container file"
+            && self
+                .source
+                .downcast_ref::<io::Error>()
+                .is_some_and(|source| {
+                    matches!(
+                        source.kind(),
+                        io::ErrorKind::NotFound
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::ConnectionRefused
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::NotConnected
+                    )
+                })
+    }
 }
 
 impl fmt::Display for EngineError {
@@ -494,7 +514,16 @@ fn read_file_error(message: &'static str) -> EngineError {
     EngineError::new("read container file", invalid_archive(message))
 }
 
-fn sanitized_read_file_api_error(_error: BollardError) -> EngineError {
+fn sanitized_read_file_api_error(error: BollardError) -> EngineError {
+    if is_not_found(&error) {
+        return EngineError::new(
+            "read container file",
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "container file is not available yet",
+            ),
+        );
+    }
     read_file_error("container file archive request failed")
 }
 

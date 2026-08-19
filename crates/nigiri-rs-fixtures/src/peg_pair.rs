@@ -219,7 +219,11 @@ impl PegPairBuilder {
         {
             Ok(liquid) => liquid,
             // The Liquid half failed against a Bitcoin node whose log only that fixture holds.
-            Err(error) => return Err(bitcoin.attach_inner_logs(error).await),
+            Err(error) => {
+                let error = bitcoin.attach_inner_logs(&deadline, error).await;
+                let _ = bitcoin.shutdown_within(&deadline).await;
+                return Err(error);
+            }
         };
 
         // Run here rather than left to the first peg call: a parent-chain disagreement is then a

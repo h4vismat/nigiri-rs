@@ -6,22 +6,35 @@ use crate::{FixtureError, diagnostics::redacted_tail};
 
 #[derive(Clone)]
 pub(crate) struct Deadline {
-    started: Instant,
+    expires_at: Instant,
     duration: Duration,
 }
 
 impl Deadline {
     pub(crate) fn new(duration: Duration) -> Result<Self, FixtureError> {
+        let expires_at = Self::absolute_instant(duration)?;
+
+        Ok(Self {
+            expires_at,
+            duration,
+        })
+    }
+
+    pub(crate) fn validate_duration(duration: Duration) -> Result<(), FixtureError> {
+        Self::absolute_instant(duration).map(drop)
+    }
+
+    fn absolute_instant(duration: Duration) -> Result<Instant, FixtureError> {
         if duration.is_zero() {
             return Err(FixtureError::InvalidConfiguration {
                 detail: "startup deadline must be greater than zero".to_owned(),
             });
         }
-
-        Ok(Self {
-            started: Instant::now(),
-            duration,
-        })
+        Instant::now()
+            .checked_add(duration)
+            .ok_or_else(|| FixtureError::InvalidConfiguration {
+                detail: "startup deadline exceeds the supported absolute instant range".to_owned(),
+            })
     }
 
     /// The whole startup budget, independent of how much of it has been spent.
@@ -30,7 +43,7 @@ impl Deadline {
     }
 
     pub(crate) fn remaining(&self) -> Duration {
-        self.duration.saturating_sub(self.started.elapsed())
+        self.expires_at.saturating_duration_since(Instant::now())
     }
 
     /// The remaining budget, or the readiness timeout it has already become.
@@ -68,7 +81,7 @@ impl Deadline {
     where
         F: Future<Output = T>,
     {
-        tokio::time::timeout(self.remaining(), future)
+        tokio::time::timeout_at(self.expires_at, future)
             .await
             .map_err(|_| self.readiness_timeout(service, last_observation))
     }
@@ -89,6 +102,18 @@ mod tests {
         let error = match Deadline::new(Duration::ZERO) {
             Err(error) => error,
             Ok(_) => panic!("zero startup time must be invalid"),
+        };
+
+        assert!(matches!(error, FixtureError::InvalidConfiguration { .. }));
+    }
+
+    // Catches a duration that cannot become an absolute Instant slipping through validation and
+    // reaching Docker before a nested LND request eventually rejects it.
+    #[test]
+    fn an_unrepresentable_absolute_deadline_is_rejected() {
+        let error = match Deadline::new(Duration::MAX) {
+            Err(error) => error,
+            Ok(_) => panic!("an unrepresentable absolute startup deadline must be invalid"),
         };
 
         assert!(matches!(error, FixtureError::InvalidConfiguration { .. }));

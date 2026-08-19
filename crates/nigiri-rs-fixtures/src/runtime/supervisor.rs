@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, HashMap},
     future::Future,
     panic::AssertUnwindSafe,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
+    },
 };
 
 use futures_util::FutureExt;
@@ -13,6 +16,7 @@ use super::{
     resources::{OwnedResource, ResourceLedger},
     spec::ContainerSpec,
 };
+use crate::deadline::Deadline;
 
 pub(crate) struct RunningContainer {
     pub(crate) id: String,
@@ -205,6 +209,39 @@ impl RuntimeHandle {
         cleanup.and(joined)
     }
 
+    /// Signals cleanup and waits only through a composite startup's remaining budget.
+    ///
+    /// When that budget expires the thread handle is deliberately detached. The dedicated
+    /// supervisor continues best-effort reverse-order cleanup, but the failed public startup call
+    /// is no longer coupled to Docker's per-request timeout.
+    pub(crate) async fn shutdown_within(mut self, deadline: &Deadline) -> EngineResult<()> {
+        self.signal_shutdown();
+        let mut completion = self
+            .completion
+            .take()
+            .expect("runtime completion is awaited once");
+        let cleanup = match deadline
+            .run(
+                "fixture cleanup",
+                "waiting for reverse-order fixture cleanup",
+                &mut completion,
+            )
+            .await
+        {
+            Ok(Ok(cleanup)) => cleanup,
+            Ok(Err(_)) => Err(EngineError::new(
+                "wait for fixture cleanup",
+                std::io::Error::other("fixture supervisor stopped without reporting cleanup"),
+            )),
+            Err(_) => {
+                self.thread = None;
+                return Err(cleanup_deadline_error());
+            }
+        };
+        let joined = self.join_thread();
+        cleanup.and(joined)
+    }
+
     fn signal_shutdown(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -237,6 +274,8 @@ impl Drop for RuntimeHandle {
 struct CallerCancellation {
     sender: Option<watch::Sender<bool>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    completed: Option<Receiver<()>>,
+    deadline: Deadline,
 }
 
 impl CallerCancellation {
@@ -251,14 +290,30 @@ impl CallerCancellation {
         if let Some(sender) = self.sender.take() {
             let _ = sender.send(true);
         }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        self.join_within_deadline();
     }
 
     fn join_completed(&mut self) {
         self.sender = None;
-        if let Some(thread) = self.thread.take() {
+        self.join_within_deadline();
+    }
+
+    fn join_within_deadline(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        let completed = thread.is_finished()
+            || self.completed.as_ref().is_some_and(|completed| {
+                if self.deadline.remaining().is_zero() {
+                    return false;
+                }
+                matches!(
+                    completed.recv_timeout(self.deadline.remaining()),
+                    Ok(()) | Err(RecvTimeoutError::Disconnected)
+                )
+            });
+        self.completed = None;
+        if completed {
             let _ = thread.join();
         }
     }
@@ -270,7 +325,21 @@ impl Drop for CallerCancellation {
     }
 }
 
-pub(crate) async fn supervise<E, T, F, Fut, X>(engine: E, work: F) -> Result<(T, RuntimeHandle), X>
+struct ThreadCompletion(Option<SyncSender<()>>);
+
+impl Drop for ThreadCompletion {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+pub(crate) async fn supervise<E, T, F, Fut, X>(
+    engine: E,
+    deadline: Deadline,
+    work: F,
+) -> Result<(T, RuntimeHandle), X>
 where
     E: ContainerEngine,
     T: Send + 'static,
@@ -280,10 +349,12 @@ where
 {
     let (cancel_sender, cancel_receiver) = watch::channel(false);
     let (result_sender, result_receiver) = oneshot::channel();
+    let (completed_sender, completed_receiver) = sync_channel(1);
 
     let thread = std::thread::Builder::new()
         .name("nigiri-rs-fixture".to_owned())
         .spawn(move || {
+            let _completion = ThreadCompletion(Some(completed_sender));
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -358,6 +429,8 @@ where
     let mut cancellation = CallerCancellation {
         sender: Some(cancel_sender),
         thread: Some(thread),
+        completed: Some(completed_receiver),
+        deadline,
     };
 
     let result = match result_receiver.await {
@@ -421,6 +494,16 @@ fn cancelled_error() -> EngineError {
     )
 }
 
+fn cleanup_deadline_error() -> EngineError {
+    EngineError::new(
+        "wait for fixture cleanup",
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "fixture cleanup exceeded the remaining startup deadline",
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -435,11 +518,16 @@ mod tests {
     use super::supervise;
     use crate::{
         ContainerImage,
+        deadline::Deadline,
         runtime::{
             engine::{ContainerEngine, EngineError, EngineResult},
             spec::node_spec,
         },
     };
+
+    fn test_deadline() -> Deadline {
+        Deadline::new(Duration::from_secs(5)).expect("the test supervisor has a bounded deadline")
+    }
 
     #[derive(Clone, Default)]
     struct FakeEngine {
@@ -545,7 +633,7 @@ mod tests {
             ..FakeEngine::default()
         };
         let observed = engine.clone();
-        let (contents, runtime) = supervise(engine, |mut startup| async move {
+        let (contents, runtime) = supervise(engine, test_deadline(), |mut startup| async move {
             startup
                 .read_container_file("alice", CERT_PATH, CERT_LIMIT)
                 .await
@@ -567,7 +655,7 @@ mod tests {
             read_contents: Arc::new(Mutex::new(vec![b'x'; CERT_LIMIT + 1])),
             ..FakeEngine::default()
         };
-        let error = match supervise(oversized, |mut startup| async move {
+        let error = match supervise(oversized, test_deadline(), |mut startup| async move {
             startup
                 .read_container_file("alice", CERT_PATH, CERT_LIMIT)
                 .await
@@ -593,12 +681,16 @@ mod tests {
         let observed = engine.clone();
         let entered = engine.read_entered.clone();
 
-        let caller = tokio::spawn(supervise(engine, |mut startup| async move {
-            startup.create_network("fixture-network".to_owned()).await?;
-            startup
-                .read_container_file("alice", "/root/.lnd/tls.cert", 1_048_576)
-                .await
-        }));
+        let caller = tokio::spawn(supervise(
+            engine,
+            test_deadline(),
+            |mut startup| async move {
+                startup.create_network("fixture-network".to_owned()).await?;
+                startup
+                    .read_container_file("alice", "/root/.lnd/tls.cert", 1_048_576)
+                    .await
+            },
+        ));
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
             .expect("the container file read must begin");
@@ -645,9 +737,11 @@ mod tests {
         )
         .expect("the pinned Bitcoin specification is valid");
 
-        let caller = tokio::spawn(supervise(engine, move |mut startup| async move {
-            startup.start_container(spec).await
-        }));
+        let caller = tokio::spawn(supervise(
+            engine,
+            test_deadline(),
+            move |mut startup| async move { startup.start_container(spec).await },
+        ));
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
             .expect("container creation must begin");
@@ -697,7 +791,7 @@ mod tests {
         )
         .expect("the second Bitcoin specification is valid");
 
-        let (_, runtime) = supervise(engine, move |mut startup| async move {
+        let (_, runtime) = supervise(engine, test_deadline(), move |mut startup| async move {
             startup.create_network("fixture-network".to_owned()).await?;
             startup.start_container(bitcoin).await?;
             startup.start_container(second).await?;
@@ -721,7 +815,7 @@ mod tests {
         let engine = FakeEngine::default();
         let observed = engine.clone();
 
-        let (_, runtime) = supervise(engine, move |mut startup| async move {
+        let (_, runtime) = supervise(engine, test_deadline(), move |mut startup| async move {
             startup.create_network("fixture-network".to_owned()).await?;
             Ok::<(), EngineError>(())
         })
@@ -744,7 +838,7 @@ mod tests {
         let engine = FakeEngine::default();
         let observed = engine.clone();
 
-        let result = supervise(engine, move |mut startup| async move {
+        let result = supervise(engine, test_deadline(), move |mut startup| async move {
             startup.create_network("fixture-network".to_owned()).await?;
             panic!("simulated startup panic");
             #[allow(unreachable_code)]

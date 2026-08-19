@@ -218,7 +218,11 @@ impl LndPairBuilder {
 
         let (started, lnd_runtime) = match nodes {
             Ok(nodes) => nodes,
-            Err(error) => return Err(bitcoin.attach_inner_logs(error).await),
+            Err(error) => {
+                let error = bitcoin.attach_inner_logs(&deadline, error).await;
+                let _ = bitcoin.shutdown_within(&deadline).await;
+                return Err(error);
+            }
         };
 
         Ok(LndPair {
@@ -236,9 +240,7 @@ impl LndPairBuilder {
     }
 
     fn validate(&self) -> Result<(), FixtureError> {
-        if self.startup_timeout.is_zero() {
-            return Err(invalid("startup deadline must be greater than zero"));
-        }
+        Deadline::validate_duration(self.startup_timeout)?;
         for image in [
             &self.bitcoind_image,
             &self.bitcoin_electrs_image,
@@ -389,9 +391,11 @@ where
 {
     let names = LndNames::scoped();
     let endpoint_host = engine.endpoint_host().to_owned();
-    let deadline = deadline.clone();
+    let work_deadline = deadline.clone();
+    let supervisor_deadline = deadline.clone();
 
-    supervise(engine, move |mut startup| async move {
+    let supervised = supervise(engine, supervisor_deadline, move |mut startup| async move {
+        let deadline = work_deadline;
         let alice_spec = lnd_spec(
             alice_image,
             network_name.clone(),
@@ -417,7 +421,14 @@ where
         let (alice_container, bob_container) = match started {
             Ok(started) => started,
             Err(error) => {
-                return Err(attach_lnd_logs(&mut startup, &names.alice, &names.bob, error).await);
+                return Err(attach_lnd_logs(
+                    &mut startup,
+                    &deadline,
+                    &names.alice,
+                    &names.bob,
+                    error,
+                )
+                .await);
             }
         };
         let (alice_container, bob_container) = match (alice_container, bob_container) {
@@ -434,7 +445,9 @@ where
                     (_, Err(error)) => runtime_error("lnd-bob", error),
                     _ => unreachable!("the successful pair was handled above"),
                 };
-                return Err(attach_lnd_logs(&mut startup, &alice_log, &bob_log, error).await);
+                return Err(
+                    attach_lnd_logs(&mut startup, &deadline, &alice_log, &bob_log, error).await,
+                );
             }
         };
 
@@ -450,6 +463,7 @@ where
             Err(error) => {
                 return Err(attach_lnd_logs(
                     &mut startup,
+                    &deadline,
                     &alice_container.id,
                     &bob_container.id,
                     error,
@@ -465,6 +479,7 @@ where
                 Err(error) => {
                     return Err(attach_lnd_logs(
                         &mut startup,
+                        &deadline,
                         &alice_container.id,
                         &bob_container.id,
                         error,
@@ -478,6 +493,7 @@ where
             Err(error) => {
                 return Err(attach_lnd_logs(
                     &mut startup,
+                    &deadline,
                     &alice_container.id,
                     &bob_container.id,
                     bootstrap_configuration_error(error),
@@ -490,6 +506,7 @@ where
             Err(error) => {
                 return Err(attach_lnd_logs(
                     &mut startup,
+                    &deadline,
                     &alice_container.id,
                     &bob_container.id,
                     bootstrap_configuration_error(error),
@@ -521,6 +538,7 @@ where
             Ok(Err(error)) => {
                 return Err(attach_lnd_logs(
                     &mut startup,
+                    &deadline,
                     &alice_container.id,
                     &bob_container.id,
                     error,
@@ -531,6 +549,7 @@ where
                 let error = runtime_error("LND pair", error);
                 return Err(attach_lnd_logs(
                     &mut startup,
+                    &deadline,
                     &alice_container.id,
                     &bob_container.id,
                     error,
@@ -553,6 +572,7 @@ where
             Ok(Err(error)) => {
                 return Err(attach_lnd_logs(
                     &mut startup,
+                    &deadline,
                     &alice_container.id,
                     &bob_container.id,
                     error,
@@ -563,6 +583,7 @@ where
                 let error = runtime_error("LND pair", error);
                 return Err(attach_lnd_logs(
                     &mut startup,
+                    &deadline,
                     &alice_container.id,
                     &bob_container.id,
                     error,
@@ -577,8 +598,10 @@ where
             names,
             container_ids: [alice_container.id, bob_container.id],
         })
-    })
-    .await
+    });
+    deadline
+        .run("LND pair", "starting the complete LND topology", supervised)
+        .await?
 }
 
 fn mapped_lnd_endpoint(container: &crate::runtime::RunningContainer) -> Result<Url, FixtureError> {
@@ -628,9 +651,10 @@ async fn wait_for_tls_certificate<E: ContainerEngine>(
             Ok(Err(error)) if error.is_cancelled() => {
                 return Err(runtime_error(service, error));
             }
-            Ok(Err(error)) => {
+            Ok(Err(error)) if error.is_transient_file_unavailable() => {
                 observation = redacted_tail(&format!("LND TLS certificate is not ready: {error}"));
             }
+            Ok(Err(error)) => return Err(runtime_error(service, error)),
             Err(error) => return Err(error),
         }
         let slept = deadline
@@ -668,6 +692,18 @@ async fn wait_for_lnd_sync<C: LndNodeConnector, B: BitcoinTip>(
                 return Ok(());
             }
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => return Err(error),
+            (Ok(Err(error)), _, _) if !is_transient_lnd_readiness(&error) => {
+                return Err(lightning_bootstrap_error(
+                    "query Alice synchronization",
+                    error,
+                ));
+            }
+            (_, Ok(Err(error)), _) if !is_transient_lnd_readiness(&error) => {
+                return Err(lightning_bootstrap_error(
+                    "query Bob synchronization",
+                    error,
+                ));
+            }
             (Ok(Err(error)), _, _) => {
                 service = "lnd-alice";
                 observation = redacted_tail(&format!("Alice GetInfo is not ready: {error}"));
@@ -703,6 +739,26 @@ async fn wait_for_lnd_sync<C: LndNodeConnector, B: BitcoinTip>(
         deadline
             .run(service, &observation, tokio::time::sleep(RETRY_DELAY))
             .await?;
+    }
+}
+
+fn is_transient_lnd_readiness(error: &LndError) -> bool {
+    match error {
+        LndError::Transport { .. } | LndError::Timeout { .. } => true,
+        LndError::Status { detail, .. } => matches!(
+            detail.as_ref(),
+            "gRPC status Unavailable"
+                | "gRPC status DeadlineExceeded"
+                | "gRPC status ResourceExhausted"
+                | "gRPC status Aborted"
+        ),
+        LndError::InvalidRequest { .. }
+        | LndError::CredentialRead { .. }
+        | LndError::Authentication { .. }
+        | LndError::InvalidResponse { .. }
+        | LndError::PaymentFailed { .. }
+        | LndError::OutcomeUnknown { .. } => false,
+        _ => false,
     }
 }
 
@@ -747,12 +803,13 @@ async fn initialize_lnd_clients<C: LndNodeConnector>(
 
 async fn attach_lnd_logs<E: ContainerEngine>(
     startup: &mut Startup<E>,
+    deadline: &Deadline,
     alice_id_or_name: &str,
     bob_id_or_name: &str,
     error: FixtureError,
 ) -> FixtureError {
-    let with_bob = attach_container_log(startup, "lnd-bob", bob_id_or_name, error).await;
-    attach_container_log(startup, "lnd-alice", alice_id_or_name, with_bob).await
+    let with_bob = attach_container_log(startup, deadline, "lnd-bob", bob_id_or_name, error).await;
+    attach_container_log(startup, deadline, "lnd-alice", alice_id_or_name, with_bob).await
 }
 
 fn lightning_bootstrap_error(operation: &'static str, source: LndError) -> FixtureError {
@@ -788,7 +845,11 @@ fn fill_password(password: &mut [u8; 32]) -> Result<(), FixtureError> {
 mod tests {
     use std::{
         collections::HashMap,
-        sync::{Arc, Mutex},
+        io,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -802,8 +863,17 @@ mod tests {
         ContainerImage, FixtureError,
         deadline::Deadline,
         lnd::TLS_CERT_PATH,
-        runtime::{ContainerEngine, ContainerSpec, EngineResult},
+        runtime::{ContainerEngine, ContainerSpec, EngineError, EngineResult},
     };
+
+    #[derive(Clone, Copy)]
+    enum CertificateRead {
+        Valid,
+        MissingOnce,
+        Oversized,
+        Malformed,
+        Blocked,
+    }
 
     #[test]
     fn builder_defaults_pin_one_deadline_four_images_and_balanced_liquidity() {
@@ -874,11 +944,26 @@ mod tests {
         }
     }
 
+    // Unlike image and amount checks, this exercises the exact absolute-Instant representation
+    // boundary whose failure used to be deferred until wallet initialization after Docker work.
+    #[test]
+    fn an_unrepresentable_deadline_is_rejected_by_builder_validation() {
+        let error = LndPair::builder()
+            .startup_timeout(Duration::MAX)
+            .validate()
+            .expect_err("an unrepresentable absolute deadline must fail before Docker");
+
+        assert!(matches!(error, FixtureError::InvalidConfiguration { .. }));
+    }
+
     #[derive(Clone)]
     struct FakeEngine {
         starts_together: Arc<Barrier>,
-        block_file_read: bool,
+        certificate_read: CertificateRead,
+        certificate_reads: Arc<AtomicUsize>,
         read_entered: Arc<Notify>,
+        block_logs: bool,
+        log_entered: Arc<Notify>,
         removal_delay: Duration,
         specs: Arc<Mutex<Vec<ContainerSpec>>>,
         removed: Arc<Mutex<Vec<String>>>,
@@ -888,8 +973,11 @@ mod tests {
         fn new() -> Self {
             Self {
                 starts_together: Arc::new(Barrier::new(2)),
-                block_file_read: false,
+                certificate_read: CertificateRead::Valid,
+                certificate_reads: Arc::new(AtomicUsize::new(0)),
                 read_entered: Arc::new(Notify::new()),
+                block_logs: false,
+                log_entered: Arc::new(Notify::new()),
                 removal_delay: Duration::ZERO,
                 specs: Arc::new(Mutex::new(Vec::new())),
                 removed: Arc::new(Mutex::new(Vec::new())),
@@ -937,10 +1025,22 @@ mod tests {
         }
 
         async fn logs(&self, id: &str) -> EngineResult<String> {
+            self.log_entered.notify_one();
+            if self.block_logs {
+                return std::future::pending().await;
+            }
             Ok(if id.contains("alice") {
-                "wallet_password=raw-password macaroon_hex=deadbeef".to_owned()
+                "--bitcoind.rpcpass=alice-rpc-secret\n\
+                 wallet-password=raw-password\n\
+                 cipher_seed_mnemonic=ability absent absorb abstract secret-mnemonic-tail\n\
+                 macaroon_hex=deadbeef"
+                    .to_owned()
             } else {
-                "wallet_password_hex=70617373 macaroon=raw-macaroon".to_owned()
+                "wallet_password_hex=70617373 macaroon=raw-macaroon\n\
+                 -----BEGIN PRIVATE KEY-----\n\
+                 bob-pem-private-secret\n\
+                 -----END PRIVATE KEY-----"
+                    .to_owned()
             })
         }
 
@@ -953,8 +1053,26 @@ mod tests {
             assert_eq!(path, TLS_CERT_PATH);
             assert_eq!(max_bytes, 1_048_576);
             self.read_entered.notify_one();
-            if self.block_file_read {
-                return std::future::pending().await;
+            let read = self.certificate_reads.fetch_add(1, Ordering::SeqCst);
+            match self.certificate_read {
+                CertificateRead::MissingOnce if read == 0 => {
+                    return Err(EngineError::new(
+                        "read container file",
+                        io::Error::new(io::ErrorKind::NotFound, "certificate not created yet"),
+                    ));
+                }
+                CertificateRead::Oversized => return Ok(vec![b'x'; max_bytes + 1]),
+                CertificateRead::Malformed => {
+                    return Err(EngineError::new(
+                        "read container file",
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "container file archive metadata mismatch",
+                        ),
+                    ));
+                }
+                CertificateRead::Blocked => return std::future::pending().await,
+                CertificateRead::Valid | CertificateRead::MissingOnce => {}
             }
             Ok(if id.contains("alice") {
                 b"alice certificate".to_vec()
@@ -988,10 +1106,19 @@ mod tests {
         password: Vec<u8>,
     }
 
+    #[derive(Clone, Copy)]
+    enum InfoFailure {
+        Authentication,
+        InvalidResponse,
+        UnavailableOnce,
+    }
+
     #[derive(Clone)]
     struct FakeConnector {
         initialized: Arc<Mutex<Vec<InitializationRecord>>>,
         fail_initialization: bool,
+        info_failure: Option<InfoFailure>,
+        info_calls: Arc<AtomicUsize>,
     }
 
     impl FakeConnector {
@@ -999,6 +1126,8 @@ mod tests {
             Self {
                 initialized: Arc::new(Mutex::new(Vec::new())),
                 fail_initialization: false,
+                info_failure: None,
+                info_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -1031,6 +1160,29 @@ mod tests {
         }
 
         async fn get_info(&self, _client: &Self::Client) -> Result<LndSyncStatus, LndError> {
+            let call = self.info_calls.fetch_add(1, Ordering::SeqCst);
+            match self.info_failure {
+                Some(InfoFailure::Authentication) => {
+                    return Err(LndError::Authentication {
+                        operation: "get node information".into(),
+                        detail: "fake credentials rejected".into(),
+                    });
+                }
+                Some(InfoFailure::InvalidResponse) => {
+                    return Err(LndError::InvalidResponse {
+                        operation: "get node information".into(),
+                        detail: "fake malformed chain response".into(),
+                        identifier: None,
+                    });
+                }
+                Some(InfoFailure::UnavailableOnce) if call < 2 => {
+                    return Err(LndError::Status {
+                        operation: "get node information".into(),
+                        detail: "gRPC status Unavailable".into(),
+                    });
+                }
+                None | Some(InfoFailure::UnavailableOnce) => {}
+            }
             Ok(LndSyncStatus {
                 block_height: 101,
                 network_is_regtest: true,
@@ -1119,6 +1271,8 @@ mod tests {
         let connector = FakeConnector {
             initialized: Arc::new(Mutex::new(Vec::new())),
             fail_initialization: true,
+            info_failure: None,
+            info_calls: Arc::new(AtomicUsize::new(0)),
         };
         let deadline = Deadline::new(Duration::from_secs(5)).unwrap();
 
@@ -1152,7 +1306,15 @@ mod tests {
             source.downcast_ref::<FixtureError>(),
             Some(FixtureError::Lightning(_))
         ));
-        for secret in ["raw-password", "deadbeef", "70617373", "raw-macaroon"] {
+        for secret in [
+            "alice-rpc-secret",
+            "raw-password",
+            "secret-mnemonic-tail",
+            "deadbeef",
+            "70617373",
+            "raw-macaroon",
+            "bob-pem-private-secret",
+        ] {
             assert!(!diagnostics.contains(secret), "{diagnostics}");
             assert!(!error.to_string().contains(secret), "{error}");
         }
@@ -1170,7 +1332,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_during_certificate_poll_cleans_both_lnd_containers() {
         let mut engine = FakeEngine::new();
-        engine.block_file_read = true;
+        engine.certificate_read = CertificateRead::Blocked;
         engine.removal_delay = Duration::from_millis(50);
         let task_engine = engine.clone();
         let read_entered = Arc::clone(&engine.read_entered);
@@ -1205,6 +1367,217 @@ mod tests {
         );
         assert!(removed[0].contains("bob"), "{removed:?}");
         assert!(removed[1].contains("alice"), "{removed:?}");
+    }
+
+    // Catches failure diagnostics and supervisor cleanup coordination extending the advertised
+    // whole-call clock. The fake log read never answers; advancing the one caller-owned deadline
+    // must still complete the public startup future.
+    #[tokio::test(start_paused = true)]
+    async fn whole_startup_deadline_bounds_blocked_failure_diagnostics() {
+        let mut engine = FakeEngine::new();
+        engine.block_logs = true;
+        let log_entered = Arc::clone(&engine.log_entered);
+        let mut task = tokio::spawn(async move {
+            let deadline = Deadline::new(Duration::from_secs(10)).unwrap();
+            start_lnd_nodes_under(
+                engine,
+                "shared-network".to_owned(),
+                "private-bitcoind".to_owned(),
+                ContainerImage::lnd_default(),
+                ContainerImage::lnd_default(),
+                &deadline,
+                FakeConnector {
+                    initialized: Arc::new(Mutex::new(Vec::new())),
+                    fail_initialization: true,
+                    info_failure: None,
+                    info_calls: Arc::new(AtomicUsize::new(0)),
+                },
+                FakeBitcoinTip,
+            )
+            .await
+        });
+
+        let entered = log_entered.notified();
+        tokio::pin!(entered);
+        loop {
+            tokio::select! {
+                biased;
+                () = &mut entered => break,
+                () = tokio::task::yield_now() => {}
+            }
+        }
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let completed = tokio::time::timeout(Duration::from_millis(1), &mut task).await;
+        if completed.is_err() {
+            task.abort();
+            let _ = task.await;
+            panic!("blocked failure diagnostics outlived the absolute startup deadline");
+        }
+        assert!(completed.unwrap().unwrap().is_err());
+    }
+
+    // Catches cancellation synchronously joining cleanup past the caller's remaining startup
+    // budget. Slow reverse-order removals continue in the dedicated supervisor after the cancelled
+    // public future returns.
+    #[tokio::test]
+    async fn cancellation_wait_is_bounded_while_cleanup_finishes_in_background() {
+        let mut engine = FakeEngine::new();
+        engine.certificate_read = CertificateRead::Blocked;
+        engine.removal_delay = Duration::from_millis(250);
+        let task_engine = engine.clone();
+        let read_entered = Arc::clone(&engine.read_entered);
+        let started = std::time::Instant::now();
+
+        let task = tokio::spawn(async move {
+            let deadline = Deadline::new(Duration::from_millis(30)).unwrap();
+            start_lnd_nodes_under(
+                task_engine,
+                "shared-network".to_owned(),
+                "private-bitcoind".to_owned(),
+                ContainerImage::lnd_default(),
+                ContainerImage::lnd_default(),
+                &deadline,
+                FakeConnector::succeeding(),
+                FakeBitcoinTip,
+            )
+            .await
+        });
+
+        read_entered.notified().await;
+        task.abort();
+        let cancellation = match task.await {
+            Err(error) => error,
+            Ok(_) => panic!("aborting startup must cancel it"),
+        };
+        assert!(cancellation.is_cancelled());
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "cancellation waited past the 30ms startup deadline: {:?}",
+            started.elapsed()
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if engine.removed.lock().unwrap().len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached supervisor must eventually clean both LND containers");
+        let removed = engine.removed.lock().unwrap().clone();
+        assert!(removed[0].contains("bob"), "{removed:?}");
+        assert!(removed[1].contains("alice"), "{removed:?}");
+    }
+
+    // Catches archive/path/oversize failures being mistaken for a certificate that merely has not
+    // been created yet. Both shapes must retain their engine source instead of degrading into a
+    // source-less readiness timeout.
+    #[tokio::test]
+    async fn terminal_certificate_file_failures_return_immediately() {
+        for certificate_read in [CertificateRead::Oversized, CertificateRead::Malformed] {
+            let mut engine = FakeEngine::new();
+            engine.certificate_read = certificate_read;
+            let deadline = Deadline::new(Duration::from_millis(50)).unwrap();
+
+            let error = match start_lnd_nodes_under(
+                engine.clone(),
+                "shared-network".to_owned(),
+                "private-bitcoind".to_owned(),
+                ContainerImage::lnd_default(),
+                ContainerImage::lnd_default(),
+                &deadline,
+                FakeConnector::succeeding(),
+                FakeBitcoinTip,
+            )
+            .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("an unsafe certificate file must fail startup"),
+            };
+
+            assert!(
+                matches!(error, FixtureError::Runtime { ref operation, .. } if operation == "read container file"),
+                "terminal certificate failures must retain runtime context: {error}"
+            );
+            assert_eq!(engine.certificate_reads.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    // Catches permanent GetInfo failures being rendered as retry observations until the shared
+    // clock expires. The approved bootstrap wrapper must retain the typed LND cause.
+    #[tokio::test]
+    async fn permanent_get_info_failures_retain_the_lightning_source() {
+        for info_failure in [InfoFailure::Authentication, InfoFailure::InvalidResponse] {
+            let connector = FakeConnector {
+                initialized: Arc::new(Mutex::new(Vec::new())),
+                fail_initialization: false,
+                info_failure: Some(info_failure),
+                info_calls: Arc::new(AtomicUsize::new(0)),
+            };
+            let engine = FakeEngine::new();
+            let deadline = Deadline::new(Duration::from_millis(50)).unwrap();
+
+            let error = match start_lnd_nodes_under(
+                engine,
+                "shared-network".to_owned(),
+                "private-bitcoind".to_owned(),
+                ContainerImage::lnd_default(),
+                ContainerImage::lnd_default(),
+                &deadline,
+                connector.clone(),
+                FakeBitcoinTip,
+            )
+            .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("a permanent GetInfo failure must fail startup"),
+            };
+
+            let FixtureError::Bootstrap { chain, source, .. } = &error else {
+                panic!("permanent GetInfo failures need Lightning bootstrap context: {error}")
+            };
+            assert_eq!(*chain, "Lightning");
+            assert!(matches!(
+                source.downcast_ref::<FixtureError>(),
+                Some(FixtureError::Lightning(LndError::Authentication { .. }))
+                    | Some(FixtureError::Lightning(LndError::InvalidResponse { .. }))
+            ));
+            assert_eq!(connector.info_calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    // Pins the positive side of both retry classifiers: a missing certificate and an unavailable
+    // GetInfo service are transient and can converge within the same deadline.
+    #[tokio::test]
+    async fn transient_certificate_and_get_info_failures_are_retried() {
+        let mut engine = FakeEngine::new();
+        engine.certificate_read = CertificateRead::MissingOnce;
+        let connector = FakeConnector {
+            initialized: Arc::new(Mutex::new(Vec::new())),
+            fail_initialization: false,
+            info_failure: Some(InfoFailure::UnavailableOnce),
+            info_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let deadline = Deadline::new(Duration::from_secs(5)).unwrap();
+
+        let (_, runtime) = start_lnd_nodes_under(
+            engine.clone(),
+            "shared-network".to_owned(),
+            "private-bitcoind".to_owned(),
+            ContainerImage::lnd_default(),
+            ContainerImage::lnd_default(),
+            &deadline,
+            connector.clone(),
+            FakeBitcoinTip,
+        )
+        .await
+        .expect("transient readiness failures must converge");
+
+        assert!(engine.certificate_reads.load(Ordering::SeqCst) >= 3);
+        assert!(connector.info_calls.load(Ordering::SeqCst) >= 4);
+        runtime.shutdown().await.unwrap();
     }
 
     struct DropRecorder {

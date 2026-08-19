@@ -10,8 +10,7 @@ use crate::{RPC_PASSWORD, RPC_USER};
 
 pub(crate) const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_SOURCE_BYTES: usize = 4 * 1024;
-/// Slack a caller must keep in front of a truncated buffer so a credential straddling the cut is
-/// still whole when [`redact`] runs.
+/// Extra per-link room used while flattening an error chain before its final bounded rendering.
 pub(crate) const MAX_REDACTION_CONTEXT_BYTES: usize = 32;
 const SOURCE_TRUNCATION_MARKER: &str = "[TRUNCATED]";
 const REDACTED: &str = "[REDACTED]";
@@ -30,22 +29,40 @@ const _: () = assert!(
     "a bounded source must leave room for its truncation marker",
 );
 
-/// Names a bootstrap secret follows, whatever spelling a service chooses for the rest.
+#[derive(Clone, Copy)]
+enum SecretValueKind {
+    Token,
+    Line,
+}
+
+/// Structured keys whose values are sensitive even when the runtime chooses them dynamically.
 ///
-/// Matching may start inside a longer option (`mainchainrpcpassword`, `admin_macaroon`) and an
-/// optional suffix such as `_hex` is consumed with the value. This covers raw- and hex-shaped LND
-/// markers without retaining each fixture's random secret in a global registry.
-const SECRET_ANCHORS: &[&str] = &[
-    "wallet_password",
-    "walletpassword",
-    "rpcpassword",
-    "macaroon",
+/// Matching inside composite CLI keys is intentional: `rpcpass` must match both Bitcoin Core's
+/// `-rpcpass` and LND's `--bitcoind.rpcpass`, just as `rpcpassword` matches Elements'
+/// `-mainchainrpcpassword`. Longest spellings precede their prefixes.
+const SECRET_ANCHORS: &[(&str, SecretValueKind)] = &[
+    ("cipher_seed_mnemonic", SecretValueKind::Line),
+    ("cipher-seed-mnemonic", SecretValueKind::Line),
+    ("cipher.seed.mnemonic", SecretValueKind::Line),
+    ("cipherseedmnemonic", SecretValueKind::Line),
+    ("seed_mnemonic", SecretValueKind::Line),
+    ("seed-mnemonic", SecretValueKind::Line),
+    ("seed.mnemonic", SecretValueKind::Line),
+    ("seedmnemonic", SecretValueKind::Line),
+    ("cipher_seed", SecretValueKind::Line),
+    ("cipher-seed", SecretValueKind::Line),
+    ("cipher.seed", SecretValueKind::Line),
+    ("cipherseed", SecretValueKind::Line),
+    ("wallet_password", SecretValueKind::Token),
+    ("wallet-password", SecretValueKind::Token),
+    ("wallet.password", SecretValueKind::Token),
+    ("walletpassword", SecretValueKind::Token),
+    ("rpcpassword", SecretValueKind::Token),
+    ("rpcpass", SecretValueKind::Token),
+    ("macaroon", SecretValueKind::Token),
+    ("mnemonic", SecretValueKind::Line),
 ];
-/// Bytes that may sit between the anchor and the value: `=`, `:`, whitespace, and quotes cover
-/// command-line arguments, JSON, and prose alike.
-const ANCHOR_SEPARATORS: &[u8] = b"=: \t\"'";
-/// Bytes that end the redacted value.
-const VALUE_TERMINATORS: &[u8] = b" \t\r\n\"',}])";
+const TOKEN_VALUE_TERMINATORS: &[u8] = b" \t\r\n\"',}])";
 
 /// Replaces every spelling of the fixture credentials this crate can observe.
 ///
@@ -61,7 +78,8 @@ const VALUE_TERMINATORS: &[u8] = b" \t\r\n\"',}])";
 /// has never seen. Redaction never shortens its input, which is what lets a caller rely on the
 /// boundary slack still being present afterwards.
 pub(crate) fn redact(value: &str) -> String {
-    let mut redacted = redact_anchored_values(value);
+    let private_keys_redacted = redact_private_key_blocks(value);
+    let mut redacted = redact_anchored_values(&private_keys_redacted);
 
     for (pattern, replacement) in redaction_patterns() {
         redacted = redacted.replace(&pattern, &replacement);
@@ -70,49 +88,100 @@ pub(crate) fn redact(value: &str) -> String {
     redacted
 }
 
-/// Redacts whatever value follows the password's name, case- and separator-insensitively.
+/// Redacts values in assignment, JSON-like, or CLI-space form.
 ///
-/// Any token after the anchor is replaced, not just a known password: a value this crate cannot
-/// predict is exactly the one worth hiding. The cost is that prose like `rpcpassword was rejected`
-/// loses its next word, which is an acceptable trade on an error path.
+/// Token secrets stop at a structural delimiter. Seed and mnemonic values consume their complete
+/// line because their whitespace-separated words are collectively the secret. An anchor without a
+/// value separator remains ordinary prose.
 fn redact_anchored_values(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut redacted = String::with_capacity(value.len());
     let mut index = 0;
 
     while index < bytes.len() {
-        let anchor = SECRET_ANCHORS.iter().find_map(|anchor| {
+        let anchor = SECRET_ANCHORS.iter().find_map(|(anchor, kind)| {
             let anchor = anchor.as_bytes();
             (bytes.len() - index >= anchor.len()
                 && bytes[index..index + anchor.len()].eq_ignore_ascii_case(anchor))
-            .then_some(anchor)
+            .then_some((anchor, *kind))
         });
-        let Some(anchor) = anchor else {
-            // Advancing by whole characters keeps every index a UTF-8 boundary.
-            let character = value[index..]
-                .chars()
-                .next()
-                .expect("a byte index inside the value starts a character");
-            redacted.push(character);
-            index += character.len_utf8();
+        let Some((anchor, kind)) = anchor else {
+            push_next_character(value, &mut redacted, &mut index);
             continue;
         };
 
-        // The anchor keeps the casing the service used; only the value is replaced.
-        redacted.push_str(&value[index..index + anchor.len()]);
-        index += anchor.len();
-        while index < bytes.len() && ANCHOR_SEPARATORS.contains(&bytes[index]) {
-            redacted.push(char::from(bytes[index]));
-            index += 1;
+        let anchor_start = index;
+        let mut cursor = index + anchor.len();
+        for suffix in [b"_hex".as_slice(), b"-hex", b".hex"] {
+            if bytes.len() - cursor >= suffix.len()
+                && bytes[cursor..cursor + suffix.len()].eq_ignore_ascii_case(suffix)
+            {
+                cursor += suffix.len();
+                break;
+            }
+        }
+        if bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b'\'' | b'"'))
+        {
+            cursor += 1;
         }
 
-        let value_start = index;
-        while index < bytes.len() && !VALUE_TERMINATORS.contains(&bytes[index]) {
-            index += 1;
+        let whitespace_start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace)
+            && !bytes
+                .get(cursor)
+                .is_some_and(|byte| matches!(byte, b'\r' | b'\n'))
+        {
+            cursor += 1;
         }
-        if index == value_start {
+        let delimiter = bytes.get(cursor).copied();
+        let structured = matches!(delimiter, Some(b'=' | b':'));
+        if structured {
+            cursor += 1;
+        } else if cursor == whitespace_start
+            || !space_form_is_structured(value, anchor_start, cursor)
+        {
+            push_next_character(value, &mut redacted, &mut index);
             continue;
         }
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            cursor += 1;
+        }
+        if bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b'\'' | b'"'))
+        {
+            cursor += 1;
+        }
+
+        let value_start = cursor;
+        index = match kind {
+            SecretValueKind::Token => {
+                while index < value_start {
+                    index += 1;
+                }
+                while index < bytes.len() && !TOKEN_VALUE_TERMINATORS.contains(&bytes[index]) {
+                    index += 1;
+                }
+                index
+            }
+            SecretValueKind::Line => {
+                while cursor < bytes.len() && !matches!(bytes[cursor], b'\r' | b'\n') {
+                    cursor += 1;
+                }
+                cursor
+            }
+        };
+        if index == value_start {
+            redacted.push_str(&value[anchor_start..index]);
+            continue;
+        }
+
+        redacted.push_str(&value[anchor_start..value_start]);
 
         // Redaction must be idempotent: callers re-render already-redacted text, and replacing the
         // marker again would both grow it without bound and mangle it.
@@ -122,14 +191,79 @@ fn redact_anchored_values(value: &str) -> String {
             continue;
         }
 
-        redacted.push_str(REDACTED);
-        // Padded so redaction can only lengthen its input, never shorten it.
-        for _ in REDACTED.len()..index - value_start {
-            redacted.push('*');
-        }
+        push_redaction(&mut redacted, index - value_start, REDACTED);
     }
 
     redacted
+}
+
+fn push_next_character(value: &str, output: &mut String, index: &mut usize) {
+    let character = value[*index..]
+        .chars()
+        .next()
+        .expect("a byte index inside the value starts a character");
+    output.push(character);
+    *index += character.len_utf8();
+}
+
+fn space_form_is_structured(value: &str, anchor_start: usize, value_start: usize) -> bool {
+    let line_start = value[..anchor_start]
+        .rfind(['\r', '\n'])
+        .map_or(0, |at| at + 1);
+    let cli_key = value[line_start..anchor_start].contains('-');
+    let token_end = value[value_start..]
+        .find(|character: char| character.is_ascii_whitespace())
+        .map_or(value.len(), |length| value_start + length);
+    let numeric_value = value[value_start..token_end]
+        .bytes()
+        .all(|byte| byte.is_ascii_digit());
+    cli_key || numeric_value
+}
+
+fn redact_private_key_blocks(value: &str) -> String {
+    const BEGIN: &str = "-----BEGIN ";
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+
+    while let Some(begin) = find_ascii_case_insensitive(value, cursor, BEGIN) {
+        let label_start = begin + BEGIN.len();
+        let Some(label_length) = value[label_start..].find("-----") else {
+            break;
+        };
+        let label_end = label_start + label_length;
+        let label = &value[label_start..label_end];
+        if !label.to_ascii_uppercase().contains("PRIVATE KEY") {
+            output.push_str(&value[cursor..label_end]);
+            cursor = label_end;
+            continue;
+        }
+
+        output.push_str(&value[cursor..begin]);
+        let end_marker = format!("-----END {label}-----");
+        let block_end = find_ascii_case_insensitive(value, label_end + 5, &end_marker)
+            .map_or(value.len(), |end| end + end_marker.len());
+        push_redaction(&mut output, block_end - begin, "[REDACTED::PRIVATE KEY]");
+        cursor = block_end;
+    }
+
+    output.push_str(&value[cursor..]);
+    output
+}
+
+fn find_ascii_case_insensitive(value: &str, start: usize, needle: &str) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let needle = needle.as_bytes();
+    bytes[start..]
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+        .map(|relative| start + relative)
+}
+
+fn push_redaction(output: &mut String, original_length: usize, marker: &str) {
+    output.push_str(marker);
+    for _ in marker.len()..original_length {
+        output.push('*');
+    }
 }
 
 /// The fixed pattern/replacement pairs applied by [`redact`], longest-matching spelling first.
@@ -152,7 +286,7 @@ fn redaction_patterns() -> [(String, String); 3] {
 fn longest_matchable_sequence() -> usize {
     let anchored = SECRET_ANCHORS
         .iter()
-        .map(|anchor| anchor.len() + 2 + RPC_PASSWORD.len())
+        .map(|(anchor, _)| anchor.len() + 2 + RPC_PASSWORD.len())
         .max()
         .unwrap_or(0);
 
@@ -166,24 +300,12 @@ fn longest_matchable_sequence() -> usize {
 
 /// Redacts, then keeps the terminal bytes: a container log's meaning is its final output.
 pub(crate) fn redacted_tail(value: &str) -> String {
-    utf8_tail(
-        &redact(&utf8_tail(
-            value,
-            MAX_DIAGNOSTIC_BYTES + MAX_REDACTION_CONTEXT_BYTES,
-        )),
-        MAX_DIAGNOSTIC_BYTES,
-    )
+    utf8_tail(&redact(value), MAX_DIAGNOSTIC_BYTES)
 }
 
 /// Redacts, then keeps the leading bytes: an error chain's meaning is its classification.
 pub(crate) fn redacted_head(value: &str, maximum_bytes: usize) -> String {
-    utf8_head(
-        &redact(&utf8_head(
-            value,
-            maximum_bytes + MAX_REDACTION_CONTEXT_BYTES,
-        )),
-        maximum_bytes,
-    )
+    utf8_head(&redact(value), maximum_bytes)
 }
 
 pub(crate) fn join_diagnostics(existing: &str, addition: &str) -> String {
@@ -262,7 +384,7 @@ pub(crate) fn redacted_source(
 /// force an unbounded intermediate allocation.
 fn flattened_chain(error: &(dyn std::error::Error + 'static)) -> String {
     let link_bound = MAX_SOURCE_BYTES + MAX_REDACTION_CONTEXT_BYTES;
-    let mut rendered = utf8_head(&error.to_string(), link_bound);
+    let mut rendered = redacted_head(&error.to_string(), link_bound);
     let mut cause = error.source();
 
     while let Some(source) = cause {
@@ -270,7 +392,7 @@ fn flattened_chain(error: &(dyn std::error::Error + 'static)) -> String {
             break;
         }
         rendered.push_str(": ");
-        rendered.push_str(&utf8_head(&source.to_string(), link_bound));
+        rendered.push_str(&redacted_head(&source.to_string(), link_bound));
         cause = source.source();
     }
 
@@ -454,6 +576,49 @@ mod tests {
         }
     }
 
+    // Catches the exact Task 7 log shapes that token-only redaction missed: bitcoind's real
+    // `rpcpass` flag, wallet-password punctuation variants, a multiword mnemonic line, and a PEM
+    // private-key block. The long mnemonic also begins before the retained tail window, proving
+    // redaction happens across the complete input before truncation.
+    #[test]
+    fn structured_lnd_secrets_and_private_key_blocks_are_redacted_before_truncation() {
+        let mnemonic = "mnemonic-secret ".repeat(2 * 1024);
+        let diagnostic = format!(
+            "--bitcoind.rpcpass=rpc-pass-secret\n\
+             wallet-password: wallet-hyphen-secret\n\
+             wallet.password=wallet-dot-secret\n\
+             cipher_seed_mnemonic={mnemonic}\n\
+             -----BEGIN EC PRIVATE KEY-----\n\
+             pem-private-body-secret\n\
+             -----END EC PRIVATE KEY-----\n\
+             terminal classification"
+        );
+
+        for rendered in [redact(&diagnostic), redacted_tail(&diagnostic)] {
+            for secret in [
+                "rpc-pass-secret",
+                "wallet-hyphen-secret",
+                "wallet-dot-secret",
+                "mnemonic-secret",
+                "pem-private-body-secret",
+            ] {
+                assert!(
+                    !rendered.contains(secret),
+                    "{secret} leaked in {rendered:.256}"
+                );
+            }
+            assert!(rendered.contains("terminal classification"));
+            assert_eq!(redact(&rendered), rendered, "redaction must be idempotent");
+        }
+
+        let prose = "wallet password validation failed while seed synchronization was pending";
+        assert_eq!(
+            redact(prose),
+            prose,
+            "unstructured prose is not a secret value"
+        );
+    }
+
     // Catches a regression that makes redaction non-idempotent. Callers re-render already-redacted
     // text, so a second pass that grows or mangles the marker would shift every bounded tail.
     #[test]
@@ -463,6 +628,9 @@ mod tests {
             "{\"rpcpassword\": \"123\"}",
             "rpcpassword: 123, rpcuser: admin1",
             "Authorization: Basic YWRtaW4xOjEyMw==",
+            "--bitcoind.rpcpass=rpc-pass-secret",
+            "cipher_seed_mnemonic=ability absent absorb abstract",
+            "-----BEGIN PRIVATE KEY-----\npem-private-body-secret\n-----END PRIVATE KEY-----",
         ] {
             let once = redact(spelling);
             let twice = redact(&once);
