@@ -10,19 +10,11 @@
 | `nigiri-rs-fixtures` | Ephemeral Docker-backed Bitcoin, Liquid, peg, and ready-to-pay Lightning fixtures. |
 | `nigiri-rs-macros` | The `#[nigiri_rs::test]` fixture attribute. |
 
-The bare `nigiri-*` names on crates.io are deliberately unused: Nigiri is
-[Vulpem Ventures'](https://github.com/vulpemventures/nigiri) project, and this is an unaffiliated
-Rust port.
+Attention: Nigiri is a [Vulpem Ventures'](https://github.com/vulpemventures/nigiri) project, and this is an unaffiliated Rust port.
 
 `nigiri-rs` provides typed asynchronous Bitcoin, Liquid, and Lightning clients plus optional
 ephemeral regtest fixtures. A host-owned [Nigiri](https://github.com/vulpemventures/nigiri)
 environment and a host-owned LND node are compatible setups, not the only architecture.
-
-`nigiri-rs-core` 0.4.0 sends node requests directly over JSON-RPC. It retains the public,
-type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core
-response-type re-export. The curated network APIs retain their stronger native contracts.
-
-Version 0.2.0 was the breaking release that introduced network marker types selecting native `bitcoin` or `elements` identifiers, addresses, hashes, and crate-owned Esplora response records at compile time.
 
 ## Documentation
 
