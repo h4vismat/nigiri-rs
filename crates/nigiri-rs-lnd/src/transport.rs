@@ -4,9 +4,20 @@ use tokio::sync::OnceCell;
 use tonic::{
     Code, Request, Response, Status,
     metadata::AsciiMetadataValue,
-    transport::{Certificate, Channel, ClientTlsConfig, Endpoint},
+    transport::{Channel, ClientTlsConfig, Endpoint},
 };
 use url::Host;
+
+use rustls::{
+    CertificateError, DigitallySignedStruct, Error as RustlsError, SignatureScheme,
+    client::{
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        verify_server_name,
+    },
+    crypto::WebPkiSupportedAlgorithms,
+    pki_types::{CertificateDer, ServerName, UnixTime, pem::PemObject},
+    server::ParsedCertificate,
+};
 
 use crate::{LndConfig, LndError, error::bounded};
 
@@ -210,12 +221,117 @@ fn tls_endpoint(config: &LndConfig) -> Result<Endpoint, LndError> {
     };
     let endpoint = Endpoint::from_shared(config.endpoint().as_str().to_owned())
         .map_err(invalid_transport_configuration)?;
-    let tls = ClientTlsConfig::new()
-        .ca_certificate(Certificate::from_pem(config.certificate()))
-        .domain_name(domain);
+    let verifier = Arc::new(PinnedServerCertificate::new(config.certificate())?);
+    let tls = ClientTlsConfig::new().domain_name(domain);
     endpoint
-        .tls_config(tls)
+        .tls_config_with_verifier(tls, verifier)
         .map_err(invalid_transport_configuration)
+}
+
+/// LND presents the same self-signed, CA=true certificate that it writes to `tls.cert`. Treat the
+/// caller-provided certificate as that one exact server identity instead of reinterpreting it as a
+/// general-purpose issuing CA. CertificateVerify signatures still use rustls' ring algorithms.
+struct PinnedServerCertificate {
+    identity: CertificateDer<'static>,
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl PinnedServerCertificate {
+    fn new(pem: &[u8]) -> Result<Self, LndError> {
+        let identity = parse_single_certificate(pem).map_err(invalid_transport_configuration)?;
+        ParsedCertificate::try_from(&identity).map_err(invalid_transport_configuration)?;
+        let algorithms = rustls::crypto::ring::default_provider().signature_verification_algorithms;
+        Ok(Self {
+            identity,
+            algorithms,
+        })
+    }
+
+    fn verify_identity(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+    ) -> Result<(), RustlsError> {
+        if intermediates.is_empty() && end_entity.as_ref() == self.identity.as_ref() {
+            Ok(())
+        } else {
+            Err(CertificateError::UnknownIssuer.into())
+        }
+    }
+}
+
+impl fmt::Debug for PinnedServerCertificate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PinnedServerCertificate")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ServerCertVerifier for PinnedServerCertificate {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        self.verify_identity(end_entity, intermediates)?;
+        let parsed = ParsedCertificate::try_from(end_entity)?;
+        verify_server_name(&parsed, server_name)?;
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.verify_identity(certificate, &[])?;
+        rustls::crypto::verify_tls12_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.verify_identity(certificate, &[])?;
+        rustls::crypto::verify_tls13_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+fn parse_single_certificate(pem: &[u8]) -> Result<CertificateDer<'static>, std::io::Error> {
+    const BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
+    const END: &[u8] = b"-----END CERTIFICATE-----";
+
+    let pem = pem.trim_ascii();
+    let Some(body) = pem.strip_prefix(BEGIN) else {
+        return Err(invalid_certificate_pin());
+    };
+    let Some(end_offset) = body.windows(END.len()).position(|window| window == END) else {
+        return Err(invalid_certificate_pin());
+    };
+    let trailing = &body[end_offset + END.len()..];
+    if !trailing.trim_ascii().is_empty() {
+        return Err(invalid_certificate_pin());
+    }
+
+    CertificateDer::from_pem_slice(pem).map_err(|_| invalid_certificate_pin())
+}
+
+fn invalid_certificate_pin() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "TLS certificate must contain exactly one PEM certificate",
+    )
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {
@@ -256,7 +372,11 @@ mod tests {
         time::Duration,
     };
 
-    use rcgen::CertifiedKey;
+    use rcgen::{BasicConstraints, CertificateParams, CertifiedKey, IsCa, KeyPair};
+    use rustls::{
+        CertificateError, Error as RustlsError,
+        pki_types::{CertificateDer, pem::PemObject},
+    };
     use tokio::sync::{Mutex, oneshot};
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{
@@ -264,7 +384,10 @@ mod tests {
         transport::{Identity, Server, ServerTlsConfig},
     };
 
-    use super::{authenticated_request, bounded_request, map_status, unauthenticated};
+    use super::{
+        PinnedServerCertificate, authenticated_request, bounded_request, map_status,
+        unauthenticated,
+    };
     use crate::{LndClient, LndConfig, LndError};
 
     use super::harness::{
@@ -327,8 +450,43 @@ mod tests {
             install_test_crypto_provider();
             let CertifiedKey { cert, signing_key } =
                 rcgen::generate_simple_self_signed(vec![certificate_name.into()]).unwrap();
-            let certificate = cert.pem().into_bytes();
-            let identity = Identity::from_pem(&certificate, signing_key.serialize_pem());
+            Self::start_with_identity(
+                bind_address,
+                endpoint_host,
+                cert.pem().into_bytes(),
+                signing_key.serialize_pem(),
+                delay,
+                status,
+            )
+            .await
+        }
+
+        async fn start_with_ca_certificate() -> Self {
+            install_test_crypto_provider();
+            let mut params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            let signing_key = KeyPair::generate().unwrap();
+            let certificate = params.self_signed(&signing_key).unwrap();
+            Self::start_with_identity(
+                "127.0.0.1:0",
+                "localhost",
+                certificate.pem().into_bytes(),
+                signing_key.serialize_pem(),
+                Duration::ZERO,
+                None,
+            )
+            .await
+        }
+
+        async fn start_with_identity(
+            bind_address: &str,
+            endpoint_host: &str,
+            certificate: Vec<u8>,
+            private_key: String,
+            delay: Duration,
+            status: Option<Status>,
+        ) -> Self {
+            let identity = Identity::from_pem(&certificate, private_key);
             let listener = tokio::net::TcpListener::bind(bind_address).await.unwrap();
             let endpoint = format!(
                 "https://{endpoint_host}:{}",
@@ -493,6 +651,37 @@ mod tests {
         );
     }
 
+    // LND generates one self-signed certificate with CA=true and presents that same certificate
+    // as the server identity. WebPKI correctly refuses to reinterpret it as an ordinary leaf, but
+    // the LND client contract is an exact certificate pin: the configured DER must be precisely
+    // the identity the server presents. A different pin must still fail before application data.
+    #[tokio::test]
+    async fn exact_pin_accepts_lnd_style_ca_identity_and_rejects_a_different_certificate() {
+        let server = TestServer::start_with_ca_certificate().await;
+
+        let response = probe_with_transport(server.config(Duration::from_secs(1)))
+            .await
+            .expect("the exact configured LND certificate must authenticate its server identity");
+        assert_eq!(response, "ready");
+
+        let different_certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .unwrap()
+            .cert
+            .pem()
+            .into_bytes();
+        let wrong_pin = LndConfig::new(
+            &server.endpoint,
+            different_certificate,
+            MACAROON.to_vec(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let error = probe_with_transport(wrong_pin)
+            .await
+            .expect_err("a server certificate different from the configured pin must be rejected");
+        assert!(matches!(error, LndError::Transport { .. }));
+    }
+
     #[tokio::test]
     async fn ipv4_ip_san_is_verified_without_dns_sni() {
         let server = TestServer::start_on(
@@ -571,6 +760,56 @@ mod tests {
         let error = LndClient::with_config(config).unwrap_err();
 
         assert_source_chain_is_redacted(&error, &[PEM_MARKER, &certificate, MACAROON_HEX]);
+    }
+
+    #[test]
+    fn certificate_pin_rejects_multiple_pem_identities() {
+        let first = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .unwrap()
+            .cert
+            .pem();
+        let second = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .unwrap()
+            .cert
+            .pem();
+        let certificate = format!("{first}{second}");
+        let config = LndConfig::new(
+            "https://localhost:10009",
+            certificate.as_bytes().to_vec(),
+            MACAROON.to_vec(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let error = LndClient::with_config(config)
+            .expect_err("an exact server identity pin must contain one certificate");
+
+        assert!(matches!(error, LndError::Transport { .. }));
+        assert_source_chain_is_redacted(&error, &[&first, &second, &certificate]);
+    }
+
+    #[test]
+    fn exact_pin_rejects_a_presented_certificate_chain() {
+        let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .unwrap()
+            .cert
+            .pem();
+        let intermediate = rcgen::generate_simple_self_signed(vec!["intermediate".into()])
+            .unwrap()
+            .cert
+            .pem();
+        let verifier = PinnedServerCertificate::new(identity.as_bytes()).unwrap();
+        let end_entity = CertificateDer::from_pem_slice(identity.as_bytes()).unwrap();
+        let intermediates = [CertificateDer::from_pem_slice(intermediate.as_bytes()).unwrap()];
+
+        let error = verifier
+            .verify_identity(&end_entity, &intermediates)
+            .expect_err("an exact identity pin must reject unexpected intermediates");
+
+        assert!(matches!(
+            error,
+            RustlsError::InvalidCertificate(CertificateError::UnknownIssuer)
+        ));
     }
 
     #[tokio::test]

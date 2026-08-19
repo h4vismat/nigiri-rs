@@ -11,6 +11,7 @@ repository = "https://github.com/h4vismat/nigiri-rs"
 bitcoin = "0.32.7"
 lightning-invoice = "0.34.1"
 prost = "0.14.1"
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std"] }
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["fs", "io-util", "sync", "time"] }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
@@ -19,7 +20,6 @@ url = "2.5.8"
 
 [dev-dependencies]
 rcgen = "0.14.5"
-rustls = { version = "0.23.37", default-features = false, features = ["ring", "std"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
 
 [build-dependencies]
