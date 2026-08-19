@@ -50,6 +50,14 @@ async fn pair_reports_one_funded_active_channel_on_the_same_regtest_tip() -> Res
         !funding_output.is_null(),
         "the exposed channel point must name an unspent funding output"
     );
+    let confirmations = funding_output
+        .get("confirmations")
+        .and_then(Value::as_u64)
+        .expect("gettxout must report the funding output's confirmation count");
+    assert!(
+        confirmations >= 6,
+        "the fixture must mine at least six confirmations for its funding transaction"
+    );
 
     pair.shutdown().await?;
     Ok(())

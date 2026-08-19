@@ -1,6 +1,6 @@
 //! Two stateless-wallet LND nodes sharing one synchronized Bitcoin fixture.
 
-use std::{fmt, future::Future, time::Duration};
+use std::{collections::BTreeSet, fmt, future::Future, time::Duration};
 
 use bitcoin::{
     Address, Amount, Network, OutPoint, Txid, address::NetworkUnchecked, hashes::sha256,
@@ -336,16 +336,12 @@ impl LndPairBuilder {
         R: LndPairEnvironment,
         H: Future<Output = ()>,
     {
-        self.validate()?;
+        let allocation = self.validate()?;
         let deadline = Deadline::new(self.startup_timeout)?;
         let bitcoind_image = self.bitcoind_image.clone();
         let bitcoin_electrs_image = self.bitcoin_electrs_image.clone();
         let alice_image = self.alice_image.clone();
         let bob_image = self.bob_image.clone();
-        let allocation = ChannelAllocation {
-            capacity: self.channel_capacity,
-            push: self.push_amount,
-        };
         let coordinator_deadline = deadline.clone();
         let work_deadline = deadline.clone();
         let coordinated = coordinate_startup(
@@ -430,7 +426,7 @@ impl LndPairBuilder {
             .await
     }
 
-    fn validate(&self) -> Result<(), FixtureError> {
+    fn validate(&self) -> Result<ChannelAllocation, FixtureError> {
         Deadline::validate_duration(self.startup_timeout)?;
         for image in [
             &self.bitcoind_image,
@@ -443,6 +439,18 @@ impl LndPairBuilder {
 
         let capacity = self.channel_capacity.as_u64();
         let push = self.push_amount.as_u64();
+        let funding_amount = capacity
+            .checked_add(FUNDING_RESERVE.as_u64())
+            .ok_or_else(|| invalid("LND channel funding amount overflowed"))?;
+        i64::try_from(capacity)
+            .map_err(|_| invalid("LND channel capacity exceeds the signed request range"))?;
+        i64::try_from(push)
+            .map_err(|_| invalid("LND channel push amount exceeds the signed request range"))?;
+        if funding_amount > Amount::MAX_MONEY.to_sat() {
+            return Err(invalid(
+                "LND wallet funding amount exceeds Bitcoin's monetary range",
+            ));
+        }
         if push == 0 {
             return Err(invalid("LND channel push amount must be greater than zero"));
         }
@@ -464,7 +472,11 @@ impl LndPairBuilder {
                 "LND channel must give Bob at least 100000 satoshis",
             ));
         }
-        Ok(())
+        Ok(ChannelAllocation {
+            capacity: self.channel_capacity,
+            push: self.push_amount,
+            funding_amount: Sats::new(funding_amount),
+        })
     }
 }
 
@@ -502,6 +514,7 @@ struct StartedLndNodes<Client> {
 struct ChannelAllocation {
     capacity: Sats,
     push: Sats,
+    funding_amount: Sats,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -745,7 +758,9 @@ trait BitcoinTip: Clone + Send + Sync + 'static {
         address: &str,
         amount: Sats,
     ) -> impl Future<Output = Result<(), FixtureError>> + Send;
-    fn mempool_has_transaction(&self) -> impl Future<Output = Result<bool, FixtureError>> + Send;
+    fn mempool_transactions(
+        &self,
+    ) -> impl Future<Output = Result<BTreeSet<Txid>, FixtureError>> + Send;
     fn mine_blocks(&self, blocks: u64) -> impl Future<Output = Result<(), FixtureError>> + Send;
 }
 
@@ -763,10 +778,10 @@ impl BitcoinTip for NigiriClient<Bitcoin> {
             .map_err(FixtureError::Client)
     }
 
-    async fn mempool_has_transaction(&self) -> Result<bool, FixtureError> {
+    async fn mempool_transactions(&self) -> Result<BTreeSet<Txid>, FixtureError> {
         self.rpc::<Vec<Txid>, _>("getrawmempool", ())
             .await
-            .map(|transactions| !transactions.is_empty())
+            .map(|transactions| transactions.into_iter().collect())
             .map_err(FixtureError::Client)
     }
 
@@ -1165,17 +1180,11 @@ async fn bootstrap_ready_channel<C: LndNodeConnector, B: BitcoinTip>(
         connector.new_address(alice),
     )
     .await?;
-    let funding_amount = allocation
-        .capacity
-        .as_u64()
-        .checked_add(FUNDING_RESERVE.as_u64())
-        .map(Sats::new)
-        .ok_or_else(|| invalid("LND channel funding amount overflowed"))?;
     deadline
         .run(
             "lightning-channel",
             "fund Alice on-chain wallet and mine its confirmation",
-            bitcoin.fund_address(&address, funding_amount),
+            bitcoin.fund_address(&address, allocation.funding_amount),
         )
         .await??;
     wait_for_confirmed_balance(connector, alice, allocation.capacity, deadline).await?;
@@ -1315,44 +1324,52 @@ async fn open_and_confirm_channel<C: LndNodeConnector, B: BitcoinTip>(
     request: OpenChannelRequest,
     deadline: &Deadline,
 ) -> Result<OutPoint, FixtureError> {
+    let baseline = deadline
+        .run(
+            "lightning-channel",
+            "capture mempool before opening Alice-to-Bob channel",
+            bitcoin.mempool_transactions(),
+        )
+        .await??;
     let open = deadline.run(
         "lightning-channel",
         "open Alice-to-Bob channel",
         connector.open_channel(alice, request),
     );
     tokio::pin!(open);
+    let mut opened = None;
     let mut observation = "waiting for the channel funding transaction in mempool".to_owned();
 
-    loop {
-        let has_funding_transaction = {
+    let trigger_transactions = loop {
+        let current = {
             let mempool = deadline.run(
                 "lightning-channel",
                 &observation,
-                bitcoin.mempool_has_transaction(),
+                bitcoin.mempool_transactions(),
             );
             tokio::pin!(mempool);
             tokio::select! {
                 biased;
-                result = &mut open => return flatten_lnd_operation("open channel", result),
-                result = &mut mempool => result??,
+                result = &mut open, if opened.is_none() => {
+                    opened = Some(flatten_lnd_operation("open channel", result)?);
+                    None
+                },
+                result = &mut mempool => Some(result??),
             }
         };
-        if has_funding_transaction {
-            break;
+        let Some(current) = current else {
+            continue;
+        };
+        let newly_observed = current
+            .difference(&baseline)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !newly_observed.is_empty() {
+            break newly_observed;
         }
         observation = "channel funding transaction is not yet in mempool".to_owned();
-        let sleep = deadline.run(
-            "lightning-channel",
-            &observation,
-            tokio::time::sleep(RETRY_DELAY),
-        );
-        tokio::pin!(sleep);
-        tokio::select! {
-            biased;
-            result = &mut open => return flatten_lnd_operation("open channel", result),
-            result = &mut sleep => result?,
-        }
-    }
+        wait_before_retry(deadline, "lightning-channel", &observation).await?;
+    };
 
     deadline
         .run(
@@ -1361,7 +1378,24 @@ async fn open_and_confirm_channel<C: LndNodeConnector, B: BitcoinTip>(
             bitcoin.mine_blocks(CHANNEL_CONFIRMATIONS),
         )
         .await??;
-    flatten_lnd_operation("open channel", open.await)
+    let channel_point = match opened {
+        Some(channel_point) => channel_point,
+        None => flatten_lnd_operation("open channel", open.await)?,
+    };
+    // This fixture owns an isolated regtest mempool. If callers inject simultaneous transactions,
+    // the trigger set may contain more than one txid, but the final funding txid must still be one
+    // of the transactions whose appearance caused this fixture to mine exactly once.
+    if !trigger_transactions.contains(&channel_point.txid) {
+        return Err(lightning_bootstrap_error(
+            "verify channel funding transaction",
+            LndError::InvalidResponse {
+                operation: "open channel".into(),
+                detail: "funding transaction was not observed before confirmation mining".into(),
+                identifier: Some(channel_point.txid.to_string()),
+            },
+        ));
+    }
+    Ok(channel_point)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1965,7 +1999,7 @@ fn fill_password(password: &mut [u8; 32]) -> Result<(), FixtureError> {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{BTreeSet, HashMap},
         io,
         sync::{
             Arc, Mutex,
@@ -1988,7 +2022,8 @@ mod tests {
     use super::{
         BitcoinTip, ChannelAllocation, ChannelReadiness, LndHandles, LndNodeConnector, LndPair,
         LndPairEnvironment, LndSyncStatus, PaymentReadiness, initialize_lnd_clients,
-        prove_reverse_readiness_with_retry, start_lnd_nodes_under, wait_for_lnd_sync,
+        open_and_confirm_channel, prove_reverse_readiness_with_retry, start_lnd_nodes_under,
+        wait_for_lnd_sync,
     };
     use crate::{
         ContainerImage, FixtureError,
@@ -2076,6 +2111,36 @@ mod tests {
                 .expect_err("invalid LND pair input must fail before Docker is contacted");
             assert!(matches!(error, FixtureError::InvalidConfiguration { .. }));
         }
+    }
+
+    // Catches capacity arithmetic, LND signed-wire, and Bitcoin MoneyRange checks being deferred
+    // until after the backing fixture has crossed its Docker connection boundary.
+    #[tokio::test]
+    async fn numeric_channel_inputs_fail_before_the_backing_environment_connects() {
+        let docker_connects = Arc::new(AtomicUsize::new(0));
+        let environment = CountingPreflightEnvironment {
+            docker_connects: Arc::clone(&docker_connects),
+        };
+        let rejected = [
+            LndPair::builder().channel_capacity(Sats::new(18_446_744_073_709_551_615)),
+            LndPair::builder().channel_capacity(Sats::new(9_223_372_036_854_775_808)),
+            LndPair::builder().channel_capacity(Sats::new(18_446_744_073_709_351_616)),
+            LndPair::builder().channel_capacity(Sats::new(2_099_999_999_800_001)),
+        ];
+
+        for builder in rejected {
+            let error = match builder.start_with_environment(environment.clone()).await {
+                Err(error) => error,
+                Ok(_) => panic!("invalid numeric inputs must fail in builder preflight"),
+            };
+            assert!(matches!(error, FixtureError::InvalidConfiguration { .. }));
+        }
+
+        assert_eq!(
+            docker_connects.load(Ordering::SeqCst),
+            0,
+            "numeric caller errors must not cross the backing Docker boundary"
+        );
     }
 
     // Unlike image and amount checks, this exercises the exact absolute-Instant representation
@@ -2273,6 +2338,8 @@ mod tests {
         payment_attempts: Arc<AtomicUsize>,
         payment_failures_remaining: Arc<AtomicUsize>,
         payment_failure_reason: Option<&'static str>,
+        open_after_mining: Option<Arc<Notify>>,
+        open_channel_point: OutPoint,
     }
 
     impl FakeConnector {
@@ -2287,6 +2354,8 @@ mod tests {
                 payment_attempts: Arc::new(AtomicUsize::new(0)),
                 payment_failures_remaining: Arc::new(AtomicUsize::new(0)),
                 payment_failure_reason: None,
+                open_after_mining: None,
+                open_channel_point: fake_channel_point(),
             }
         }
     }
@@ -2465,7 +2534,10 @@ mod tests {
             _client: &Self::Client,
             _request: OpenChannelRequest,
         ) -> Result<OutPoint, LndError> {
-            Ok(fake_channel_point())
+            if let Some(mined) = &self.open_after_mining {
+                mined.notified().await;
+            }
+            Ok(self.open_channel_point)
         }
 
         async fn channel_readiness(
@@ -2545,11 +2617,105 @@ mod tests {
         ChannelAllocation {
             capacity: Sats::new(2_000_000),
             push: Sats::new(1_000_000),
+            funding_amount: Sats::new(2_200_000),
         }
     }
 
+    #[tokio::test]
+    async fn pending_channel_mines_exactly_six_blocks_for_its_observed_funding_txid() {
+        let observed_txid = Txid::from_byte_array([4; 32]);
+        let channel_point = OutPoint::new(observed_txid, 1);
+        let mined = Arc::new(Notify::new());
+        let mined_blocks = Arc::new(AtomicUsize::new(0));
+        let mining_calls = Arc::new(AtomicUsize::new(0));
+        let connector = FakeConnector {
+            open_after_mining: Some(Arc::clone(&mined)),
+            open_channel_point: channel_point,
+            ..FakeConnector::succeeding()
+        };
+        let bitcoin = FundingTransitionBitcoinTip {
+            observed_txid,
+            mempool_calls: Arc::new(AtomicUsize::new(0)),
+            mined_blocks: Arc::clone(&mined_blocks),
+            mining_calls: Arc::clone(&mining_calls),
+            mined,
+        };
+        let alice = FakeClient {
+            endpoint: "https://127.0.0.1:31009/".to_owned(),
+        };
+        let bob = FakeClient {
+            endpoint: "https://127.0.0.1:32009/".to_owned(),
+        };
+        let request = OpenChannelRequest::new(
+            fake_public_key(&bob),
+            Sats::new(2_000_000),
+            Sats::new(1_000_000),
+        )
+        .unwrap();
+        let deadline = Deadline::new(Duration::from_secs(1)).unwrap();
+
+        let opened = open_and_confirm_channel(&connector, &alice, &bitcoin, request, &deadline)
+            .await
+            .expect("the observed funding transaction must open after six blocks");
+
+        assert_eq!(opened, channel_point);
+        assert_eq!(mined_blocks.load(Ordering::SeqCst), 6);
+        assert_eq!(mining_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn opened_channel_rejects_a_txid_that_did_not_trigger_confirmation_mining() {
+        let observed_txid = Txid::from_byte_array([4; 32]);
+        let mined = Arc::new(Notify::new());
+        let mined_blocks = Arc::new(AtomicUsize::new(0));
+        let mining_calls = Arc::new(AtomicUsize::new(0));
+        let connector = FakeConnector {
+            open_after_mining: Some(Arc::clone(&mined)),
+            open_channel_point: OutPoint::new(Txid::from_byte_array([5; 32]), 1),
+            ..FakeConnector::succeeding()
+        };
+        let bitcoin = FundingTransitionBitcoinTip {
+            observed_txid,
+            mempool_calls: Arc::new(AtomicUsize::new(0)),
+            mined_blocks: Arc::clone(&mined_blocks),
+            mining_calls: Arc::clone(&mining_calls),
+            mined,
+        };
+        let alice = FakeClient {
+            endpoint: "https://127.0.0.1:31009/".to_owned(),
+        };
+        let bob = FakeClient {
+            endpoint: "https://127.0.0.1:32009/".to_owned(),
+        };
+        let request = OpenChannelRequest::new(
+            fake_public_key(&bob),
+            Sats::new(2_000_000),
+            Sats::new(1_000_000),
+        )
+        .unwrap();
+        let deadline = Deadline::new(Duration::from_secs(1)).unwrap();
+
+        let error = open_and_confirm_channel(&connector, &alice, &bitcoin, request, &deadline)
+            .await
+            .expect_err("the final channel point must belong to the observed mempool trigger set");
+
+        assert!(matches!(error, FixtureError::Bootstrap { .. }));
+        assert_eq!(mined_blocks.load(Ordering::SeqCst), 6);
+        assert_eq!(mining_calls.load(Ordering::SeqCst), 1);
+    }
+
     #[derive(Clone)]
-    struct FakeBitcoinTip;
+    struct FakeBitcoinTip {
+        mempool_calls: Arc<AtomicUsize>,
+    }
+
+    impl FakeBitcoinTip {
+        fn new() -> Self {
+            Self {
+                mempool_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
 
     impl BitcoinTip for FakeBitcoinTip {
         async fn block_height(&self) -> Result<u64, FixtureError> {
@@ -2560,11 +2726,51 @@ mod tests {
             Ok(())
         }
 
-        async fn mempool_has_transaction(&self) -> Result<bool, FixtureError> {
-            Ok(true)
+        async fn mempool_transactions(&self) -> Result<BTreeSet<Txid>, FixtureError> {
+            if self.mempool_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(BTreeSet::new())
+            } else {
+                Ok(BTreeSet::from([fake_channel_point().txid]))
+            }
         }
 
         async fn mine_blocks(&self, _blocks: u64) -> Result<(), FixtureError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FundingTransitionBitcoinTip {
+        observed_txid: Txid,
+        mempool_calls: Arc<AtomicUsize>,
+        mined_blocks: Arc<AtomicUsize>,
+        mining_calls: Arc<AtomicUsize>,
+        mined: Arc<Notify>,
+    }
+
+    impl BitcoinTip for FundingTransitionBitcoinTip {
+        async fn block_height(&self) -> Result<u64, FixtureError> {
+            Ok(101)
+        }
+
+        async fn fund_address(&self, _address: &str, _amount: Sats) -> Result<(), FixtureError> {
+            Ok(())
+        }
+
+        async fn mempool_transactions(&self) -> Result<BTreeSet<Txid>, FixtureError> {
+            let existing = Txid::from_byte_array([8; 32]);
+            if self.mempool_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(BTreeSet::from([existing]))
+            } else {
+                Ok(BTreeSet::from([existing, self.observed_txid]))
+            }
+        }
+
+        async fn mine_blocks(&self, blocks: u64) -> Result<(), FixtureError> {
+            self.mining_calls.fetch_add(1, Ordering::SeqCst);
+            self.mined_blocks
+                .fetch_add(usize::try_from(blocks).unwrap(), Ordering::SeqCst);
+            self.mined.notify_one();
             Ok(())
         }
     }
@@ -2581,7 +2787,7 @@ mod tests {
             std::future::pending().await
         }
 
-        async fn mempool_has_transaction(&self) -> Result<bool, FixtureError> {
+        async fn mempool_transactions(&self) -> Result<BTreeSet<Txid>, FixtureError> {
             std::future::pending().await
         }
 
@@ -2594,6 +2800,63 @@ mod tests {
         removed: Arc<Mutex<Vec<String>>>,
         removal_delay: Duration,
         active: bool,
+    }
+
+    #[derive(Clone)]
+    struct CountingPreflightEnvironment {
+        docker_connects: Arc<AtomicUsize>,
+    }
+
+    impl LndPairEnvironment for CountingPreflightEnvironment {
+        type BitcoinStack = FakeBitcoinStack;
+        type Engine = FakeEngine;
+        type Connector = FakeConnector;
+        type BitcoinTip = FakeBitcoinTip;
+
+        async fn start_bitcoin_for_coordinator(
+            &self,
+            _bitcoind_image: ContainerImage,
+            _electrs_image: ContainerImage,
+            _deadline: &Deadline,
+        ) -> Result<Self::BitcoinStack, FixtureError> {
+            self.docker_connects.fetch_add(1, Ordering::SeqCst);
+            Err(FixtureError::InvalidConfiguration {
+                detail: "counting environment reached Docker".to_owned(),
+            })
+        }
+
+        fn engine(&self, _bitcoin: &Self::BitcoinStack) -> Self::Engine {
+            panic!("invalid preflight must not request a container engine")
+        }
+
+        fn network_name(&self, _bitcoin: &Self::BitcoinStack) -> String {
+            panic!("invalid preflight must not request a network")
+        }
+
+        fn node_container_name(&self, _bitcoin: &Self::BitcoinStack) -> String {
+            panic!("invalid preflight must not request a node container")
+        }
+
+        fn bitcoin_tip(&self, _bitcoin: &Self::BitcoinStack) -> Self::BitcoinTip {
+            panic!("invalid preflight must not request a Bitcoin client")
+        }
+
+        fn connector(&self) -> Self::Connector {
+            panic!("invalid preflight must not request an LND connector")
+        }
+
+        async fn attach_inner_logs(
+            &self,
+            _bitcoin: &Self::BitcoinStack,
+            _deadline: &Deadline,
+            _error: FixtureError,
+        ) -> FixtureError {
+            panic!("invalid preflight must not attach runtime logs")
+        }
+
+        async fn shutdown_bitcoin(&self, _bitcoin: Self::BitcoinStack) -> Result<(), FixtureError> {
+            panic!("invalid preflight must not own backing resources")
+        }
     }
 
     impl Drop for FakeBitcoinStack {
@@ -2647,7 +2910,7 @@ mod tests {
         }
 
         fn bitcoin_tip(&self, _bitcoin: &Self::BitcoinStack) -> Self::BitcoinTip {
-            FakeBitcoinTip
+            FakeBitcoinTip::new()
         }
 
         fn connector(&self) -> Self::Connector {
@@ -3116,7 +3379,7 @@ mod tests {
             ContainerImage::lnd_default(),
             &deadline,
             connector.clone(),
-            FakeBitcoinTip,
+            FakeBitcoinTip::new(),
             default_channel_allocation(),
         )
         .await
@@ -3185,7 +3448,7 @@ mod tests {
             ContainerImage::lnd_default(),
             &deadline,
             connector,
-            FakeBitcoinTip,
+            FakeBitcoinTip::new(),
             default_channel_allocation(),
         )
         .await;
@@ -3249,7 +3512,7 @@ mod tests {
                 ContainerImage::lnd_default(),
                 &deadline,
                 FakeConnector::succeeding(),
-                FakeBitcoinTip,
+                FakeBitcoinTip::new(),
                 default_channel_allocation(),
             )
             .await
@@ -3291,7 +3554,7 @@ mod tests {
                 ContainerImage::lnd_default(),
                 &deadline,
                 FakeConnector::succeeding(),
-                FakeBitcoinTip,
+                FakeBitcoinTip::new(),
                 default_channel_allocation(),
             )
             .await
@@ -3339,7 +3602,7 @@ mod tests {
                     info_calls: Arc::new(AtomicUsize::new(0)),
                     ..FakeConnector::succeeding()
                 },
-                FakeBitcoinTip,
+                FakeBitcoinTip::new(),
                 default_channel_allocation(),
             )
             .await
@@ -3386,7 +3649,7 @@ mod tests {
                 ContainerImage::lnd_default(),
                 &deadline,
                 FakeConnector::succeeding(),
-                FakeBitcoinTip,
+                FakeBitcoinTip::new(),
                 default_channel_allocation(),
             )
             .await
@@ -3438,7 +3701,7 @@ mod tests {
                 ContainerImage::lnd_default(),
                 &deadline,
                 FakeConnector::succeeding(),
-                FakeBitcoinTip,
+                FakeBitcoinTip::new(),
                 default_channel_allocation(),
             )
             .await
@@ -3478,7 +3741,7 @@ mod tests {
                 ContainerImage::lnd_default(),
                 &deadline,
                 connector.clone(),
-                FakeBitcoinTip,
+                FakeBitcoinTip::new(),
                 default_channel_allocation(),
             )
             .await
@@ -3527,7 +3790,7 @@ mod tests {
             ContainerImage::lnd_default(),
             &deadline,
             connector.clone(),
-            FakeBitcoinTip,
+            FakeBitcoinTip::new(),
             default_channel_allocation(),
         )
         .await
@@ -3559,7 +3822,7 @@ mod tests {
         };
         let deadline = Deadline::new(Duration::from_secs(5)).unwrap();
 
-        wait_for_lnd_sync(&connector, &alice, &bob, &FakeBitcoinTip, &deadline)
+        wait_for_lnd_sync(&connector, &alice, &bob, &FakeBitcoinTip::new(), &deadline)
             .await
             .expect("post-unlock Unknown status must be retried under the existing deadline");
 
@@ -3582,9 +3845,15 @@ mod tests {
             ..FakeConnector::succeeding()
         };
         let deadline = Deadline::new(Duration::from_secs(1)).unwrap();
-        wait_for_lnd_sync(&graph_unsynced, &alice, &bob, &FakeBitcoinTip, &deadline)
-            .await
-            .expect("isolated nodes cannot graph-sync before their private peer connection exists");
+        wait_for_lnd_sync(
+            &graph_unsynced,
+            &alice,
+            &bob,
+            &FakeBitcoinTip::new(),
+            &deadline,
+        )
+        .await
+        .expect("isolated nodes cannot graph-sync before their private peer connection exists");
 
         for failure in [InfoFailure::WrongNetwork, InfoFailure::WrongHeight] {
             let connector = FakeConnector {
@@ -3595,9 +3864,12 @@ mod tests {
                 ..FakeConnector::succeeding()
             };
             let deadline = Deadline::new(Duration::from_millis(20)).unwrap();
-            let error = wait_for_lnd_sync(&connector, &alice, &bob, &FakeBitcoinTip, &deadline)
-                .await
-                .expect_err("wrong regtest identity or height must remain blocked by the deadline");
+            let error =
+                wait_for_lnd_sync(&connector, &alice, &bob, &FakeBitcoinTip::new(), &deadline)
+                    .await
+                    .expect_err(
+                        "wrong regtest identity or height must remain blocked by the deadline",
+                    );
             assert!(matches!(error, FixtureError::ReadinessTimeout { .. }));
         }
     }
@@ -3619,7 +3891,7 @@ mod tests {
             &connector,
             &alice,
             &bob,
-            &FakeBitcoinTip,
+            &FakeBitcoinTip::new(),
             fake_channel_point(),
             fake_public_key(&alice),
             fake_public_key(&bob),
@@ -3639,7 +3911,7 @@ mod tests {
             &permanent,
             &alice,
             &bob,
-            &FakeBitcoinTip,
+            &FakeBitcoinTip::new(),
             fake_channel_point(),
             fake_public_key(&alice),
             fake_public_key(&bob),
@@ -3670,7 +3942,7 @@ mod tests {
             &connector,
             &alice,
             &bob,
-            &FakeBitcoinTip,
+            &FakeBitcoinTip::new(),
             fake_channel_point(),
             fake_public_key(&alice),
             fake_public_key(&bob),
