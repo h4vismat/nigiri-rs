@@ -388,6 +388,10 @@ mod tests {
         Status::from_error(Box::new(error))
     }
 
+    fn h2_reset_status(reason: h2::Reason) -> Status {
+        Status::from_error(Box::new(h2::Error::from(reason)))
+    }
+
     #[tokio::test]
     async fn channel_operations_emit_exact_requests_and_convert_responses() {
         let expected_point = point(1, 3);
@@ -697,6 +701,84 @@ mod tests {
     async fn open_channel_ambiguous_dispatch_status_is_outcome_unknown_without_channel_point() {
         let mut rpc = FakeChannelRpc {
             open_response: Some(Err(Status::deadline_exceeded("commit not observable"))),
+            ..Default::default()
+        };
+
+        let error = open_channel_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            open_request(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown {
+                identifier: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn open_channel_decoder_eof_before_point_is_outcome_unknown() {
+        let mut rpc = FakeChannelRpc {
+            open_response: Some(Ok(FakeStream(VecDeque::from([StreamItem::Ready(Err(
+                Status::internal("Unexpected EOF decoding stream."),
+            ))])))),
+            ..Default::default()
+        };
+
+        let error = open_channel_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            open_request(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown {
+                identifier: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn open_channel_h2_protocol_reset_before_point_is_outcome_unknown() {
+        let mut rpc = FakeChannelRpc {
+            open_response: Some(Ok(FakeStream(VecDeque::from([StreamItem::Ready(Err(
+                h2_reset_status(h2::Reason::PROTOCOL_ERROR),
+            ))])))),
+            ..Default::default()
+        };
+
+        let error = open_channel_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            open_request(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown {
+                identifier: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn open_channel_h2_enhance_your_calm_reset_before_point_is_outcome_unknown() {
+        let mut rpc = FakeChannelRpc {
+            open_response: Some(Ok(FakeStream(VecDeque::from([StreamItem::Ready(Err(
+                h2_reset_status(h2::Reason::ENHANCE_YOUR_CALM),
+            ))])))),
             ..Default::default()
         };
 

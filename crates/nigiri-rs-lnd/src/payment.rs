@@ -686,6 +686,10 @@ mod tests {
         Status::from_error(Box::new(error))
     }
 
+    fn h2_reset_status(reason: h2::Reason) -> Status {
+        Status::from_error(Box::new(h2::Error::from(reason)))
+    }
+
     #[tokio::test]
     async fn inflight_then_succeeded_returns_terminal_value_and_fee() {
         let invoice = invoice();
@@ -1326,6 +1330,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_invoice_decoder_eof_is_outcome_unknown_without_identifier() {
+        let mut rpc = FakeInvoiceRpc {
+            add_response: Some(Err(Status::internal("Unexpected EOF decoding stream."))),
+            ..Default::default()
+        };
+        let request =
+            CreateInvoiceRequest::new(Millisats::new(25_000), "memo", Duration::from_secs(60))
+                .unwrap();
+
+        let error = create_invoice_with(&client(Duration::from_secs(1)).inner, &mut rpc, request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown {
+                identifier: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn create_invoice_definitive_validation_status_remains_typed() {
         let mut rpc = FakeInvoiceRpc {
             add_response: Some(Err(Status::invalid_argument("invalid invoice"))),
@@ -1369,6 +1396,54 @@ mod tests {
     async fn pay_invoice_ambiguous_status_is_outcome_unknown_with_invoice_hash() {
         let mut rpc = FakeRouterRpc {
             send_response: Some(Err(Status::deadline_exceeded("commit not observable"))),
+            ..Default::default()
+        };
+
+        let error = pay_invoice_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            &invoice(),
+            PaymentOptions::new(Millisats::new(10_000), Duration::from_secs(5)).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown { identifier: Some(identifier), .. }
+                if identifier == payment_hash().to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn pay_invoice_h2_response_reset_is_outcome_unknown_with_invoice_hash() {
+        let mut rpc = FakeRouterRpc {
+            send_response: Some(Err(h2_reset_status(h2::Reason::ENHANCE_YOUR_CALM))),
+            ..Default::default()
+        };
+
+        let error = pay_invoice_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            &invoice(),
+            PaymentOptions::new(Millisats::new(10_000), Duration::from_secs(5)).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown { identifier: Some(identifier), .. }
+                if identifier == payment_hash().to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn pay_stream_decoder_eof_preserves_the_invoice_hash() {
+        let mut rpc = FakeRouterRpc {
+            send_response: Some(Ok(stream([StreamItem::Ready(Err(Status::internal(
+                "Unexpected EOF decoding stream.",
+            )))]))),
             ..Default::default()
         };
 

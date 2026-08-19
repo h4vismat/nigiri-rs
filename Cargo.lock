@@ -1221,6 +1221,7 @@ name = "nigiri-rs-lnd"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
+ "h2",
  "lightning-invoice",
  "prost",
  "protoc-bin-vendored",

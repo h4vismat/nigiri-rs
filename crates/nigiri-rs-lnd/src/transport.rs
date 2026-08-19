@@ -269,15 +269,22 @@ fn unknown_mutation_outcome(operation: &'static str, identifier: Option<String>)
     }
 }
 
-/// A local timeout or transport loss may happen after LND accepted a mutation but before response
-/// headers arrive. These four gRPC codes have the same delivery ambiguity. Every other code is a
-/// definitive authentication, validation, capacity, precondition, or application outcome and must
-/// retain its typed rejection so callers do not retry it as an unknown commit.
+/// This classifier is used only after dispatching a mutation. A local timeout or transport loss may
+/// happen after LND accepted it but before the client observed a response. Tonic also maps
+/// response-body decoder failures and HTTP/2 resets to `Internal` or `ResourceExhausted`, sometimes
+/// without a `tonic::transport::Error` source. Those codes are therefore uncertain at this boundary
+/// regardless of message text. Authentication, validation, and precondition codes remain definitive
+/// so callers do not retry a known rejection as an unknown commit.
 fn mutating_status_is_ambiguous(status: &Status) -> bool {
     has_transport_source(status)
         || matches!(
             status.code(),
-            Code::Cancelled | Code::Unknown | Code::DeadlineExceeded | Code::Unavailable
+            Code::Cancelled
+                | Code::Unknown
+                | Code::DeadlineExceeded
+                | Code::ResourceExhausted
+                | Code::Internal
+                | Code::Unavailable
         )
 }
 
