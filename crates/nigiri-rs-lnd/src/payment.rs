@@ -21,7 +21,8 @@ use crate::{
         routerrpc::{SendPaymentRequest, TrackPaymentRequest, router_client::RouterClient},
     },
     transport::{
-        ClientInner, authenticated_request, authenticated_request_until, bounded_request_until,
+        ClientInner, authenticated_mutating_request, authenticated_mutating_request_until,
+        authenticated_request, authenticated_request_until, bounded_request_until,
         operation_deadline,
     },
 };
@@ -142,17 +143,11 @@ pub(crate) async fn create_invoice_with<R: InvoiceRpc>(
     let request = proto_invoice_request(request)?;
     let expected_expiry = u64::try_from(request.expiry)
         .map_err(|_| invalid_request("validated invoice expiry unexpectedly became negative"))?;
-    let response = authenticated_request(inner, "create invoice", request, |request| {
-        rpc.add_invoice(request)
-    })
-    .await
-    .map_err(|error| match error {
-        LndError::Timeout { .. } => LndError::OutcomeUnknown {
-            operation: Cow::Borrowed("create invoice"),
-            identifier: None,
-        },
-        other => other,
-    })?;
+    let response =
+        authenticated_mutating_request(inner, "create invoice", None, request, |request| {
+            rpc.add_invoice(request)
+        })
+        .await?;
     let record = created_invoice(response.into_inner())?;
     if record.amount() != expected_amount {
         return Err(invalid_response_with_identifier(
@@ -205,19 +200,15 @@ pub(crate) async fn pay_invoice_with<R: RouterRpc>(
     let expected_hash = *invoice.payment_hash();
     let request = proto_send_payment_request(invoice, options)?;
     let deadline = operation_deadline(inner.timeout)?;
-    let response = authenticated_request_until(
+    let response = authenticated_mutating_request_until(
         inner,
         deadline,
-        inner.timeout,
         "pay invoice",
+        Some(expected_hash.to_string()),
         request,
         |request| rpc.send_payment_v2(request),
     )
-    .await
-    .map_err(|error| match error {
-        LndError::Timeout { .. } => unknown_payment_outcome("pay invoice", expected_hash),
-        other => other,
-    })?;
+    .await?;
     consume_payment_stream(
         response.into_inner(),
         deadline,
@@ -494,7 +485,7 @@ mod tests {
         secp256k1::{Secp256k1, SecretKey},
     };
     use lightning_invoice::{Bolt11Invoice, Currency, InvoiceBuilder, PaymentSecret};
-    use tonic::{Request, Response, Status};
+    use tonic::{Request, Response, Status, transport::Endpoint};
 
     use crate::{
         CreateInvoiceRequest, InvoiceState, LndClient, LndConfig, LndError, Millisats,
@@ -687,6 +678,12 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn connection_loss_status() -> Status {
+        let error = Endpoint::from_shared("https://[".to_owned())
+            .expect_err("the malformed URI must produce a transport error");
+        Status::from_error(Box::new(error))
     }
 
     #[tokio::test]
@@ -1280,6 +1277,134 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn create_invoice_connection_loss_is_outcome_unknown_without_identifier() {
+        let mut rpc = FakeInvoiceRpc {
+            add_response: Some(Err(connection_loss_status())),
+            ..Default::default()
+        };
+        let request =
+            CreateInvoiceRequest::new(Millisats::new(25_000), "memo", Duration::from_secs(60))
+                .unwrap();
+
+        let error = create_invoice_with(&client(Duration::from_secs(1)).inner, &mut rpc, request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown {
+                identifier: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_invoice_ambiguous_status_is_outcome_unknown_without_identifier() {
+        let mut rpc = FakeInvoiceRpc {
+            add_response: Some(Err(Status::deadline_exceeded("commit not observable"))),
+            ..Default::default()
+        };
+        let request =
+            CreateInvoiceRequest::new(Millisats::new(25_000), "memo", Duration::from_secs(60))
+                .unwrap();
+
+        let error = create_invoice_with(&client(Duration::from_secs(1)).inner, &mut rpc, request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown {
+                identifier: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_invoice_definitive_validation_status_remains_typed() {
+        let mut rpc = FakeInvoiceRpc {
+            add_response: Some(Err(Status::invalid_argument("invalid invoice"))),
+            ..Default::default()
+        };
+        let request =
+            CreateInvoiceRequest::new(Millisats::new(25_000), "memo", Duration::from_secs(60))
+                .unwrap();
+
+        let error = create_invoice_with(&client(Duration::from_secs(1)).inner, &mut rpc, request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, LndError::Status { .. }));
+    }
+
+    #[tokio::test]
+    async fn pay_invoice_connection_loss_is_outcome_unknown_with_invoice_hash() {
+        let mut rpc = FakeRouterRpc {
+            send_response: Some(Err(connection_loss_status())),
+            ..Default::default()
+        };
+
+        let error = pay_invoice_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            &invoice(),
+            PaymentOptions::new(Millisats::new(10_000), Duration::from_secs(5)).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown { identifier: Some(identifier), .. }
+                if identifier == payment_hash().to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn pay_invoice_ambiguous_status_is_outcome_unknown_with_invoice_hash() {
+        let mut rpc = FakeRouterRpc {
+            send_response: Some(Err(Status::deadline_exceeded("commit not observable"))),
+            ..Default::default()
+        };
+
+        let error = pay_invoice_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            &invoice(),
+            PaymentOptions::new(Millisats::new(10_000), Duration::from_secs(5)).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown { identifier: Some(identifier), .. }
+                if identifier == payment_hash().to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn pay_invoice_definitive_authentication_status_remains_typed() {
+        let mut rpc = FakeRouterRpc {
+            send_response: Some(Err(Status::unauthenticated("bad macaroon"))),
+            ..Default::default()
+        };
+
+        let error = pay_invoice_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            &invoice(),
+            PaymentOptions::new(Millisats::new(10_000), Duration::from_secs(5)).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, LndError::Authentication { .. }));
     }
 
     #[tokio::test]

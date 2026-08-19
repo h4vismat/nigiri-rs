@@ -422,10 +422,10 @@ Bitcoin, Liquid, peg, and real LND payment integration tests need Docker but no 
 Each owns its resources and requests best-effort cleanup when it finishes:
 
 ```sh
-cargo test -p nigiri-rs-fixtures --all-targets --all-features
+cargo test --workspace --all-targets --all-features -- --test-threads=1
 ```
 
-Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other, and they can all run at once. Nothing here is `#[ignore]`d, on purpose: an ignored Docker test reports green having verified nothing, and this project has shipped that exact failure mode twice — once as a CI filter that matched zero tests and exited 0, once as a test that had never run in any CI job. Ignoring a test loses that signal; running it fails loudly instead when Docker is unavailable.
+Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other. The full release gate still uses one Rust test thread because concurrent cold fixture startups can saturate the Docker daemon; individual fixtures continue to start their independent internal services concurrently. Nothing here is `#[ignore]`d, on purpose: an ignored Docker test reports green having verified nothing, and this project has shipped that exact failure mode twice — once as a CI filter that matched zero tests and exited 0, once as a test that had never run in any CI job. Ignoring a test loses that signal; running it fails loudly instead when Docker is unavailable.
 
 One Bitcoin fixture is ready in about 3 seconds, well inside the 60-second default startup budget. Two started at once take about 4.4 seconds total, so parallelism itself costs roughly a second, not the 103 seconds an earlier note here claimed. That figure was recorded while unrelated runaway processes were saturating every core and said nothing about this crate. A Liquid fixture mines a single block instead of 101: Liquid has no block subsidy, so it funds its wallet by connecting the genesis outputs rather than by mining one. A `PegPair` is four containers rather than two and starts its two halves in sequence, since the Elements node reads `-mainchainrpc*` while starting and needs the `bitcoind` already answering; its default budget is 120 seconds for that reason.
 

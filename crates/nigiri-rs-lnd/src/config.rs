@@ -136,11 +136,14 @@ fn validate_authority(authority: &str) -> Result<(), LndError> {
     let Some(port) = port else {
         return Err(invalid("endpoint must include a port"));
     };
-    if port.is_empty()
-        || !port.bytes().all(|byte| byte.is_ascii_digit())
-        || port.parse::<u16>().is_err()
-    {
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(invalid("endpoint port must be in range"));
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| invalid("endpoint port must be in range"))?;
+    if port == 0 {
+        return Err(invalid("endpoint port must be greater than zero"));
     }
     Ok(())
 }

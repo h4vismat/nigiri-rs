@@ -1413,26 +1413,50 @@ async fn wait_for_active_channel<C: LndNodeConnector, B: BitcoinTip>(
     let mut observation = format!("waiting for active channel {channel_point}");
     loop {
         ensure_peer_connected(connector, alice, bob_public_key, bob_host, deadline).await?;
-        let (alice_channel, bob_channel, alice_info, bob_info, bitcoin_height) = tokio::join!(
-            deadline.run(
-                "lnd-alice",
-                &observation,
-                connector.channel_readiness(alice, channel_point, bob_public_key),
-            ),
-            deadline.run(
-                "lnd-bob",
-                &observation,
-                connector.channel_readiness(bob, channel_point, alice_public_key),
-            ),
-            deadline.run("lnd-alice", &observation, connector.get_info(alice)),
-            deadline.run("lnd-bob", &observation, connector.get_info(bob)),
-            deadline.run("bitcoind", &observation, bitcoin.block_height(),),
-        );
-        let alice_channel = channel_observation("query Alice channel", alice_channel?)?;
-        let bob_channel = channel_observation("query Bob channel", bob_channel?)?;
-        let alice_info = info_observation("query Alice graph synchronization", alice_info?)?;
-        let bob_info = info_observation("query Bob graph synchronization", bob_info?)?;
-        let bitcoin_height = bitcoin_height??;
+        let alice_channel = async {
+            let result = deadline
+                .run(
+                    "lnd-alice",
+                    &observation,
+                    connector.channel_readiness(alice, channel_point, bob_public_key),
+                )
+                .await?;
+            channel_observation("query Alice channel", result)
+        };
+        let bob_channel = async {
+            let result = deadline
+                .run(
+                    "lnd-bob",
+                    &observation,
+                    connector.channel_readiness(bob, channel_point, alice_public_key),
+                )
+                .await?;
+            channel_observation("query Bob channel", result)
+        };
+        let alice_info = async {
+            let result = deadline
+                .run("lnd-alice", &observation, connector.get_info(alice))
+                .await?;
+            info_observation("query Alice graph synchronization", result)
+        };
+        let bob_info = async {
+            let result = deadline
+                .run("lnd-bob", &observation, connector.get_info(bob))
+                .await?;
+            info_observation("query Bob graph synchronization", result)
+        };
+        let bitcoin_height = async {
+            deadline
+                .run("bitcoind", &observation, bitcoin.block_height())
+                .await?
+        };
+        let (alice_channel, bob_channel, alice_info, bob_info, bitcoin_height) = tokio::try_join!(
+            alice_channel,
+            bob_channel,
+            alice_info,
+            bob_info,
+            bitcoin_height,
+        )?;
         if channel_is_spendable(alice_channel)
             && channel_is_spendable(bob_channel)
             && alice_info.is_some_and(|info| graph_synchronized(info, bitcoin_height))
@@ -1879,7 +1903,7 @@ async fn initialize_lnd_clients<C: LndNodeConnector>(
     fill_password(&mut alice_password)?;
     fill_password(&mut bob_password)?;
 
-    let (alice, bob) = tokio::join!(
+    let (alice, bob) = tokio::try_join!(
         initialize_lnd_client(
             connector,
             &alice_config,
@@ -1896,8 +1920,8 @@ async fn initialize_lnd_clients<C: LndNodeConnector>(
             "initializing Bob wallet",
             deadline,
         )
-    );
-    Ok((alice?, bob?))
+    )?;
+    Ok((alice, bob))
 }
 
 async fn initialize_lnd_client<C: LndNodeConnector>(
@@ -2023,7 +2047,7 @@ mod tests {
         BitcoinTip, ChannelAllocation, ChannelReadiness, LndHandles, LndNodeConnector, LndPair,
         LndPairEnvironment, LndSyncStatus, PaymentReadiness, initialize_lnd_clients,
         open_and_confirm_channel, prove_reverse_readiness_with_retry, start_lnd_nodes_under,
-        wait_for_lnd_sync,
+        wait_for_active_channel, wait_for_lnd_sync,
     };
     use crate::{
         ContainerImage, FixtureError,
@@ -2327,12 +2351,26 @@ mod tests {
         BobInvalidResponseAlicePending,
     }
 
+    #[derive(Clone, Copy)]
+    enum InitializationFailure {
+        AliceAuthenticationBobPending,
+        BobInvalidResponseAlicePending,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ChannelFailure {
+        AliceAuthenticationBobPending,
+        BobInvalidResponseAlicePending,
+    }
+
     #[derive(Clone)]
     struct FakeConnector {
         initialized: Arc<Mutex<Vec<InitializationRecord>>>,
         fail_initialization: bool,
+        initialization_failure: Option<InitializationFailure>,
         transient_initializations_remaining: Arc<AtomicUsize>,
         info_failure: Option<InfoFailure>,
+        channel_failure: Option<ChannelFailure>,
         info_calls: Arc<AtomicUsize>,
         invoice_calls: Arc<AtomicUsize>,
         payment_attempts: Arc<AtomicUsize>,
@@ -2347,8 +2385,10 @@ mod tests {
             Self {
                 initialized: Arc::new(Mutex::new(Vec::new())),
                 fail_initialization: false,
+                initialization_failure: None,
                 transient_initializations_remaining: Arc::new(AtomicUsize::new(0)),
                 info_failure: None,
+                channel_failure: None,
                 info_calls: Arc::new(AtomicUsize::new(0)),
                 invoice_calls: Arc::new(AtomicUsize::new(0)),
                 payment_attempts: Arc::new(AtomicUsize::new(0)),
@@ -2426,6 +2466,31 @@ mod tests {
                     operation: "generate wallet seed".into(),
                     detail: "gRPC status Unknown error".into(),
                 })
+            } else if matches!(
+                self.initialization_failure,
+                Some(InitializationFailure::AliceAuthenticationBobPending)
+            ) {
+                if endpoint.contains("31009") {
+                    Err(LndError::Authentication {
+                        operation: "initialize wallet".into(),
+                        detail: "Alice credentials rejected".into(),
+                    })
+                } else {
+                    std::future::pending().await
+                }
+            } else if matches!(
+                self.initialization_failure,
+                Some(InitializationFailure::BobInvalidResponseAlicePending)
+            ) {
+                if endpoint.contains("32009") {
+                    Err(LndError::InvalidResponse {
+                        operation: "initialize wallet".into(),
+                        detail: "Bob returned malformed wallet state".into(),
+                        identifier: None,
+                    })
+                } else {
+                    std::future::pending().await
+                }
             } else if self.fail_initialization {
                 Err(LndError::Status {
                     operation: "initialize wallet".into(),
@@ -2542,10 +2607,32 @@ mod tests {
 
         async fn channel_readiness(
             &self,
-            _client: &Self::Client,
+            client: &Self::Client,
             channel_point: OutPoint,
             _remote_public_key: PublicKey,
         ) -> Result<Option<ChannelReadiness>, LndError> {
+            match self.channel_failure {
+                Some(ChannelFailure::AliceAuthenticationBobPending) => {
+                    if client.endpoint.contains("31009") {
+                        return Err(LndError::Authentication {
+                            operation: "list channels".into(),
+                            detail: "Alice credentials rejected".into(),
+                        });
+                    }
+                    return std::future::pending().await;
+                }
+                Some(ChannelFailure::BobInvalidResponseAlicePending) => {
+                    if client.endpoint.contains("32009") {
+                        return Err(LndError::InvalidResponse {
+                            operation: "list channels".into(),
+                            detail: "Bob returned malformed channel state".into(),
+                            identifier: Some(channel_point.to_string()),
+                        });
+                    }
+                    return std::future::pending().await;
+                }
+                None => {}
+            }
             Ok(
                 (channel_point == fake_channel_point()).then_some(ChannelReadiness {
                     active: true,
@@ -3359,6 +3446,140 @@ mod tests {
         assert_pending_sibling_is_cancelled(
             InfoFailure::BobInvalidResponseAlicePending,
             "query Bob synchronization",
+        )
+        .await;
+    }
+
+    async fn assert_pending_wallet_initialization_is_cancelled(
+        initialization_failure: InitializationFailure,
+        expected_operation: &'static str,
+    ) {
+        let connector = FakeConnector {
+            initialization_failure: Some(initialization_failure),
+            ..FakeConnector::succeeding()
+        };
+        let alice_config = LndBootstrapConfig {
+            endpoint: "https://127.0.0.1:31009".parse().unwrap(),
+            tls_certificate: b"alice certificate".to_vec(),
+            timeout: Duration::from_secs(1),
+        };
+        let bob_config = LndBootstrapConfig {
+            endpoint: "https://127.0.0.1:32009".parse().unwrap(),
+            tls_certificate: b"bob certificate".to_vec(),
+            timeout: Duration::from_secs(1),
+        };
+        let deadline = Deadline::new(Duration::from_secs(5)).unwrap();
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            initialize_lnd_clients(&connector, alice_config, bob_config, &deadline),
+        )
+        .await
+        .expect("a terminal wallet error must cancel the pending sibling immediately")
+        .expect_err("a terminal wallet error must fail initialization");
+
+        let FixtureError::Bootstrap {
+            chain,
+            operation,
+            source,
+            ..
+        } = &error
+        else {
+            panic!("a permanent wallet response needs typed bootstrap context: {error}")
+        };
+        assert_eq!(chain, &"Lightning");
+        assert_eq!(operation, &expected_operation);
+        assert!(matches!(
+            source.downcast_ref::<FixtureError>(),
+            Some(FixtureError::Lightning(LndError::Authentication { .. }))
+                | Some(FixtureError::Lightning(LndError::InvalidResponse { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn alice_terminal_wallet_failure_cancels_pending_bob_initialization() {
+        assert_pending_wallet_initialization_is_cancelled(
+            InitializationFailure::AliceAuthenticationBobPending,
+            "initializing Alice wallet",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bob_terminal_wallet_failure_cancels_pending_alice_initialization() {
+        assert_pending_wallet_initialization_is_cancelled(
+            InitializationFailure::BobInvalidResponseAlicePending,
+            "initializing Bob wallet",
+        )
+        .await;
+    }
+
+    async fn assert_pending_final_channel_probe_is_cancelled(
+        channel_failure: ChannelFailure,
+        expected_operation: &'static str,
+    ) {
+        let connector = FakeConnector {
+            channel_failure: Some(channel_failure),
+            ..FakeConnector::succeeding()
+        };
+        let alice = FakeClient {
+            endpoint: "https://127.0.0.1:31009/".to_owned(),
+        };
+        let bob = FakeClient {
+            endpoint: "https://127.0.0.1:32009/".to_owned(),
+        };
+        let deadline = Deadline::new(Duration::from_secs(5)).unwrap();
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_active_channel(
+                &connector,
+                &alice,
+                &bob,
+                &FakeBitcoinTip::new(),
+                fake_channel_point(),
+                fake_public_key(&alice),
+                fake_public_key(&bob),
+                "private-bob",
+                &deadline,
+            ),
+        )
+        .await
+        .expect("a terminal final-readiness error must cancel pending sibling probes immediately")
+        .expect_err("a terminal final-readiness error must fail channel readiness");
+
+        let FixtureError::Bootstrap {
+            chain,
+            operation,
+            source,
+            ..
+        } = &error
+        else {
+            panic!("a permanent channel response needs typed bootstrap context: {error}")
+        };
+        assert_eq!(chain, &"Lightning");
+        assert_eq!(operation, &expected_operation);
+        assert!(matches!(
+            source.downcast_ref::<FixtureError>(),
+            Some(FixtureError::Lightning(LndError::Authentication { .. }))
+                | Some(FixtureError::Lightning(LndError::InvalidResponse { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn alice_terminal_channel_failure_cancels_pending_bob_final_probe() {
+        assert_pending_final_channel_probe_is_cancelled(
+            ChannelFailure::AliceAuthenticationBobPending,
+            "query Alice channel",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bob_terminal_channel_failure_cancels_pending_alice_final_probe() {
+        assert_pending_final_channel_probe_is_cancelled(
+            ChannelFailure::BobInvalidResponseAlicePending,
+            "query Bob channel",
         )
         .await;
     }

@@ -66,19 +66,24 @@ jobs:
             features: default
             cargo_features: ""
             scope: -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros
+            test_args: ""
           - toolchain: "1.88"
             features: all
             cargo_features: --all-features
             scope: -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros
+            test_args: ""
           - toolchain: stable
             features: default
             cargo_features: ""
             scope: -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros
-          # The only cell that runs the Docker-backed tests.
+            test_args: ""
+          # The only cell that runs Docker-backed tests also uses the release gate's proven
+          # single Rust test thread so concurrent cold fixture startups do not saturate Docker.
           - toolchain: stable
             features: all
             cargo_features: --all-features
             scope: --workspace
+            test_args: -- --test-threads=1
     steps:
       - uses: actions/checkout@v4
 
@@ -97,9 +102,9 @@ jobs:
         run: cargo build --workspace --all-targets ${{ matrix.cargo_features }}
 
       # Nothing is #[ignore]d any more, so this cell's scope is what decides whether it
-      # starts containers.
+      # starts containers. test_args is empty in every Docker-free cell.
       - name: cargo test
-        run: cargo test ${{ matrix.scope }} --all-targets ${{ matrix.cargo_features }}
+        run: cargo test ${{ matrix.scope }} --all-targets ${{ matrix.cargo_features }} ${{ matrix.test_args }}
 
       - name: cargo test --doc
         run: cargo test --workspace --doc ${{ matrix.cargo_features }}

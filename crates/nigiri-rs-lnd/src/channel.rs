@@ -12,7 +12,10 @@ use crate::{
         channel_point as proto_channel_point, lightning_client::LightningClient,
         open_status_update,
     },
-    transport::{ClientInner, authenticated_request, bounded_request_until, operation_deadline},
+    transport::{
+        ClientInner, authenticated_mutating_request_until, authenticated_request,
+        bounded_mutating_request_until, bounded_request_until, operation_deadline,
+    },
 };
 
 pub(crate) trait OpenStatusStream: Send {
@@ -77,18 +80,33 @@ pub(crate) async fn open_channel_with<R: ChannelRpc>(
 ) -> Result<OutPoint, LndError> {
     let request = proto_open_channel_request(request)?;
     let deadline = operation_deadline(inner.timeout)?;
-    let response = authenticated_request(inner, "open channel", request, |request| {
-        rpc.open_channel(request)
-    })
+    let response = authenticated_mutating_request_until(
+        inner,
+        deadline,
+        "open channel",
+        None,
+        request,
+        |request| rpc.open_channel(request),
+    )
     .await?;
     let mut stream = response.into_inner();
     let mut pending_point = None;
 
     loop {
-        let next = bounded_request_until(deadline, inner.timeout, "open channel", async {
-            stream.message().await.map(Response::new)
-        })
-        .await;
+        let next = match pending_point {
+            Some(_) => {
+                bounded_request_until(deadline, inner.timeout, "open channel", async {
+                    stream.message().await.map(Response::new)
+                })
+                .await
+            }
+            None => {
+                bounded_mutating_request_until(deadline, "open channel", None, async {
+                    stream.message().await.map(Response::new)
+                })
+                .await
+            }
+        };
         let update = match next {
             Ok(response) => response.into_inner(),
             Err(error) => {
@@ -206,7 +224,7 @@ mod tests {
     use std::{collections::VecDeque, future::Future, time::Duration};
 
     use bitcoin::{OutPoint, Txid, hashes::Hash, secp256k1::PublicKey};
-    use tonic::{Request, Response, Status};
+    use tonic::{Request, Response, Status, transport::Endpoint};
 
     use crate::{
         LndClient, LndConfig, LndError, OpenChannelRequest, Sats,
@@ -362,6 +380,12 @@ mod tests {
             Sats::new(1_000_000),
         )
         .unwrap()
+    }
+
+    fn connection_loss_status() -> Status {
+        let error = Endpoint::from_shared("https://[".to_owned())
+            .expect_err("the malformed URI must produce a transport error");
+        Status::from_error(Box::new(error))
     }
 
     #[tokio::test]
@@ -643,6 +667,72 @@ mod tests {
         assert!(
             matches!(error, LndError::OutcomeUnknown { identifier: Some(identifier), .. } if identifier == expected.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn open_channel_connection_loss_is_outcome_unknown_without_channel_point() {
+        let mut rpc = FakeChannelRpc {
+            open_response: Some(Err(connection_loss_status())),
+            ..Default::default()
+        };
+
+        let error = open_channel_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            open_request(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown {
+                identifier: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn open_channel_ambiguous_dispatch_status_is_outcome_unknown_without_channel_point() {
+        let mut rpc = FakeChannelRpc {
+            open_response: Some(Err(Status::deadline_exceeded("commit not observable"))),
+            ..Default::default()
+        };
+
+        let error = open_channel_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            open_request(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LndError::OutcomeUnknown {
+                identifier: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn open_channel_definitive_application_status_remains_typed() {
+        let mut rpc = FakeChannelRpc {
+            open_response: Some(Err(Status::failed_precondition("peer is not connected"))),
+            ..Default::default()
+        };
+
+        let error = open_channel_with(
+            &client(Duration::from_secs(1)).inner,
+            &mut rpc,
+            open_request(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, LndError::Status { .. }));
     }
 
     #[tokio::test]

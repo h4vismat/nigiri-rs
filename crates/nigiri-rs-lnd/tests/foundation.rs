@@ -6,8 +6,8 @@ use std::{
 
 use bitcoin::secp256k1::PublicKey;
 use nigiri_rs_lnd::{
-    CreateInvoiceRequest, LndConfig, MAX_MACAROON_BYTES, MAX_TLS_CERTIFICATE_BYTES, Millisats,
-    OpenChannelRequest, PaymentOptions, PeerAddress, Sats,
+    CreateInvoiceRequest, LndConfig, LndError, MAX_MACAROON_BYTES, MAX_TLS_CERTIFICATE_BYTES,
+    Millisats, OpenChannelRequest, PaymentOptions, PeerAddress, Sats,
 };
 
 fn public_key() -> PublicKey {
@@ -132,6 +132,20 @@ fn configuration_accepts_an_explicit_default_https_port_but_rejects_an_omitted_p
         .is_err()
     );
     assert!(LndConfig::new("https://[::1]", vec![1], vec![2], Duration::from_secs(1),).is_err());
+}
+
+#[test]
+fn configuration_rejects_zero_ports_for_every_supported_host_form() {
+    for endpoint in [
+        "https://localhost:0",
+        "https://127.0.0.1:0",
+        "https://[::1]:0",
+    ] {
+        let error = LndConfig::new(endpoint, vec![1], vec![2], Duration::from_secs(1))
+            .expect_err("port zero cannot identify a usable LND endpoint");
+
+        assert!(matches!(error, LndError::InvalidRequest { .. }));
+    }
 }
 
 #[test]

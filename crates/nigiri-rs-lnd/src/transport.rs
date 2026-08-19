@@ -119,6 +119,27 @@ where
     authenticated_request_until(client, deadline, client.timeout, operation, message, call).await
 }
 
+pub(crate) async fn authenticated_mutating_request<
+    RequestMessage,
+    ResponseMessage,
+    Call,
+    CallFuture,
+>(
+    client: &ClientInner,
+    operation: &'static str,
+    identifier: Option<String>,
+    message: RequestMessage,
+    call: Call,
+) -> Result<Response<ResponseMessage>, LndError>
+where
+    Call: FnOnce(Request<RequestMessage>) -> CallFuture,
+    CallFuture: Future<Output = Result<Response<ResponseMessage>, Status>>,
+{
+    let deadline = operation_deadline(client.timeout)?;
+    authenticated_mutating_request_until(client, deadline, operation, identifier, message, call)
+        .await
+}
+
 pub(crate) async fn authenticated_request_until<RequestMessage, ResponseMessage, Call, CallFuture>(
     client: &ClientInner,
     deadline: tokio::time::Instant,
@@ -136,6 +157,30 @@ where
         .metadata_mut()
         .insert("macaroon", client.macaroon.clone());
     bounded_request_until(deadline, configured_duration, operation, call(request)).await
+}
+
+pub(crate) async fn authenticated_mutating_request_until<
+    RequestMessage,
+    ResponseMessage,
+    Call,
+    CallFuture,
+>(
+    client: &ClientInner,
+    deadline: tokio::time::Instant,
+    operation: &'static str,
+    identifier: Option<String>,
+    message: RequestMessage,
+    call: Call,
+) -> Result<Response<ResponseMessage>, LndError>
+where
+    Call: FnOnce(Request<RequestMessage>) -> CallFuture,
+    CallFuture: Future<Output = Result<Response<ResponseMessage>, Status>>,
+{
+    let mut request = Request::new(message);
+    request
+        .metadata_mut()
+        .insert("macaroon", client.macaroon.clone());
+    bounded_mutating_request_until(deadline, operation, identifier, call(request)).await
 }
 
 #[allow(dead_code)]
@@ -177,6 +222,25 @@ where
     }
 }
 
+pub(crate) async fn bounded_mutating_request_until<ResponseMessage, CallFuture>(
+    deadline: tokio::time::Instant,
+    operation: &'static str,
+    identifier: Option<String>,
+    call: CallFuture,
+) -> Result<Response<ResponseMessage>, LndError>
+where
+    CallFuture: Future<Output = Result<Response<ResponseMessage>, Status>>,
+{
+    match tokio::time::timeout_at(deadline, call).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(status)) if mutating_status_is_ambiguous(&status) => {
+            Err(unknown_mutation_outcome(operation, identifier))
+        }
+        Ok(Err(status)) => Err(map_status(operation, status)),
+        Err(_) => Err(unknown_mutation_outcome(operation, identifier)),
+    }
+}
+
 pub(crate) fn map_status(operation: &'static str, status: Status) -> LndError {
     let operation = Cow::Borrowed(operation);
     if has_transport_source(&status) {
@@ -196,6 +260,25 @@ pub(crate) fn map_status(operation: &'static str, status: Status) -> LndError {
             detail: bounded(format!("gRPC status {code}")),
         },
     }
+}
+
+fn unknown_mutation_outcome(operation: &'static str, identifier: Option<String>) -> LndError {
+    LndError::OutcomeUnknown {
+        operation: Cow::Borrowed(operation),
+        identifier,
+    }
+}
+
+/// A local timeout or transport loss may happen after LND accepted a mutation but before response
+/// headers arrive. These four gRPC codes have the same delivery ambiguity. Every other code is a
+/// definitive authentication, validation, capacity, precondition, or application outcome and must
+/// retain its typed rejection so callers do not retry it as an unknown commit.
+fn mutating_status_is_ambiguous(status: &Status) -> bool {
+    has_transport_source(status)
+        || matches!(
+            status.code(),
+            Code::Cancelled | Code::Unknown | Code::DeadlineExceeded | Code::Unavailable
+        )
 }
 
 fn has_transport_source(status: &Status) -> bool {
