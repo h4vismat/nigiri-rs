@@ -28,6 +28,12 @@
 
 pub use nigiri_rs_core::*;
 
+/// Host-managed LND clients and protocol-level Lightning types.
+///
+/// Requires the `lnd` feature.
+#[cfg(feature = "lnd")]
+pub use nigiri_rs_lnd::*;
+
 /// Ephemeral Docker-backed regtest fixtures.
 ///
 /// Requires the `fixtures` feature.
@@ -60,7 +66,8 @@ pub use nigiri_rs_fixtures as fixtures;
 /// reporting green having run nothing.
 ///
 /// A `PegPair` parameter starts a wired pair instead of a single chain: four containers whose
-/// Elements node validates peg-ins against the `bitcoind` beside it. It may be mixed with client
+/// Elements node validates peg-ins against the `bitcoind` beside it. An `LndPair` parameter starts
+/// two ready-to-pay LND nodes on a funded Bitcoin fixture. Either pair may be mixed with client
 /// parameters, which still produce independent stacks.
 ///
 /// Two arguments are accepted: `startup_timeout = <seconds>` and `flavor = "multi_thread"`.

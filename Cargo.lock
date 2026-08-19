@@ -1174,6 +1174,7 @@ dependencies = [
  "elements",
  "nigiri-rs-core",
  "nigiri-rs-fixtures",
+ "nigiri-rs-lnd",
  "nigiri-rs-macros",
  "serde",
  "serde_json",

@@ -11,6 +11,9 @@ use nigiri_rs::{
     NigiriClient, NigiriConfig, NigiriError, NigiriNetwork, TxStatus,
 };
 
+#[cfg(feature = "lnd")]
+use nigiri_rs::{LightningNode, LndClient, LndConfig};
+
 // Catches a dropped re-export in the facade. Every item below was public at 0.2.0; naming it in a
 // type position forces the compiler to resolve it.
 #[test]
@@ -47,6 +50,19 @@ fn every_published_path_still_resolves() {
     accepts::<nigiri_rs::PegOut>();
 }
 
+// Catches a dropped LND dependency or facade re-export while keeping a Bitcoin/Liquid-only build
+// independent of the optional protocol crate.
+#[cfg(feature = "lnd")]
+#[test]
+fn lnd_clients_reach_the_facade_when_the_feature_is_on() {
+    fn accepts<T>() {}
+    fn is_lightning_node<T: LightningNode>() {}
+
+    accepts::<LndClient>();
+    accepts::<LndConfig>();
+    is_lightning_node::<LndClient>();
+}
+
 // Catches the fixtures being re-exported unconditionally, which would drag Docker dependencies
 // into a client-only build.
 #[cfg(feature = "fixtures")]
@@ -57,6 +73,8 @@ fn fixtures_are_reachable_when_the_feature_is_on() {
     accepts::<nigiri_rs::fixtures::FixtureError>();
     accepts::<nigiri_rs::fixtures::PegPair>();
     accepts::<nigiri_rs::fixtures::PegPairBuilder>();
+    accepts::<nigiri_rs::fixtures::LndPair>();
+    accepts::<nigiri_rs::fixtures::LndPairBuilder>();
 }
 
 // Catches a broken feature forward in the facade manifest. `bitcoin_rpc_types` is the only core
