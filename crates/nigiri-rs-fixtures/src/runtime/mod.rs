@@ -8,7 +8,11 @@ use crate::{
     diagnostics::{join_diagnostics, redacted_source, redacted_tail},
 };
 
+#[cfg(test)]
+pub(crate) use engine::EngineResult;
 pub(crate) use engine::{BollardEngine, ContainerEngine};
+#[cfg(test)]
+pub(crate) use spec::ContainerSpec;
 #[allow(
     unused_imports,
     reason = "Task 6 specification is consumed by the Task 7 LndPair startup"
@@ -59,6 +63,28 @@ pub(crate) fn attach_diagnostics(error: FixtureError, addition: String) -> Fixtu
             duration,
             last_observation,
             diagnostics: join_diagnostics(&diagnostics, &addition),
+        },
+        FixtureError::Bootstrap {
+            chain,
+            operation,
+            diagnostics,
+            source,
+        } => FixtureError::Bootstrap {
+            chain,
+            operation,
+            diagnostics: join_diagnostics(&diagnostics, &addition),
+            source,
+        },
+        FixtureError::Probe {
+            service,
+            operation,
+            diagnostics,
+            source,
+        } => FixtureError::Probe {
+            service,
+            operation,
+            diagnostics: join_diagnostics(&diagnostics, &addition),
+            source,
         },
         other => other,
     }

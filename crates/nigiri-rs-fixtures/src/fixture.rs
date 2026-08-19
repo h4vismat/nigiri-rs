@@ -102,6 +102,14 @@ impl<C: FixtureChain> Fixture<C> {
         &self.names.node
     }
 
+    /// A clone of the already-connected engine used by a composite's sibling supervisor.
+    ///
+    /// Crate-private so the runtime remains an implementation detail and callers cannot use a
+    /// fixture as a handle for unrelated containers.
+    pub(crate) fn engine(&self) -> BollardEngine {
+        self.engine.clone()
+    }
+
     /// Adds the inner stack's container logs to a composite's failure.
     ///
     /// A composite's own daemon can only be explained together with the node it followed and the

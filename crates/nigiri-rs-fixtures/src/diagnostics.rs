@@ -30,8 +30,17 @@ const _: () = assert!(
     "a bounded source must leave room for its truncation marker",
 );
 
-/// The name a password follows, whatever spelling a service chooses for the rest.
-const PASSWORD_ANCHOR: &str = "rpcpassword";
+/// Names a bootstrap secret follows, whatever spelling a service chooses for the rest.
+///
+/// Matching may start inside a longer option (`mainchainrpcpassword`, `admin_macaroon`) and an
+/// optional suffix such as `_hex` is consumed with the value. This covers raw- and hex-shaped LND
+/// markers without retaining each fixture's random secret in a global registry.
+const SECRET_ANCHORS: &[&str] = &[
+    "wallet_password",
+    "walletpassword",
+    "rpcpassword",
+    "macaroon",
+];
 /// Bytes that may sit between the anchor and the value: `=`, `:`, whitespace, and quotes cover
 /// command-line arguments, JSON, and prose alike.
 const ANCHOR_SEPARATORS: &[u8] = b"=: \t\"'";
@@ -68,14 +77,17 @@ pub(crate) fn redact(value: &str) -> String {
 /// loses its next word, which is an acceptable trade on an error path.
 fn redact_anchored_values(value: &str) -> String {
     let bytes = value.as_bytes();
-    let anchor = PASSWORD_ANCHOR.as_bytes();
     let mut redacted = String::with_capacity(value.len());
     let mut index = 0;
 
     while index < bytes.len() {
-        let anchored = bytes.len() - index >= anchor.len()
-            && bytes[index..index + anchor.len()].eq_ignore_ascii_case(anchor);
-        if !anchored {
+        let anchor = SECRET_ANCHORS.iter().find_map(|anchor| {
+            let anchor = anchor.as_bytes();
+            (bytes.len() - index >= anchor.len()
+                && bytes[index..index + anchor.len()].eq_ignore_ascii_case(anchor))
+            .then_some(anchor)
+        });
+        let Some(anchor) = anchor else {
             // Advancing by whole characters keeps every index a UTF-8 boundary.
             let character = value[index..]
                 .chars()
@@ -84,7 +96,7 @@ fn redact_anchored_values(value: &str) -> String {
             redacted.push(character);
             index += character.len_utf8();
             continue;
-        }
+        };
 
         // The anchor keeps the casing the service used; only the value is replaced.
         redacted.push_str(&value[index..index + anchor.len()]);
@@ -138,7 +150,11 @@ fn redaction_patterns() -> [(String, String); 3] {
 /// the cut is either wholly present or wholly discarded.
 #[cfg(test)]
 fn longest_matchable_sequence() -> usize {
-    let anchored = PASSWORD_ANCHOR.len() + 2 + RPC_PASSWORD.len();
+    let anchored = SECRET_ANCHORS
+        .iter()
+        .map(|anchor| anchor.len() + 2 + RPC_PASSWORD.len())
+        .max()
+        .unwrap_or(0);
 
     redaction_patterns()
         .iter()
@@ -409,10 +425,32 @@ mod tests {
             // rather than left to match by accident.
             "-mainchainrpcuser=admin1",
             "-mainchainrpcpassword=123",
+            // LND bootstrap diagnostics. Both a raw-looking marker and its hex-shaped form are
+            // covered; runtime-generated values are never registered or retained globally.
+            "wallet_password=raw-wallet-secret",
+            "wallet_password_hex=7261772d77616c6c65742d736563726574",
+            "macaroon=raw-macaroon-secret",
+            "macaroon_hex=7261772d6d616361726f6f6e2d736563726574",
         ] {
             let redacted = redact(spelling);
             assert!(!redacted.contains("admin1"), "{spelling} -> {redacted}");
             assert!(!redacted.contains(RPC_PASSWORD), "{spelling} -> {redacted}");
+            assert!(
+                !redacted.contains("raw-wallet-secret"),
+                "{spelling} -> {redacted}"
+            );
+            assert!(
+                !redacted.contains("7261772d77616c6c65742d736563726574"),
+                "{spelling} -> {redacted}"
+            );
+            assert!(
+                !redacted.contains("raw-macaroon-secret"),
+                "{spelling} -> {redacted}"
+            );
+            assert!(
+                !redacted.contains("7261772d6d616361726f6f6e2d736563726574"),
+                "{spelling} -> {redacted}"
+            );
         }
     }
 

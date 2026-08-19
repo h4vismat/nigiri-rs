@@ -18,6 +18,7 @@ mod node;
 mod payment;
 mod transport;
 mod types;
+mod wallet_unlocker;
 
 pub use amount::{Millisats, Sats};
 pub use client::LndClient;
@@ -27,6 +28,7 @@ pub use types::{
     Channel, CreateInvoiceRequest, InvoiceRecord, InvoiceState, NodeInfo, OpenChannelRequest,
     PaymentOptions, PaymentRecord, PaymentState, Peer, PeerAddress, WalletBalance,
 };
+pub use wallet_unlocker::{LndBootstrapConfig, initialize_wallet};
 
 /// Portable, statically dispatched Lightning node operations.
 pub trait LightningNode: Clone + Send + Sync {

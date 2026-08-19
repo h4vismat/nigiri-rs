@@ -250,7 +250,11 @@ mod harness {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error as _, sync::Arc, time::Duration};
+    use std::{
+        error::Error as _,
+        sync::{Arc, Once},
+        time::Duration,
+    };
 
     use rcgen::CertifiedKey;
     use tokio::sync::{Mutex, oneshot};
@@ -320,6 +324,7 @@ mod tests {
             delay: Duration,
             status: Option<Status>,
         ) -> Self {
+            install_test_crypto_provider();
             let CertifiedKey { cert, signing_key } =
                 rcgen::generate_simple_self_signed(vec![certificate_name.into()]).unwrap();
             let certificate = cert.pem().into_bytes();
@@ -375,6 +380,18 @@ mod tests {
         }
     }
 
+    // Tonic's client path selects its compiled provider explicitly, but its test-server path uses
+    // rustls' process default. A full workspace build also enables reqwest's AWS-LC provider, so
+    // rustls cannot infer a default from features alone. Keep this selection inside the test
+    // harness: production clients remain compatible with an embedding application's provider.
+    fn install_test_crypto_provider() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
     impl Drop for TestServer {
         fn drop(&mut self) {
             if let Some(shutdown) = self.shutdown.take() {
@@ -423,6 +440,14 @@ mod tests {
     fn authenticated_and_unauthenticated_clients_are_send_and_sync() {
         assert_send_sync::<LndClient>();
         assert_send_sync::<super::UnauthenticatedLndClient>();
+    }
+
+    // Catches the workspace feature-unification case where both rustls providers are compiled and
+    // tonic's server builder would otherwise panic while trying to infer one.
+    #[test]
+    fn tls_test_provider_selection_is_idempotent() {
+        install_test_crypto_provider();
+        install_test_crypto_provider();
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt,
+    future::Future,
     io::{self, Cursor, Read},
 };
 
@@ -53,6 +54,14 @@ impl EngineError {
     pub(crate) fn operation(&self) -> &'static str {
         self.operation
     }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.operation == "start fixture"
+            && self
+                .source
+                .downcast_ref::<io::Error>()
+                .is_some_and(|source| source.kind() == io::ErrorKind::Interrupted)
+    }
 }
 
 impl fmt::Display for EngineError {
@@ -67,35 +76,38 @@ impl Error for EngineError {
     }
 }
 
-#[allow(async_fn_in_trait)]
 pub(crate) trait ContainerEngine: Clone + Send + Sync + 'static {
     fn endpoint_host(&self) -> &str;
-    async fn create_network(
+    fn create_network(
         &self,
         name: &str,
         labels: HashMap<String, String>,
-    ) -> EngineResult<String>;
-    async fn ensure_image(&self, spec: &ContainerSpec) -> EngineResult<()>;
-    async fn create_container(
+    ) -> impl Future<Output = EngineResult<String>> + Send;
+    fn ensure_image(&self, spec: &ContainerSpec) -> impl Future<Output = EngineResult<()>> + Send;
+    fn create_container(
         &self,
         spec: &ContainerSpec,
         labels: HashMap<String, String>,
-    ) -> EngineResult<String>;
-    async fn start_container(&self, id: &str) -> EngineResult<()>;
-    async fn mapped_port(&self, id: &str, container_port: u16) -> EngineResult<u16>;
-    async fn logs(&self, id: &str) -> EngineResult<String>;
+    ) -> impl Future<Output = EngineResult<String>> + Send;
+    fn start_container(&self, id: &str) -> impl Future<Output = EngineResult<()>> + Send;
+    fn mapped_port(
+        &self,
+        id: &str,
+        container_port: u16,
+    ) -> impl Future<Output = EngineResult<u16>> + Send;
+    fn logs(&self, id: &str) -> impl Future<Output = EngineResult<String>> + Send;
     #[allow(
         dead_code,
         reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
     )]
-    async fn read_container_file(
+    fn read_container_file(
         &self,
         id: &str,
         path: &str,
         max_bytes: usize,
-    ) -> EngineResult<Vec<u8>>;
-    async fn remove_container(&self, id_or_name: &str) -> EngineResult<()>;
-    async fn remove_network(&self, id_or_name: &str) -> EngineResult<()>;
+    ) -> impl Future<Output = EngineResult<Vec<u8>>> + Send;
+    fn remove_container(&self, id_or_name: &str) -> impl Future<Output = EngineResult<()>> + Send;
+    fn remove_network(&self, id_or_name: &str) -> impl Future<Output = EngineResult<()>> + Send;
 }
 
 #[derive(Clone)]

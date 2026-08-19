@@ -72,6 +72,7 @@ mod image;
     reason = "Task 6 primitives are consumed by the Task 7 LndPair lifecycle"
 )]
 mod lnd;
+mod lnd_pair;
 mod node;
 mod peg_pair;
 mod readiness;
@@ -81,6 +82,7 @@ pub use chain::FixtureChain;
 pub use error::FixtureError;
 pub use fixture::{Fixture, FixtureBuilder};
 pub use image::ContainerImage;
+pub use lnd_pair::{LndPair, LndPairBuilder};
 pub use nigiri_rs_core::{Bitcoin, ElectrumEndpoint, Liquid};
 pub use peg_pair::{PegPair, PegPairBuilder};
 

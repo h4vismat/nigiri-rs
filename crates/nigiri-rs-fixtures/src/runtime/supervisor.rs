@@ -47,13 +47,54 @@ impl<E: ContainerEngine> Startup<E> {
         &mut self,
         spec: ContainerSpec,
     ) -> EngineResult<RunningContainer> {
-        let engine = self.engine.clone();
-        self.run(engine.ensure_image(&spec)).await?;
+        self.expect_container(&spec.name);
+        self.start_expected_container(spec).await
+    }
 
+    /// Starts two already-validated specifications concurrently while reserving their cleanup
+    /// order deterministically. Alice is reserved before Bob, so reverse-order teardown always
+    /// removes Bob first even if its engine calls happen to finish first.
+    pub(crate) async fn start_container_pair(
+        &mut self,
+        first: ContainerSpec,
+        second: ContainerSpec,
+    ) -> (
+        EngineResult<RunningContainer>,
+        EngineResult<RunningContainer>,
+    ) {
+        self.expect_container(&first.name);
+        self.expect_container(&second.name);
+        let mut first_startup = self.branch();
+        let mut second_startup = self.branch();
+        tokio::join!(
+            first_startup.start_expected_container(first),
+            second_startup.start_expected_container(second)
+        )
+    }
+
+    fn expect_container(&mut self, name: &str) {
         self.ledger
             .lock()
             .expect("resource ledger is not poisoned")
-            .expect_container(spec.name.clone());
+            .expect_container(name.to_owned());
+    }
+
+    fn branch(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            ledger: Arc::clone(&self.ledger),
+            cancelled: self.cancelled.clone(),
+            labels: self.labels.clone(),
+        }
+    }
+
+    async fn start_expected_container(
+        &mut self,
+        spec: ContainerSpec,
+    ) -> EngineResult<RunningContainer> {
+        let engine = self.engine.clone();
+        self.run(engine.ensure_image(&spec)).await?;
+
         let engine = self.engine.clone();
         let labels = self.labels.clone();
         let id = self.run(engine.create_container(&spec, labels)).await?;
@@ -110,21 +151,33 @@ impl<E: ContainerEngine> Startup<E> {
         Ok(contents)
     }
 
-    async fn run<T>(
+    /// Bounds any composite-specific await by the supervisor's caller-cancellation signal.
+    ///
+    /// Runtime engine operations use the private flattening wrapper below. Protocol RPCs and
+    /// readiness sleeps return their own result types, so composites use this generic layer and
+    /// preserve those results unchanged.
+    pub(crate) async fn run_until_cancelled<T>(
         &mut self,
-        operation: impl Future<Output = EngineResult<T>>,
+        operation: impl Future<Output = T>,
     ) -> EngineResult<T> {
         if *self.cancelled.borrow() {
             return Err(cancelled_error());
         }
 
         tokio::select! {
-            result = operation => result,
+            result = operation => Ok(result),
             changed = self.cancelled.changed() => {
                 let _ = changed;
                 Err(cancelled_error())
             }
         }
+    }
+
+    async fn run<T>(
+        &mut self,
+        operation: impl Future<Output = EngineResult<T>>,
+    ) -> EngineResult<T> {
+        self.run_until_cancelled(operation).await?
     }
 }
 
@@ -183,19 +236,37 @@ impl Drop for RuntimeHandle {
 
 struct CallerCancellation {
     sender: Option<watch::Sender<bool>>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl CallerCancellation {
-    fn disarm(&mut self) {
+    fn disarm(&mut self) -> std::thread::JoinHandle<()> {
         self.sender = None;
+        self.thread
+            .take()
+            .expect("the supervisor thread is transferred once")
+    }
+
+    fn cancel_and_join(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(true);
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+
+    fn join_completed(&mut self) {
+        self.sender = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
 impl Drop for CallerCancellation {
     fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(true);
-        }
+        self.cancel_and_join();
     }
 }
 
@@ -208,9 +279,6 @@ where
     X: From<EngineError> + Send + 'static,
 {
     let (cancel_sender, cancel_receiver) = watch::channel(false);
-    let mut cancellation = CallerCancellation {
-        sender: Some(cancel_sender),
-    };
     let (result_sender, result_receiver) = oneshot::channel();
 
     let thread = std::thread::Builder::new()
@@ -243,7 +311,16 @@ where
                     )]),
                 };
 
-                match AssertUnwindSafe(work(startup)).catch_unwind().await {
+                let mut work_cancelled = startup.cancelled.clone();
+                let outcome = tokio::select! {
+                    outcome = AssertUnwindSafe(work(startup)).catch_unwind() => outcome,
+                    changed = work_cancelled.changed() => {
+                        let _ = changed;
+                        Ok(Err(X::from(cancelled_error())))
+                    }
+                };
+
+                match outcome {
                     Ok(Ok(value)) => {
                         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
                         let (completion_sender, completion_receiver) = oneshot::channel();
@@ -278,11 +355,15 @@ where
             });
         })
         .map_err(|error| X::from(EngineError::new("spawn fixture supervisor", error)))?;
+    let mut cancellation = CallerCancellation {
+        sender: Some(cancel_sender),
+        thread: Some(thread),
+    };
 
     let result = match result_receiver.await {
         Ok(result) => result,
         Err(_) => {
-            let _ = thread.join();
+            cancellation.cancel_and_join();
             return Err(X::from(EngineError::new(
                 "wait for fixture supervisor",
                 std::io::Error::other("fixture supervisor stopped before startup completed"),
@@ -291,12 +372,11 @@ where
     };
     match result {
         Ok((value, mut handle)) => {
-            cancellation.disarm();
-            handle.thread = Some(thread);
+            handle.thread = Some(cancellation.disarm());
             Ok((value, handle))
         }
         Err(error) => {
-            let _ = thread.join();
+            cancellation.join_completed();
             Err(error)
         }
     }

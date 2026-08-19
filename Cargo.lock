@@ -1224,6 +1224,7 @@ dependencies = [
  "prost",
  "protoc-bin-vendored",
  "rcgen",
+ "rustls",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
