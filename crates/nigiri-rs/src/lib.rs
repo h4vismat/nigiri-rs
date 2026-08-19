@@ -1,7 +1,8 @@
-//! Typed Bitcoin and Liquid regtest clients, with optional ephemeral Docker fixtures.
+//! Typed Bitcoin/Liquid regtest clients and optional host-managed LND support, with Docker fixtures.
 //!
-//! This crate is a facade. The client lives in `nigiri-rs-core` and is re-exported here in full,
-//! so every path published at 0.2.0 still resolves:
+//! This crate is a facade. The Bitcoin/Liquid client lives in `nigiri-rs-core`; optional Lightning
+//! clients and protocol types live in `nigiri-rs-lnd`. Their public APIs are re-exported here, while
+//! every path published at 0.2.0 still resolves:
 //!
 //! ```
 //! use nigiri_rs::{Bitcoin, NigiriClient};

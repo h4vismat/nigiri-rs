@@ -726,7 +726,7 @@ outcome when the request may have committed even if no hash was observed.
 
 ### `LightningNode`
 
-The statically dispatched portability boundary has associated `type Error` and the same ten
+The statically dispatched portability boundary has associated `type Error` and the same eleven
 operational methods as `LndClient`: `get_info`, `new_address`, `wallet_balance`, `connect_peer`,
 `list_peers`, `open_channel`, `list_channels`, `create_invoice`, `lookup_invoice`, `pay_invoice`, and
 `lookup_payment`. Each returns `impl Future + Send`. `LndClient` implements it with `LndError`; the

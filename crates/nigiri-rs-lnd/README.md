@@ -4,7 +4,7 @@ Host-managed [LND](https://github.com/lightningnetwork/lnd) client primitives fo
 `nigiri-rs`. This crate connects to an LND process you manage; it does not start
 Docker containers or own service lifecycle.
 
-The public API covers wallet initialization and unlocking, readiness checks,
+The public API covers wallet initialization, readiness checks,
 peer and channel management, invoices, payments, and payment or invoice lookup.
 Use `nigiri-rs-fixtures` when a test should provision and own a complete local
 two-node Lightning topology.

@@ -21,7 +21,8 @@ const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A running regtest stack with a funded wallet, ready to be queried.
 ///
-/// Dropping the fixture asks its lifecycle supervisor to remove everything it created.
+/// Dropping the fixture requests best-effort cleanup from its lifecycle supervisor. Use
+/// [`Fixture::shutdown`] when cleanup errors matter; a hard process kill can still leave resources.
 pub struct Fixture<C: FixtureChain> {
     runtime: Option<RuntimeHandle>,
     engine: BollardEngine,

@@ -62,8 +62,9 @@ you supplied and touches nothing else.
 
 **A fixture owns the services.** `Fixture::start()` creates one chain stack. `PegPair` owns a wired
 Bitcoin/Liquid pair. `LndPair` owns a backing Bitcoin stack plus Alice and Bob LND. Dropping the
-owning handle removes every resource it created; explicit `shutdown()` awaits cleanup and reports an
-error. Ownership is visible in the type system: services live exactly as long as the owning value.
+owning handle requests best-effort cleanup; explicit `shutdown()` awaits cleanup and reports an
+error. A hard process kill can still leave resources for manual removal. Ownership is visible in
+the type system: the owning value defines the intended service lifetime.
 
 For `LndPair`, dependency order is part of the contract. Bob is removed before Alice, then Electrs
 before bitcoind, and only then is the shared network removed. Startup, failure diagnostics, and

@@ -92,7 +92,7 @@ The protocol clients do not start or stop anything. Two paths exist, and they ca
 side.
 
 **Ephemeral fixtures.** The companion `nigiri-rs-fixtures` crate, reached through the facade's
-`fixtures` feature, starts throwaway Bitcoin, Liquid, peg, or Lightning stacks and removes them:
+`fixtures` feature, starts and owns throwaway Bitcoin, Liquid, peg, or Lightning stacks:
 
 ```toml
 [dev-dependencies]
@@ -112,7 +112,12 @@ let electrum_port = fixture.electrum_endpoint().port();
 # }
 ```
 
-Docker must be running; no Nigiri installation is needed. Containers, their anonymous volumes, and the network are removed when the fixture is dropped. Ports are assigned by the runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a machine pulls two pinned images per chain and is slow; later starts are ready in a few seconds. `Fixture::<Liquid>::start` starts the same way; swap the type parameter. Podman is untested.
+Docker must be running; no Nigiri installation is needed. Drop requests best-effort cleanup of the
+containers, their anonymous volumes, and the network; use `shutdown().await` when cleanup failures
+matter. A hard process kill can still leave resources for manual removal. Ports are assigned by the
+runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a
+machine pulls two pinned images per chain and is slow; later starts are ready in a few seconds.
+`Fixture::<Liquid>::start` starts the same way; swap the type parameter. Podman is untested.
 
 **One attribute instead of a preamble.** The same feature provides `#[nigiri_rs::test]`, which starts
 a fixture per parameter and hands the body what that parameter asked for. It needs the `fixtures`
@@ -414,7 +419,7 @@ That is also the scope of the three Docker-free CI matrix cells. A plain workspa
 not Docker-free: it also runs `nigiri-rs-fixtures` and facade integration tests.
 
 Bitcoin, Liquid, peg, and real LND payment integration tests need Docker but no host installation.
-Each owns its resources and removes everything it created when it finishes:
+Each owns its resources and requests best-effort cleanup when it finishes:
 
 ```sh
 cargo test -p nigiri-rs-fixtures --all-targets --all-features

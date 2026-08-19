@@ -69,7 +69,7 @@ the indexer caught up, and all three services agree on the tip.
 
 ## Let it go
 
-Teardown is `Drop`. There is no `close()` and no cleanup step to forget:
+Drop starts best-effort cleanup automatically. Use explicit shutdown when its result matters:
 
 ```rust,ignore
 let fixture = Fixture::<Bitcoin>::start().await?;

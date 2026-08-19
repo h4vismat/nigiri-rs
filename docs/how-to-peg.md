@@ -44,8 +44,10 @@ Signature: `PegPair::start() -> Result<PegPair, FixtureError>`. `PegPair::builde
 four images and the 120-second startup budget; see the
 [fixture reference](reference-fixtures.md#pegpairbuilder).
 
-Dropping the pair removes all four containers, their anonymous volumes, and the shared network. Keep
-the `PegPair` alive, not the borrows — `bitcoin()`, `liquid()`, and `peg()` all borrow from it.
+Dropping the pair requests best-effort cleanup of all four containers, their anonymous volumes, and
+the shared network. Use `pair.shutdown().await` when cleanup errors matter; a hard process kill can
+still leave resources. Keep the `PegPair` alive, not the borrows — `bitcoin()`, `liquid()`, and
+`peg()` all borrow from it.
 
 Or let the macro own it. A `PegPair` parameter binds the pair itself, not a clone of a client:
 

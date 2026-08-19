@@ -73,7 +73,9 @@ test a_fresh_chain_arrives_funded ... ok
 **That's a working chain.** The attribute started a Bitcoin node and an Electrs indexer in Docker,
 mined 101 blocks so the coinbase would mature, waited until node, Esplora, and Electrum all agreed on
 the tip, and handed your function a client pointed at all of it. When the test ended, both
-containers, their volumes, and their network were removed.
+containers, their volumes, and their network entered best-effort cleanup. A hard process kill can
+still leave resources. When cleanup errors matter, use the manual fixture API from step 7 and call
+`shutdown().await` on its owning handle.
 
 Height 101 is not arbitrary: Bitcoin's coinbase needs 100 confirmations to become spendable, so 101
 blocks is the smallest chain with money you can actually move.
@@ -197,7 +199,7 @@ async fn manual_fixture() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(client.block_height().await?, 101);
 
-    drop(fixture); // containers gone here
+    drop(fixture); // best-effort cleanup starts here
     Ok(())
 }
 ```

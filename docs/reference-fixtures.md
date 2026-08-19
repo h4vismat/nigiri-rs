@@ -45,8 +45,9 @@ client; it is a convenience, not a second source of truth.
 
 ### Lifetime and teardown
 
-**The fixture owns the containers.** Dropping it removes both containers, their anonymous volumes,
-and the network. Nothing survives the test.
+**The fixture owns the containers.** Dropping it requests best-effort cleanup of both containers,
+their anonymous volumes, and the network. Use `shutdown().await` when cleanup errors matter. A hard
+process kill can still leave resources for manual removal.
 
 How many anonymous volumes exist depends on the images, not on the fixture: Docker creates one per
 `VOLUME` an image declares, and of the pinned four only `docker-bitcoind` declares any. A Bitcoin
@@ -251,9 +252,10 @@ same two nodes are also reachable as `peg().bitcoin()` and `peg().liquid()`.
 
 ### Lifetime and teardown
 
-**The pair owns all four containers.** Dropping it removes them, their anonymous volumes, and the
-shared network. Nothing survives the test, and the network belongs to neither half alone — which is
-why the pair, not either inner stack, is what you keep alive.
+**The pair owns all four containers.** Dropping it requests best-effort cleanup of them, their
+anonymous volumes, and the shared network. Use `shutdown().await` when cleanup errors matter. A hard
+process kill can still leave resources, and the network belongs to neither half alone — which is why
+the pair, not either inner stack, is what you keep alive.
 
 **The Liquid stack is released first.** `elementsd` holds an RPC connection to `bitcoind` through
 `-mainchainrpc*` and must not outlive it, so the two inner stacks live in their own struct whose field
