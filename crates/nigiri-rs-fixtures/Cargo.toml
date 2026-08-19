@@ -12,6 +12,7 @@ default = []
 bitcoin-rpc-types = ["nigiri-rs-core/bitcoin-rpc-types"]
 
 [dependencies]
+bitcoin = { version = "0.32.7", features = ["serde"] }
 bollard = "0.20.2"
 futures-util = "0.3.32"
 getrandom = "0.3.3"
@@ -30,6 +31,5 @@ uuid = { version = "1.20.0", features = ["v4"] }
 # assert against. `tokio/test-util` is the pausable clock the deadline test in src/electrum.rs
 # drives with `start_paused` and `time::advance`; the library itself needs `tokio/net` for the
 # Electrum probe, but not the rest.
-bitcoin = { version = "0.32.7", features = ["serde"] }
 elements = { version = "0.25.3", features = ["serde"] }
 tokio = { version = "1.50.0", features = ["test-util"] }

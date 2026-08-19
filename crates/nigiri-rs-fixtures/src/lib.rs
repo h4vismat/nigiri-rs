@@ -23,6 +23,11 @@
 //! validating peg-ins against the `bitcoind` beside it. Its peg-in is real; its peg-out release is
 //! simulated and holds no reserve. See [`PegPair`] and [`nigiri_rs_core::Peg`].
 //!
+//! [`LndPair`] starts a funded Bitcoin fixture and two LND nodes on its private network. It returns
+//! only after both nodes match the Bitcoin tip, share one confirmed active channel, and settle a
+//! 1,000-millisatoshi readiness payment in each direction. Its [`LndPair::channel_point`] identifies
+//! that channel without exposing LND protobuf or container types.
+//!
 //! # What a fixture requires and guarantees
 //!
 //! Docker must be running; no Nigiri installation is needed. Ports are chosen by the runtime, so read
@@ -31,6 +36,9 @@
 //! volumes, and the network are removed when the fixture is dropped, and nothing survives the test.
 //! The first start on a machine pulls two pinned images per chain, which is slow; later starts reuse
 //! them and a fixture is ready in a few seconds.
+//! [`LndPair`] owns four containers and uses a 180-second default startup budget because wallet
+//! funding, six channel confirmations, graph propagation, and both readiness payments all consume
+//! one deadline.
 //!
 //! When [`Fixture::start`] returns, the node, Esplora, and Electrum all report the same tip,
 //! so the wallet's funds are queryable through any of them. That agreement is established once, at
@@ -69,7 +77,7 @@ mod fixture;
 mod image;
 #[allow(
     dead_code,
-    reason = "Task 6 primitives are consumed by the Task 7 LndPair lifecycle"
+    reason = "fixture-private LND constants support the LndPair runtime boundary"
 )]
 mod lnd;
 mod lnd_pair;
