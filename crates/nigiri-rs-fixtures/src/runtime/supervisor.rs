@@ -275,7 +275,12 @@ struct CallerCancellation {
     sender: Option<watch::Sender<bool>>,
     thread: Option<std::thread::JoinHandle<()>>,
     completed: Option<Receiver<()>>,
-    deadline: Deadline,
+    wait: CancellationWait,
+}
+
+enum CancellationWait {
+    Deadline(Deadline),
+    Complete,
 }
 
 impl CallerCancellation {
@@ -302,16 +307,21 @@ impl CallerCancellation {
         let Some(thread) = self.thread.take() else {
             return;
         };
-        let completed = thread.is_finished()
-            || self.completed.as_ref().is_some_and(|completed| {
-                if self.deadline.remaining().is_zero() {
-                    return false;
-                }
-                matches!(
-                    completed.recv_timeout(self.deadline.remaining()),
-                    Ok(()) | Err(RecvTimeoutError::Disconnected)
-                )
-            });
+        let completed = match &self.wait {
+            CancellationWait::Complete => true,
+            CancellationWait::Deadline(deadline) => {
+                thread.is_finished()
+                    || self.completed.as_ref().is_some_and(|completed| {
+                        if deadline.remaining().is_zero() {
+                            return false;
+                        }
+                        matches!(
+                            completed.recv_timeout(deadline.remaining()),
+                            Ok(()) | Err(RecvTimeoutError::Disconnected)
+                        )
+                    })
+            }
+        };
         self.completed = None;
         if completed {
             let _ = thread.join();
@@ -335,9 +345,55 @@ impl Drop for ThreadCompletion {
     }
 }
 
+pub(crate) struct CoordinatorCancellation {
+    receiver: watch::Receiver<bool>,
+}
+
+impl CoordinatorCancellation {
+    pub(crate) async fn cancelled(&mut self) {
+        if *self.receiver.borrow() {
+            return;
+        }
+        let _ = self.receiver.changed().await;
+    }
+}
+
 pub(crate) async fn supervise<E, T, F, Fut, X>(
     engine: E,
     deadline: Deadline,
+    work: F,
+) -> Result<(T, RuntimeHandle), X>
+where
+    E: ContainerEngine,
+    T: Send + 'static,
+    F: FnOnce(Startup<E>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, X>> + Send + 'static,
+    X: From<EngineError> + Send + 'static,
+{
+    supervise_with_wait(engine, CancellationWait::Deadline(deadline), work).await
+}
+
+/// A supervisor whose cancellation join is owned by an outer dependency coordinator.
+///
+/// Only the coordinator's caller guard is deadline-bounded. Once detached, the coordinator waits
+/// for this supervisor to finish reverse-order cleanup before it starts dependency cleanup.
+pub(crate) async fn supervise_for_coordinator<E, T, F, Fut, X>(
+    engine: E,
+    work: F,
+) -> Result<(T, RuntimeHandle), X>
+where
+    E: ContainerEngine,
+    T: Send + 'static,
+    F: FnOnce(Startup<E>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, X>> + Send + 'static,
+    X: From<EngineError> + Send + 'static,
+{
+    supervise_with_wait(engine, CancellationWait::Complete, work).await
+}
+
+async fn supervise_with_wait<E, T, F, Fut, X>(
+    engine: E,
+    wait: CancellationWait,
     work: F,
 ) -> Result<(T, RuntimeHandle), X>
 where
@@ -430,7 +486,7 @@ where
         sender: Some(cancel_sender),
         thread: Some(thread),
         completed: Some(completed_receiver),
-        deadline,
+        wait,
     };
 
     let result = match result_receiver.await {
@@ -453,6 +509,86 @@ where
             Err(error)
         }
     }
+}
+
+/// Runs dependency-aware startup ownership on one dedicated thread.
+///
+/// Dropping the caller signals cancellation and waits only through the shared deadline. The work
+/// itself remains on the coordinator thread after detachment and is responsible for sequencing
+/// dependent cleanup before returning.
+pub(crate) async fn coordinate_startup<T, F, Fut, X>(deadline: Deadline, work: F) -> Result<T, X>
+where
+    T: Send + 'static,
+    F: FnOnce(CoordinatorCancellation) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, X>> + 'static,
+    X: From<EngineError> + Send + 'static,
+{
+    let (cancel_sender, cancel_receiver) = watch::channel(false);
+    let (result_sender, result_receiver) = oneshot::channel();
+    let (completed_sender, completed_receiver) = sync_channel(1);
+
+    let thread = std::thread::Builder::new()
+        .name("nigiri-rs-composite".to_owned())
+        .spawn(move || {
+            let _completion = ThreadCompletion(Some(completed_sender));
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = result_sender.send(Err(EngineError::new(
+                        "start composite coordinator",
+                        error,
+                    )
+                    .into()));
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(
+                AssertUnwindSafe(work(CoordinatorCancellation {
+                    receiver: cancel_receiver,
+                }))
+                .catch_unwind(),
+            );
+            let result = match outcome {
+                Ok(result) => result,
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("composite startup panicked");
+                    Err(EngineError::new(
+                        "run composite startup",
+                        std::io::Error::other(message.to_owned()),
+                    )
+                    .into())
+                }
+            };
+            let _ = result_sender.send(result);
+        })
+        .map_err(|error| X::from(EngineError::new("spawn composite coordinator", error)))?;
+    let mut cancellation = CallerCancellation {
+        sender: Some(cancel_sender),
+        thread: Some(thread),
+        completed: Some(completed_receiver),
+        wait: CancellationWait::Deadline(deadline),
+    };
+
+    let result = match result_receiver.await {
+        Ok(result) => result,
+        Err(_) => {
+            cancellation.cancel_and_join();
+            return Err(X::from(EngineError::new(
+                "wait for composite coordinator",
+                std::io::Error::other("composite coordinator stopped before startup completed"),
+            )));
+        }
+    };
+    cancellation.join_completed();
+    result
 }
 
 async fn cleanup<E: ContainerEngine>(
@@ -484,7 +620,7 @@ async fn cleanup<E: ContainerEngine>(
     first_error.map_or(Ok(()), Err)
 }
 
-fn cancelled_error() -> EngineError {
+pub(super) fn cancelled_error() -> EngineError {
     EngineError::new(
         "start fixture",
         std::io::Error::new(

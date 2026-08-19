@@ -2,6 +2,7 @@
 
 use std::{fmt, future::Future, time::Duration};
 
+use futures_util::future::Either;
 use nigiri_rs_core::{Bitcoin, NigiriClient};
 use nigiri_rs_lnd::{LndBootstrapConfig, LndClient, LndError, NodeInfo, Sats, initialize_wallet};
 use url::Url;
@@ -15,8 +16,9 @@ use crate::{
     lnd::{LND_GRPC_PORT, TLS_CERT_PATH},
     readiness::RETRY_DELAY,
     runtime::{
-        ContainerEngine, RuntimeHandle, Startup, attach_container_log, lnd_spec, runtime_error,
-        supervise,
+        ContainerEngine, CoordinatorCancellation, RuntimeHandle, Startup, attach_container_log,
+        cancelled_startup_error, coordinate_startup, lnd_spec, runtime_error, supervise,
+        supervise_for_coordinator,
     },
 };
 
@@ -53,6 +55,97 @@ pub struct LndPair {
 struct LndHandles<LndRuntime, BitcoinStack> {
     lnd: LndRuntime,
     bitcoin: BitcoinStack,
+}
+
+struct StartedLndPair<Client, BitcoinStack> {
+    handles: LndHandles<RuntimeHandle, BitcoinStack>,
+    nodes: StartedLndNodes<Client>,
+}
+
+trait LndPairEnvironment: Clone + Send + Sync + 'static {
+    type BitcoinStack: Send + 'static;
+    type Engine: ContainerEngine;
+    type Connector: LndNodeConnector;
+    type BitcoinTip: BitcoinTip;
+
+    async fn start_bitcoin(
+        &self,
+        bitcoind_image: ContainerImage,
+        electrs_image: ContainerImage,
+        deadline: &Deadline,
+    ) -> Result<Self::BitcoinStack, FixtureError>;
+
+    fn engine(&self, bitcoin: &Self::BitcoinStack) -> Self::Engine;
+    fn network_name(&self, bitcoin: &Self::BitcoinStack) -> String;
+    fn node_container_name(&self, bitcoin: &Self::BitcoinStack) -> String;
+    fn bitcoin_tip(&self, bitcoin: &Self::BitcoinStack) -> Self::BitcoinTip;
+    fn connector(&self) -> Self::Connector;
+
+    async fn attach_inner_logs(
+        &self,
+        bitcoin: &Self::BitcoinStack,
+        deadline: &Deadline,
+        error: FixtureError,
+    ) -> FixtureError;
+
+    async fn shutdown_bitcoin(&self, bitcoin: Self::BitcoinStack) -> Result<(), FixtureError>;
+}
+
+#[derive(Clone, Copy)]
+struct RealLndPairEnvironment;
+
+impl LndPairEnvironment for RealLndPairEnvironment {
+    type BitcoinStack = Fixture<Bitcoin>;
+    type Engine = crate::runtime::BollardEngine;
+    type Connector = RealLndConnector;
+    type BitcoinTip = NigiriClient<Bitcoin>;
+
+    async fn start_bitcoin(
+        &self,
+        bitcoind_image: ContainerImage,
+        electrs_image: ContainerImage,
+        deadline: &Deadline,
+    ) -> Result<Self::BitcoinStack, FixtureError> {
+        Fixture::<Bitcoin>::builder()
+            .node_image(bitcoind_image)
+            .electrs_image(electrs_image)
+            .extra_node_args(bitcoin_zmq_args())
+            .start_under(deadline)
+            .await
+    }
+
+    fn engine(&self, bitcoin: &Self::BitcoinStack) -> Self::Engine {
+        bitcoin.engine()
+    }
+
+    fn network_name(&self, bitcoin: &Self::BitcoinStack) -> String {
+        bitcoin.network_name().to_owned()
+    }
+
+    fn node_container_name(&self, bitcoin: &Self::BitcoinStack) -> String {
+        bitcoin.node_container_name().to_owned()
+    }
+
+    fn bitcoin_tip(&self, bitcoin: &Self::BitcoinStack) -> Self::BitcoinTip {
+        bitcoin.client().clone()
+    }
+
+    fn connector(&self) -> Self::Connector {
+        RealLndConnector
+    }
+
+    async fn attach_inner_logs(
+        &self,
+        bitcoin: &Self::BitcoinStack,
+        deadline: &Deadline,
+        error: FixtureError,
+    ) -> FixtureError {
+        bitcoin.attach_inner_logs(deadline, error).await
+    }
+
+    async fn shutdown_bitcoin(&self, bitcoin: Self::BitcoinStack) -> Result<(), FixtureError> {
+        bitcoin.shutdown().await
+    }
 }
 
 impl fmt::Debug for LndPair {
@@ -194,49 +287,99 @@ impl LndPairBuilder {
 
     /// Starts the backing fixture and both LND nodes under one shared startup deadline.
     pub async fn start(self) -> Result<LndPair, FixtureError> {
-        self.validate()?;
-        let deadline = Deadline::new(self.startup_timeout)?;
-
-        let bitcoin = Fixture::<Bitcoin>::builder()
-            .node_image(self.bitcoind_image)
-            .electrs_image(self.bitcoin_electrs_image)
-            .extra_node_args(bitcoin_zmq_args())
-            .start_under(&deadline)
-            .await?;
-
-        let nodes = start_lnd_nodes_under(
-            bitcoin.engine(),
-            bitcoin.network_name().to_owned(),
-            bitcoin.node_container_name().to_owned(),
-            self.alice_image,
-            self.bob_image,
-            &deadline,
-            RealLndConnector,
-            bitcoin.client().clone(),
-        )
-        .await;
-
-        let (started, lnd_runtime) = match nodes {
-            Ok(nodes) => nodes,
-            Err(error) => {
-                let error = bitcoin.attach_inner_logs(&deadline, error).await;
-                let _ = bitcoin.shutdown_within(&deadline).await;
-                return Err(error);
-            }
-        };
+        let started = self.start_with_environment(RealLndPairEnvironment).await?;
+        let StartedLndPair { handles, nodes } = started;
 
         Ok(LndPair {
-            handles: LndHandles {
-                lnd: lnd_runtime,
-                bitcoin,
-            },
-            alice: started.alice,
-            bob: started.bob,
-            names: started.names,
-            container_ids: started.container_ids,
+            handles,
+            alice: nodes.alice,
+            bob: nodes.bob,
+            names: nodes.names,
+            container_ids: nodes.container_ids,
             channel_capacity: self.channel_capacity,
             push_amount: self.push_amount,
         })
+    }
+
+    async fn start_with_environment<R>(
+        &self,
+        environment: R,
+    ) -> Result<
+        StartedLndPair<<R::Connector as LndNodeConnector>::Client, R::BitcoinStack>,
+        FixtureError,
+    >
+    where
+        R: LndPairEnvironment,
+    {
+        self.validate()?;
+        let deadline = Deadline::new(self.startup_timeout)?;
+        let bitcoind_image = self.bitcoind_image.clone();
+        let bitcoin_electrs_image = self.bitcoin_electrs_image.clone();
+        let alice_image = self.alice_image.clone();
+        let bob_image = self.bob_image.clone();
+        let coordinator_deadline = deadline.clone();
+        let work_deadline = deadline.clone();
+        let coordinated = coordinate_startup(
+            coordinator_deadline,
+            move |mut cancellation: CoordinatorCancellation| async move {
+                let bitcoin = tokio::select! {
+                    biased;
+                    bitcoin = environment.start_bitcoin(
+                        bitcoind_image,
+                        bitcoin_electrs_image,
+                        &work_deadline,
+                    ) => bitcoin?,
+                    () = cancellation.cancelled() => {
+                        return Err(cancelled_startup_error("LND pair"));
+                    }
+                };
+                let engine = environment.engine(&bitcoin);
+                let network_name = environment.network_name(&bitcoin);
+                let node_container_name = environment.node_container_name(&bitcoin);
+                let bitcoin_tip = environment.bitcoin_tip(&bitcoin);
+                let connector = environment.connector();
+                let nodes = tokio::select! {
+                    biased;
+                    nodes = start_lnd_nodes_for_coordinator(
+                        engine,
+                        network_name,
+                        node_container_name,
+                        alice_image,
+                        bob_image,
+                        &work_deadline,
+                        connector,
+                        bitcoin_tip,
+                    ) => Some(nodes),
+                    () = cancellation.cancelled() => None,
+                };
+
+                let (started, lnd_runtime) = match nodes {
+                    Some(Ok(nodes)) => nodes,
+                    Some(Err(error)) => {
+                        let error = environment
+                            .attach_inner_logs(&bitcoin, &work_deadline, error)
+                            .await;
+                        let _ = environment.shutdown_bitcoin(bitcoin).await;
+                        return Err(error);
+                    }
+                    None => {
+                        let _ = environment.shutdown_bitcoin(bitcoin).await;
+                        return Err(cancelled_startup_error("LND pair"));
+                    }
+                };
+
+                Ok(StartedLndPair {
+                    handles: LndHandles {
+                        lnd: lnd_runtime,
+                        bitcoin,
+                    },
+                    nodes: started,
+                })
+            },
+        );
+        deadline
+            .run("LND pair", "coordinating complete LND startup", coordinated)
+            .await?
     }
 
     fn validate(&self) -> Result<(), FixtureError> {
@@ -374,6 +517,10 @@ impl BitcoinTip for NigiriClient<Bitcoin> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    dead_code,
+    reason = "focused lifecycle tests exercise caller-owned supervisor cancellation directly"
+)]
 async fn start_lnd_nodes_under<E, C, B>(
     engine: E,
     network_name: String,
@@ -389,12 +536,79 @@ where
     C: LndNodeConnector,
     B: BitcoinTip,
 {
+    start_lnd_nodes(
+        engine,
+        network_name,
+        bitcoind_name,
+        alice_image,
+        bob_image,
+        deadline,
+        connector,
+        bitcoin_tip,
+        LndStartupOwner::CallerDeadline,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_lnd_nodes_for_coordinator<E, C, B>(
+    engine: E,
+    network_name: String,
+    bitcoind_name: String,
+    alice_image: ContainerImage,
+    bob_image: ContainerImage,
+    deadline: &Deadline,
+    connector: C,
+    bitcoin_tip: B,
+) -> Result<(StartedLndNodes<C::Client>, RuntimeHandle), FixtureError>
+where
+    E: ContainerEngine,
+    C: LndNodeConnector,
+    B: BitcoinTip,
+{
+    start_lnd_nodes(
+        engine,
+        network_name,
+        bitcoind_name,
+        alice_image,
+        bob_image,
+        deadline,
+        connector,
+        bitcoin_tip,
+        LndStartupOwner::CompositeCoordinator,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum LndStartupOwner {
+    CallerDeadline,
+    CompositeCoordinator,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_lnd_nodes<E, C, B>(
+    engine: E,
+    network_name: String,
+    bitcoind_name: String,
+    alice_image: ContainerImage,
+    bob_image: ContainerImage,
+    deadline: &Deadline,
+    connector: C,
+    bitcoin_tip: B,
+    owner: LndStartupOwner,
+) -> Result<(StartedLndNodes<C::Client>, RuntimeHandle), FixtureError>
+where
+    E: ContainerEngine,
+    C: LndNodeConnector,
+    B: BitcoinTip,
+{
     let names = LndNames::scoped();
     let endpoint_host = engine.endpoint_host().to_owned();
     let work_deadline = deadline.clone();
     let supervisor_deadline = deadline.clone();
 
-    let supervised = supervise(engine, supervisor_deadline, move |mut startup| async move {
+    let work = move |mut startup: Startup<E>| async move {
         let deadline = work_deadline;
         let alice_spec = lnd_spec(
             alice_image,
@@ -598,7 +812,15 @@ where
             names,
             container_ids: [alice_container.id, bob_container.id],
         })
-    });
+    };
+    let supervised = match owner {
+        LndStartupOwner::CallerDeadline => {
+            Either::Left(supervise(engine, supervisor_deadline, work))
+        }
+        LndStartupOwner::CompositeCoordinator => {
+            Either::Right(supervise_for_coordinator(engine, work))
+        }
+    };
     deadline
         .run("LND pair", "starting the complete LND topology", supervised)
         .await?
@@ -679,11 +901,57 @@ async fn wait_for_lnd_sync<C: LndNodeConnector, B: BitcoinTip>(
     let mut observation = "waiting for both LND nodes to synchronize to regtest".to_owned();
 
     loop {
-        let (alice_info, bob_info, bitcoin_height) = tokio::join!(
-            deadline.run(service, &observation, connector.get_info(alice)),
-            deadline.run("lnd-bob", &observation, connector.get_info(bob)),
-            deadline.run("bitcoind", &observation, bitcoin.block_height()),
-        );
+        let (alice_info, bob_info, bitcoin_height) = {
+            let alice_probe = deadline.run(service, &observation, connector.get_info(alice));
+            let bob_probe = deadline.run("lnd-bob", &observation, connector.get_info(bob));
+            let bitcoin_probe = deadline.run("bitcoind", &observation, bitcoin.block_height());
+            tokio::pin!(alice_probe, bob_probe, bitcoin_probe);
+            let mut alice_info = None;
+            let mut bob_info = None;
+            let mut bitcoin_height = None;
+
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut alice_probe, if alice_info.is_none() => {
+                        match result {
+                            Ok(Err(error)) if !is_transient_lnd_readiness(&error) => {
+                                return Err(lightning_bootstrap_error(
+                                    "query Alice synchronization",
+                                    error,
+                                ));
+                            }
+                            result => alice_info = Some(result),
+                        }
+                    }
+                    result = &mut bob_probe, if bob_info.is_none() => {
+                        match result {
+                            Ok(Err(error)) if !is_transient_lnd_readiness(&error) => {
+                                return Err(lightning_bootstrap_error(
+                                    "query Bob synchronization",
+                                    error,
+                                ));
+                            }
+                            result => bob_info = Some(result),
+                        }
+                    }
+                    result = &mut bitcoin_probe, if bitcoin_height.is_none() => {
+                        bitcoin_height = Some(result);
+                    }
+                }
+
+                match (alice_info, bob_info, bitcoin_height) {
+                    (Some(alice), Some(bob), Some(bitcoin)) => {
+                        break (alice, bob, bitcoin);
+                    }
+                    (alice, bob, bitcoin) => {
+                        alice_info = alice;
+                        bob_info = bob;
+                        bitcoin_height = bitcoin;
+                    }
+                }
+            }
+        };
 
         match (alice_info, bob_info, bitcoin_height) {
             (Ok(Ok(alice)), Ok(Ok(bob)), Ok(Ok(bitcoin_height)))
@@ -692,18 +960,6 @@ async fn wait_for_lnd_sync<C: LndNodeConnector, B: BitcoinTip>(
                 return Ok(());
             }
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => return Err(error),
-            (Ok(Err(error)), _, _) if !is_transient_lnd_readiness(&error) => {
-                return Err(lightning_bootstrap_error(
-                    "query Alice synchronization",
-                    error,
-                ));
-            }
-            (_, Ok(Err(error)), _) if !is_transient_lnd_readiness(&error) => {
-                return Err(lightning_bootstrap_error(
-                    "query Bob synchronization",
-                    error,
-                ));
-            }
             (Ok(Err(error)), _, _) => {
                 service = "lnd-alice";
                 observation = redacted_tail(&format!("Alice GetInfo is not ready: {error}"));
@@ -857,7 +1113,8 @@ mod tests {
     use tokio::sync::{Barrier, Notify};
 
     use super::{
-        BitcoinTip, LndHandles, LndNodeConnector, LndPair, LndSyncStatus, start_lnd_nodes_under,
+        BitcoinTip, LndHandles, LndNodeConnector, LndPair, LndPairEnvironment, LndSyncStatus,
+        start_lnd_nodes_under, wait_for_lnd_sync,
     };
     use crate::{
         ContainerImage, FixtureError,
@@ -1111,6 +1368,8 @@ mod tests {
         Authentication,
         InvalidResponse,
         UnavailableOnce,
+        AliceAuthenticationBobPending,
+        BobInvalidResponseAlicePending,
     }
 
     #[derive(Clone)]
@@ -1159,7 +1418,7 @@ mod tests {
             }
         }
 
-        async fn get_info(&self, _client: &Self::Client) -> Result<LndSyncStatus, LndError> {
+        async fn get_info(&self, client: &Self::Client) -> Result<LndSyncStatus, LndError> {
             let call = self.info_calls.fetch_add(1, Ordering::SeqCst);
             match self.info_failure {
                 Some(InfoFailure::Authentication) => {
@@ -1181,6 +1440,25 @@ mod tests {
                         detail: "gRPC status Unavailable".into(),
                     });
                 }
+                Some(InfoFailure::AliceAuthenticationBobPending) => {
+                    if client.endpoint.contains("31009") {
+                        return Err(LndError::Authentication {
+                            operation: "get node information".into(),
+                            detail: "Alice credentials rejected".into(),
+                        });
+                    }
+                    return std::future::pending().await;
+                }
+                Some(InfoFailure::BobInvalidResponseAlicePending) => {
+                    if client.endpoint.contains("32009") {
+                        return Err(LndError::InvalidResponse {
+                            operation: "get node information".into(),
+                            detail: "Bob returned malformed chain state".into(),
+                            identifier: None,
+                        });
+                    }
+                    return std::future::pending().await;
+                }
                 None | Some(InfoFailure::UnavailableOnce) => {}
             }
             Ok(LndSyncStatus {
@@ -1199,6 +1477,256 @@ mod tests {
         async fn block_height(&self) -> Result<u64, FixtureError> {
             Ok(101)
         }
+    }
+
+    #[derive(Clone)]
+    struct PendingBitcoinTip;
+
+    impl BitcoinTip for PendingBitcoinTip {
+        async fn block_height(&self) -> Result<u64, FixtureError> {
+            std::future::pending().await
+        }
+    }
+
+    struct FakeBitcoinStack {
+        removed: Arc<Mutex<Vec<String>>>,
+        removal_delay: Duration,
+        active: bool,
+    }
+
+    impl Drop for FakeBitcoinStack {
+        fn drop(&mut self) {
+            if !self.active {
+                return;
+            }
+            for resource in ["electrs", "bitcoind"] {
+                std::thread::sleep(self.removal_delay);
+                self.removed.lock().unwrap().push(resource.to_owned());
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeLndPairEnvironment {
+        engine: FakeEngine,
+        connector: FakeConnector,
+        backing_removal_delay: Duration,
+    }
+
+    impl LndPairEnvironment for FakeLndPairEnvironment {
+        type BitcoinStack = FakeBitcoinStack;
+        type Engine = FakeEngine;
+        type Connector = FakeConnector;
+        type BitcoinTip = FakeBitcoinTip;
+
+        async fn start_bitcoin(
+            &self,
+            _bitcoind_image: ContainerImage,
+            _electrs_image: ContainerImage,
+            _deadline: &Deadline,
+        ) -> Result<Self::BitcoinStack, FixtureError> {
+            Ok(FakeBitcoinStack {
+                removed: Arc::clone(&self.engine.removed),
+                removal_delay: self.backing_removal_delay,
+                active: true,
+            })
+        }
+
+        fn engine(&self, _bitcoin: &Self::BitcoinStack) -> Self::Engine {
+            self.engine.clone()
+        }
+
+        fn network_name(&self, _bitcoin: &Self::BitcoinStack) -> String {
+            "shared-network".to_owned()
+        }
+
+        fn node_container_name(&self, _bitcoin: &Self::BitcoinStack) -> String {
+            "private-bitcoind".to_owned()
+        }
+
+        fn bitcoin_tip(&self, _bitcoin: &Self::BitcoinStack) -> Self::BitcoinTip {
+            FakeBitcoinTip
+        }
+
+        fn connector(&self) -> Self::Connector {
+            self.connector.clone()
+        }
+
+        async fn attach_inner_logs(
+            &self,
+            _bitcoin: &Self::BitcoinStack,
+            _deadline: &Deadline,
+            error: FixtureError,
+        ) -> FixtureError {
+            error
+        }
+
+        async fn shutdown_bitcoin(
+            &self,
+            mut bitcoin: Self::BitcoinStack,
+        ) -> Result<(), FixtureError> {
+            bitcoin.active = false;
+            for resource in ["electrs", "bitcoind"] {
+                tokio::time::sleep(bitcoin.removal_delay).await;
+                bitcoin.removed.lock().unwrap().push(resource.to_owned());
+            }
+            Ok(())
+        }
+    }
+
+    // Catches public builder cancellation dropping the backing fixture on the caller while LND
+    // cleanup is still detached. The one composite owner must return at the shared deadline and
+    // eventually remove Bob, Alice, Electrs, then bitcoind without concurrent ledgers.
+    #[tokio::test]
+    async fn builder_start_cancellation_is_bounded_and_keeps_cross_stack_cleanup_order() {
+        let mut engine = FakeEngine::new();
+        engine.certificate_read = CertificateRead::Blocked;
+        engine.removal_delay = Duration::from_millis(250);
+        let read_entered = Arc::clone(&engine.read_entered);
+        let removed = Arc::clone(&engine.removed);
+        let environment = FakeLndPairEnvironment {
+            engine,
+            connector: FakeConnector::succeeding(),
+            backing_removal_delay: Duration::from_millis(250),
+        };
+
+        let task = tokio::spawn(async move {
+            LndPair::builder()
+                .startup_timeout(Duration::from_millis(30))
+                .start_with_environment(environment)
+                .await
+        });
+
+        read_entered.notified().await;
+        let cancelled_at = std::time::Instant::now();
+        task.abort();
+        let cancellation = match task.await {
+            Err(error) => error,
+            Ok(_) => panic!("aborting public builder startup must cancel it"),
+        };
+        assert!(cancellation.is_cancelled());
+        assert!(
+            cancelled_at.elapsed() < Duration::from_millis(150),
+            "public builder cancellation outlived its 30ms deadline: {:?}",
+            cancelled_at.elapsed()
+        );
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if removed.lock().unwrap().len() == 4 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached composite coordinator must eventually remove all four containers");
+        let removed = removed.lock().unwrap().clone();
+        assert!(removed[0].contains("bob"), "{removed:?}");
+        assert!(removed[1].contains("alice"), "{removed:?}");
+        assert_eq!(&removed[2..], ["electrs", "bitcoind"], "{removed:?}");
+    }
+
+    // Pins the same dependency ordering for an ordinary startup error, where the public builder
+    // remains present long enough to receive the typed LND failure from the coordinator.
+    #[tokio::test]
+    async fn builder_start_error_keeps_cross_stack_cleanup_order() {
+        let engine = FakeEngine::new();
+        let removed = Arc::clone(&engine.removed);
+        let environment = FakeLndPairEnvironment {
+            engine,
+            connector: FakeConnector {
+                initialized: Arc::new(Mutex::new(Vec::new())),
+                fail_initialization: true,
+                info_failure: None,
+                info_calls: Arc::new(AtomicUsize::new(0)),
+            },
+            backing_removal_delay: Duration::ZERO,
+        };
+
+        let error = match LndPair::builder().start_with_environment(environment).await {
+            Err(error) => error,
+            Ok(_) => panic!("a rejected wallet initialization must fail the public builder"),
+        };
+
+        let FixtureError::Bootstrap { chain, source, .. } = &error else {
+            panic!("wallet startup errors need typed Lightning bootstrap context: {error}");
+        };
+        assert_eq!(chain, &"Lightning");
+        assert!(matches!(
+            source.downcast_ref::<FixtureError>(),
+            Some(FixtureError::Lightning(LndError::Status { .. }))
+        ));
+        let removed = removed.lock().unwrap().clone();
+        assert!(removed[0].contains("bob"), "{removed:?}");
+        assert!(removed[1].contains("alice"), "{removed:?}");
+        assert_eq!(&removed[2..], ["electrs", "bitcoind"], "{removed:?}");
+    }
+
+    async fn assert_pending_sibling_is_cancelled(
+        info_failure: InfoFailure,
+        expected_operation: &'static str,
+    ) {
+        let connector = FakeConnector {
+            initialized: Arc::new(Mutex::new(Vec::new())),
+            fail_initialization: false,
+            info_failure: Some(info_failure),
+            info_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let alice = FakeClient {
+            endpoint: "https://127.0.0.1:31009/".to_owned(),
+        };
+        let bob = FakeClient {
+            endpoint: "https://127.0.0.1:32009/".to_owned(),
+        };
+        let deadline = Deadline::new(Duration::from_secs(5)).unwrap();
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_lnd_sync(&connector, &alice, &bob, &PendingBitcoinTip, &deadline),
+        )
+        .await
+        .expect("a permanent LND response must cancel pending sibling probes immediately")
+        .expect_err("a permanent LND response must fail synchronization");
+
+        let FixtureError::Bootstrap {
+            chain,
+            operation,
+            source,
+            ..
+        } = &error
+        else {
+            panic!("a permanent LND response needs typed bootstrap context: {error}")
+        };
+        assert_eq!(chain, &"Lightning");
+        assert_eq!(operation, &expected_operation);
+        assert!(matches!(
+            source.downcast_ref::<FixtureError>(),
+            Some(FixtureError::Lightning(LndError::Authentication { .. }))
+                | Some(FixtureError::Lightning(LndError::InvalidResponse { .. }))
+        ));
+    }
+
+    // Catches join-all readiness polling waiting for Bob until the shared deadline after Alice has
+    // already returned a terminal authentication failure.
+    #[tokio::test]
+    async fn alice_permanent_get_info_failure_cancels_pending_bob() {
+        assert_pending_sibling_is_cancelled(
+            InfoFailure::AliceAuthenticationBobPending,
+            "query Alice synchronization",
+        )
+        .await;
+    }
+
+    // Catches a completion-order bias that is fail-fast only for Alice: Bob's permanent protocol
+    // failure must likewise cancel a pending Alice probe.
+    #[tokio::test]
+    async fn bob_permanent_get_info_failure_cancels_pending_alice() {
+        assert_pending_sibling_is_cancelled(
+            InfoFailure::BobInvalidResponseAlicePending,
+            "query Bob synchronization",
+        )
+        .await;
     }
 
     // Catches sequential startup, a fresh network, filesystem macaroon fallback, password reuse,
@@ -1544,7 +2072,11 @@ mod tests {
                 Some(FixtureError::Lightning(LndError::Authentication { .. }))
                     | Some(FixtureError::Lightning(LndError::InvalidResponse { .. }))
             ));
-            assert_eq!(connector.info_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                connector.info_calls.load(Ordering::SeqCst),
+                1,
+                "the first terminal response must end the round without waiting for its sibling"
+            );
         }
     }
 

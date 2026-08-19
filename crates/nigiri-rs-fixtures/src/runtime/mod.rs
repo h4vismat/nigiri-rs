@@ -19,7 +19,10 @@ pub(crate) use spec::ContainerSpec;
     reason = "Task 6 specification is consumed by the Task 7 LndPair startup"
 )]
 pub(crate) use spec::{electrs_spec, lnd_spec, node_spec};
-pub(crate) use supervisor::{RunningContainer, RuntimeHandle, Startup, supervise};
+pub(crate) use supervisor::{
+    CoordinatorCancellation, RunningContainer, RuntimeHandle, Startup, coordinate_startup,
+    supervise, supervise_for_coordinator,
+};
 
 pub(crate) fn runtime_error(
     resource: impl Into<String>,
@@ -33,6 +36,10 @@ pub(crate) fn runtime_error(
         diagnostics,
         source: redacted_source(error),
     }
+}
+
+pub(crate) fn cancelled_startup_error(resource: impl Into<String>) -> FixtureError {
+    runtime_error(resource, supervisor::cancelled_error())
 }
 
 impl From<engine::EngineError> for FixtureError {

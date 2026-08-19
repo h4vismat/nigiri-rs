@@ -17,9 +17,10 @@
 - Added typed `FixtureError::Lightning(#[source] LndError)` failures. Startup errors retain that
   cause inside the existing Lightning bootstrap context and attach Bob, Alice, Electrs, then
   bitcoind diagnostics while redacting raw and hex password/macaroon markers.
-- Tightened caller-cancellation behavior so aborting a startup waits for the dedicated supervisor
-  to complete reverse-order cleanup. The LND runtime is owned before the backing Bitcoin fixture,
-  so implicit and explicit teardown preserve dependency order.
+- Tightened caller-cancellation behavior around one composite coordinator created before the
+  backing Bitcoin fixture. The public boundary waits only through the shared deadline; if it must
+  detach, that single coordinator continues Bob, Alice, Electrs, then bitcoind teardown in order.
+  Successful startup still transfers the two runtimes into the ordinary `LndPair` handles.
 
 No public container name/ID or runtime engine handle was exposed. Channel funding, channel
 creation, payments, and a public channel point remain Task 8 work.
@@ -42,6 +43,16 @@ creation, payments, and a public channel point remain Task 8 work.
   the public startup call returns on time while the supervisor continues best-effort reverse-order
   cleanup in the background. Normal post-start explicit and implicit shutdown still waits for
   cleanup.
+- LND synchronization now polls Alice, Bob, and bitcoind concurrently with fail-fast selection.
+  A terminal response from either LND immediately returns its typed Lightning bootstrap cause and
+  cancels a pending sibling and bitcoind probe; transient results still participate in the shared
+  retry loop. Symmetric Alice-terminal/Bob-pending and Bob-terminal/Alice-pending tests pin the
+  behavior.
+- Public builder startup now places backing Bitcoin and LND startup under one dependency-aware
+  coordinator. Nested LND cancellation joins Bob/Alice cleanup completely inside that coordinator;
+  only the outer coordinator may detach at the shared deadline, and it does not begin
+  Electrs/bitcoind teardown until LND teardown finishes. This removes the unbounded backing-fixture
+  drop from the caller and preserves cross-stack order after either cancellation or startup error.
 
 ## TDD evidence
 
@@ -65,6 +76,17 @@ clock, and 30-ms caller cancellation waited about 506 ms for two delayed removal
 adds faithful terminal/transient fakes, paused-time blocking diagnostics, and delayed cleanup. The
 last case returns within its caller budget and then observes Bob-before-Alice cleanup complete in
 the detached supervisor.
+
+The second correctness-review RED pass exposed both remaining concurrency counterexamples. With a
+five-second shared deadline, an immediate permanent response from one LND and a pending sibling
+still failed the new 100-ms assertion because `join!` waited for every branch. Separate Alice and
+Bob regressions now pass through fail-fast selection and retain
+`Bootstrap { chain: "Lightning" } -> FixtureError::Lightning -> LndError`. At the public builder
+boundary, aborting a 30-ms startup with 250-ms removals initially took about 544 ms because dropping
+the local backing fixture joined its supervisor on the caller. The composite coordinator now
+returns that abort within 150 ms and eventually records the exact Bob, Alice, Electrs, bitcoind
+sequence. A second builder-level regression pins the same sequence and typed Lightning cause for
+ordinary startup failure.
 
 The full workspace feature run also exposed a rustls test-harness integration bug: tonic's
 production client path selects its compiled provider explicitly, but tonic's in-process TLS server
@@ -94,9 +116,10 @@ public Task 3 contract are unchanged; the feature-unified regression passes.
 
 - `cargo test --workspace --all-targets --all-features --locked` — passed, including all Docker-backed
   Bitcoin, Liquid, peg, macro, LND, protocol-baseline, and fixture suites; the LND library ran 87
-  unit tests and the fixture library ran 120 unit tests.
-- `cargo test -p nigiri-rs-fixtures lnd_pair::tests --locked` — 13 passed, including permanent and
-  transient retry classification, blocked diagnostics, bounded cancellation, and eventual cleanup.
+  unit tests and the fixture library ran 124 unit tests.
+- `cargo test -p nigiri-rs-fixtures lnd_pair::tests --locked` — 17 passed, including symmetric
+  fail-fast permanent failures, transient retry classification, blocked diagnostics, bounded
+  composite cancellation, exact cross-stack cleanup order, and eventual cleanup.
 - `cargo test -p nigiri-rs-fixtures runtime::supervisor::tests --locked` — 6 passed.
 - `cargo test -p nigiri-rs-fixtures diagnostics::tests --locked` — 12 passed.
 - `cargo test -p nigiri-rs-lnd wallet_unlocker --locked` — 6 passed.
@@ -114,3 +137,4 @@ above pass without adding production dependencies or language features beyond th
 
 - `feat(fixtures): initialize an LND node pair`
 - `fix(fixtures): harden LND startup failure boundaries`
+- `fix(fixtures): coordinate LND startup teardown`
