@@ -1,10 +1,10 @@
 # Client API reference
 
-Everything `nigiri-rs-core` exports, re-exported in full by the `nigiri-rs` facade. Both import
-paths work; the snippets here use the facade.
+The public Bitcoin/Liquid API from `nigiri-rs-core` and the optional Lightning API from
+`nigiri-rs-lnd`, both re-exported by the `nigiri-rs` facade. The snippets use the facade.
 
-Errors are documented separately in [Errors](reference-errors.md). Every fallible method below
-returns `Result<T, NigiriError>`.
+Errors are documented separately in [Errors](reference-errors.md). Bitcoin/Liquid methods return
+`NigiriError`; Lightning methods return `LndError`.
 
 ## `NigiriClient<N>`
 
@@ -347,7 +347,7 @@ below costs no round trip.
 genesis is a hardcoded chain parameter — the same value on every node, never generated per instance —
 and `liquidregtest` carries that same value as its parent. Two fixtures that have never heard of each
 other therefore agree on the parent chain, and `connect` accepts them. That is measured, not
-inferred: `crates/nigiri-rs-testcontainers/tests/peg_wiring.rs` starts two independent fixtures
+inferred: `crates/nigiri-rs-fixtures/tests/peg_wiring.rs` starts two independent fixtures
 against a real daemon and asserts `connect` succeeds.
 
 What the comparison does catch is a Liquid node built for a **different** parent chain — one
@@ -656,6 +656,134 @@ custom environment on another Core version needs its own matching module.
 
 There is no equivalent for Liquid: the `elements` crate supplies the native values, and callers own
 their own RPC records.
+
+## Lightning client API
+
+Enable the facade's `lnd` feature. `fixtures` implies it, but host-managed use does not need
+fixtures. `nigiri-rs-lnd` is independent of `nigiri-rs-core`; generated LND, Tonic, and Prost types
+are private, and no public signature exposes them.
+
+### `LndConfig`
+
+```rust
+pub struct LndConfig { /* private */ }
+```
+
+`Clone` with a manual secret-redacting `Debug`.
+
+| Method | Signature | Meaning |
+| --- | --- | --- |
+| `new` | `fn new(endpoint: impl AsRef<str>, certificate: Vec<u8>, macaroon: Vec<u8>, timeout: Duration) -> Result<Self, LndError>` | Validates owned credential bytes without connecting. |
+| `from_files` | `async fn from_files(endpoint, certificate_path, macaroon_path, timeout) -> Result<Self, LndError>` | Reads each file with the same bounds, then delegates to `new`. |
+| `endpoint` | `fn endpoint(&self) -> &Url` | Validated HTTPS endpoint. |
+| `timeout` | `fn timeout(&self) -> Duration` | Per-operation deadline. |
+
+The endpoint requires `https`, a host, and an explicit valid port; userinfo, query, and fragment are
+rejected. Credentials and timeout must be nonempty/nonzero. `MAX_TLS_CERTIFICATE_BYTES` is 1 MiB and
+`MAX_MACAROON_BYTES` is 64 KiB. File reads stop at those bounds rather than buffering unbounded data.
+
+The configured PEM is an exact end-entity DER pin. The TLS handshake retains rustls signature
+verification, but an alternative certificate for the hostname is not trusted through ambient roots.
+This accommodates pinned LND's self-signed CA-shaped certificate without widening the trust
+boundary. Certificate bodies, macaroon bytes, and derived metadata never appear in `Debug`.
+
+### `LndClient`
+
+```rust
+pub struct LndClient { /* private */ }
+```
+
+An immutable, cheaply cloneable handle with manual redacting `Debug`. `with_config` constructs the
+authenticated transport lazily; the first operation connects.
+
+| Method | Result |
+| --- | --- |
+| `with_config(LndConfig)` | `Result<LndClient, LndError>` |
+| `wait_ready()` | One bounded `GetInfo`, returning `NodeInfo`; it does not poll sync flags. |
+| `get_info()` | `NodeInfo` identity, version, network, height, chain sync, and graph sync. |
+| `new_address()` | Native SegWit `bitcoin::Address<NetworkUnchecked>`; caller checks the network. |
+| `wallet_balance()` | `WalletBalance` for the default on-chain account. |
+| `connect_peer(&PeerAddress)` | Connects for the daemon process lifetime. |
+| `list_peers()` | `Vec<Peer>` connected-peer records. |
+| `open_channel(OpenChannelRequest)` | Waits for the confirmed funding `bitcoin::OutPoint`. |
+| `list_channels()` | `Vec<Channel>` open-channel records. |
+| `create_invoice(CreateInvoiceRequest)` | Fixed-amount parsed BOLT11 `InvoiceRecord`. |
+| `lookup_invoice(sha256::Hash)` | Invoice record by payment hash. |
+| `pay_invoice(&Bolt11Invoice, PaymentOptions)` | Consumes Router updates until terminal success or error. |
+| `lookup_payment(sha256::Hash)` | Tracks by hash until terminal success or error. |
+
+Every request uses the config timeout. `PaymentOptions::timeout` is also sent to LND, but does not
+replace the outer request deadline. `pay_invoice` accepts only invoices with an amount. It validates
+the returned hash and amount, tolerates an identical duplicate terminal update, and rejects stream
+end before terminal state, a changed hash/value, contradictory terminal states, or a return to a
+nonterminal state. Success includes the hash, preimage, value, and fee; terminal failure becomes
+`PaymentFailed` with the hash and bounded reason.
+
+Timeout or stream failure after a payment may have committed becomes `OutcomeUnknown` with the hash.
+`lookup_payment` has the same uncertainty rule. Query that hash before retrying an invoice. Channel
+opening preserves a pending channel point on uncertainty, and invoice creation reports an uncertain
+outcome when the request may have committed even if no hash was observed.
+
+### `LightningNode`
+
+The statically dispatched portability boundary has associated `type Error` and the same ten
+operational methods as `LndClient`: `get_info`, `new_address`, `wallet_balance`, `connect_peer`,
+`list_peers`, `open_channel`, `list_channels`, `create_invoice`, `lookup_invoice`, `pay_invoice`, and
+`lookup_payment`. Each returns `impl Future + Send`. `LndClient` implements it with `LndError`; the
+inherent and trait methods share one implementation path. The trait is not an object-safe generated
+RPC surface and does not promise another Lightning implementation.
+
+### Amounts and request records
+
+`Sats` and `Millisats` are copyable ordered newtypes. Each has `new(u64)` and `as_u64()`. Converting
+`Sats` to `Millisats` checks multiplication overflow; converting back rejects a value that is not a
+whole satoshi.
+
+| Type | Constructor validation | Accessors |
+| --- | --- | --- |
+| `PeerAddress` | `new(public_key, host, port)` rejects blank/invalid hosts, embedded ports, and port zero. | `public_key`, `host`, `port` |
+| `OpenChannelRequest` | `new(peer_public_key, capacity, push_amount)` requires nonzero capacity and push below capacity. Signed LND range checks occur when sent. | `peer_public_key`, `capacity`, `push_amount` |
+| `CreateInvoiceRequest` | `new(amount, memo, expiry)` requires nonzero amount/expiry. Sending additionally requires whole seconds and signed LND ranges. | `amount`, `memo`, `expiry` |
+| `PaymentOptions` | `new(fee_limit, timeout)` permits a zero fee limit but requires nonzero timeout. Sending requires whole seconds and LND's integer range. | `fee_limit`, `timeout` |
+
+### Response records and states
+
+All records are crate-owned and expose read-only accessors:
+
+| Record | Accessors |
+| --- | --- |
+| `NodeInfo` | `public_key`, `alias`, `version`, `block_height`, `network`, `synced_to_chain`, `synced_to_graph` |
+| `WalletBalance` | `total`, `confirmed`, `unconfirmed` (`Sats`) |
+| `Peer` | `public_key`, `address`, `connected` |
+| `Channel` | `channel_point`, `remote_public_key`, `active`, `capacity`, `local_balance`, `remote_balance` |
+| `InvoiceRecord` | `invoice`, `payment_hash`, `amount`, `state` |
+| `PaymentRecord` | `payment_hash`, `preimage`, `value`, `fee`, `state` |
+
+`InvoiceState` is `Open`, `Settled`, `Canceled`, `Accepted`, or `Unknown(i32)`. `PaymentState` is
+`InFlight`, `Succeeded`, `Failed`, or `Unknown(i32)`. Unknown numeric values are preserved for
+forward compatibility. Record conversion rejects malformed keys, addresses, hashes, channel points,
+invoices, negative amounts, and internally inconsistent states. `Debug` for invoice/payment records
+omits the raw BOLT11 string and payment preimage.
+
+### Stateless wallet bootstrap
+
+`LndBootstrapConfig` has public `endpoint: Url`, `tls_certificate: Vec<u8>`, and `timeout: Duration`
+fields plus a certificate-redacting `Debug`. `initialize_wallet(config, wallet_password)` generates
+exactly 24 bounded nonempty seed words, initializes an ephemeral stateless wallet, and returns an
+authenticated `LndConfig` from LND's returned admin macaroon. Passwords must be 8 through 65,536
+bytes; seed words are capped at 1 KiB each. The password and generated seed are not returned or
+retained.
+
+The function does not blindly retry. Once `InitWallet` is sent, a timeout, missing response, or
+invalid returned macaroon is `OutcomeUnknown` because the wallet may already exist. `LndPair`
+retries only known transient failures whose operation is still `generate wallet seed`, using the
+same password and original deadline; it never retries `InitWallet`.
+
+### Protocol baseline constants
+
+`LND_PROTO_VERSION` is `"v0.21.1-beta"` and `LND_PROTO_COMMIT` is `"2b87887"`. They identify the
+checked-in official three-proto graph. The fixture's digest-pinned `lightninglabs/lnd` image uses the
+same release, and a test prevents those baselines from drifting independently.
 
 ## Scope limits
 

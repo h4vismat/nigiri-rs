@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "Ephemeral Bitcoin and Liquid regtest fixtures for nigiri-rs"
+description = "Ephemeral Bitcoin, Liquid, peg, and Lightning regtest fixtures for nigiri-rs"
 repository = "https://github.com/h4vismat/nigiri-rs"
 
 [features]

@@ -1,7 +1,7 @@
 # Lifecycle ownership
 
-Why `nigiri-rs-core` never starts, stops, or deletes anything — and why the fixtures that do live in
-a separate crate.
+Why the Bitcoin/Liquid and Lightning protocol crates never start, stop, or delete anything — and why
+the fixtures that do live in a separate crate.
 
 ## The problem
 
@@ -26,7 +26,8 @@ does both makes them pay for the dependency tree anyway.
 
 ## The approach
 
-The core crate is **lifecycle-neutral**. It provides readiness checks but never:
+Both protocol crates are **lifecycle-neutral**. `nigiri-rs-core` owns only Bitcoin and Liquid;
+`nigiri-rs-lnd` owns the host-facing Lightning boundary. They provide readiness checks but never:
 
 - starts or stops services;
 - invokes Docker or Testcontainers;
@@ -34,32 +35,41 @@ The core crate is **lifecycle-neutral**. It provides readiness checks but never:
 - removes containers or volumes;
 - performs cleanup from `Drop`.
 
-Cloning a client clones immutable configuration and a shared HTTP transport. It never implies
-ownership of an external process, because the client has no concept of owning one.
+Cloning either client copies immutable configuration and shares a transport. It never implies
+ownership of an external process, because neither client has a concept of owning one.
 
 That leaves a gap — someone has to start the services — and the gap is filled by a **separate crate**
 that owns the lifecycle explicitly and completely:
 
 ```
 nigiri-rs                    facade
-├── nigiri-rs-core           the clients. Owns nothing.
-├── nigiri-rs-testcontainers the fixtures. Owns containers, volumes, networks.
+├── nigiri-rs-core           Bitcoin/Liquid protocol clients. Own nothing.
+├── nigiri-rs-lnd            Lightning protocol client. Owns no daemon.
+├── nigiri-rs-fixtures       fixtures. Own containers, volumes, networks.
 └── nigiri-rs-macros         #[nigiri_rs::test]
 ```
 
-`nigiri-rs-core` does not depend on `nigiri-rs-testcontainers`. No Docker or Testcontainers
-dependency reaches a consumer who only wants the client. The facade wires them together behind the
-`testcontainers` feature, off by default.
+Neither protocol crate depends on `nigiri-rs-fixtures`; the two protocol crates do not depend on one
+another either. No Docker dependency reaches a consumer who only wants a client. The facade exposes
+the host-managed Lightning surface behind `lnd` and lifecycle management behind `fixtures`, both off
+by default. `fixtures` implies `lnd` because `LndPair` returns authenticated `LndClient` values.
 
 So there are two paths, and they compose:
 
-**You own the services.** Run Nigiri, or any compatible node plus Esplora indexer, and point a client
-at it. The library reads and writes through the endpoints you gave it and touches nothing else.
+**You own the services.** Run Nigiri (or compatible Bitcoin/Elements services) and/or LND, then point
+the corresponding client at them. The client reads and writes through the endpoints and credentials
+you supplied and touches nothing else.
 
-**A fixture owns the services.** `Fixture::start()` creates containers, a network, and anonymous
-volumes, all scoped to a per-fixture UUID. Dropping the fixture removes every one of them. Ownership
-is total and it is visible in the type system: the containers live exactly as long as the `Fixture`
-value.
+**A fixture owns the services.** `Fixture::start()` creates one chain stack. `PegPair` owns a wired
+Bitcoin/Liquid pair. `LndPair` owns a backing Bitcoin stack plus Alice and Bob LND. Dropping the
+owning handle removes every resource it created; explicit `shutdown()` awaits cleanup and reports an
+error. Ownership is visible in the type system: services live exactly as long as the owning value.
+
+For `LndPair`, dependency order is part of the contract. Bob is removed before Alice, then Electrs
+before bitcoind, and only then is the shared network removed. Startup, failure diagnostics, and
+cleanup all consume the same 180-second whole-call deadline. If cleanup cannot finish in the
+remaining budget, the public start returns on time while the dedicated supervisor continues bounded
+best-effort reverse-order cleanup rather than leaking ownership into the client handles.
 
 Both can be used in the same test suite.
 
@@ -72,12 +82,13 @@ still yours to write.
 **Ownership is now a type, so you can drop it too early.** `Fixture` owning its containers means a
 fixture that goes out of scope takes the chain with it. `client()` returns a borrow so the common
 mistake is caught at compile time — but `NigiriClient` is `Clone`, and a cloned client outliving its
-fixture points at containers that no longer exist. That surfaces as connection-refused at runtime,
-not as an error message about lifetimes.
+fixture points at containers that no longer exist. `LndClient` is also cheaply cloneable, so the same
+caveat applies to `alice()` and `bob()`. That surfaces as connection-refused at runtime.
 
-**Two crates instead of one.** More manifests, a publish order to respect, and a facade to keep the
-import paths stable. The facade re-exports `nigiri-rs-core` in full, so every path published at 0.2.0
-still resolves.
+**Five crates instead of one.** More manifests, a publish order to respect, and a facade to keep the
+import paths stable. Publish the two protocol crates before fixtures, then publish the facade;
+macros have no workspace dependency. The separation prevents generated LND/gRPC details and Docker
+lifecycle from becoming part of the Bitcoin/Liquid core boundary.
 
 **A fixture can't reuse a warm environment.** Each one pays its own startup: about 3 seconds for
 Bitcoin, 1.5 for Liquid, on an idle machine with images pulled. A library that managed a shared node
@@ -93,8 +104,9 @@ by any other test. No cross-process mutation lock, no serialized test execution,
 alone" annotation. Repository tests that once needed a `HostChainLock` to share a single Nigiri now
 just run.
 
-And because the core crate owns nothing, pointing it at a shared environment is safe by construction.
-The worst a client can do to a node it did not start is send it requests.
+And because the protocol crates own nothing, pointing them at shared environments cannot cause a
+client drop to stop or delete the service. The clients can still send mutating requests, so callers
+remain responsible for coordinating shared state.
 
 ## The one thing that stays yours
 

@@ -29,7 +29,7 @@ Open `Cargo.toml` and add:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["fixtures"] }
 bitcoin = "0.32"
 serde_json = "1"
 ```
@@ -43,7 +43,7 @@ you'll ask a node a question the curated API doesn't wrap.
 Create `tests/peg.rs`:
 
 ```rust,ignore
-use nigiri_rs::testcontainers::PegPair;
+use nigiri_rs::fixtures::PegPair;
 
 type BoxError = Box<dyn std::error::Error>;
 

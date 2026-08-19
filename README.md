@@ -4,16 +4,19 @@
 
 | Crate | What it is |
 | --- | --- |
-| `nigiri-rs` | The facade. Depend on this. Re-exports the client, and the fixtures behind the `testcontainers` feature. |
+| `nigiri-rs` | The facade. Depend on this. Re-exports Bitcoin/Liquid clients, optional Lightning APIs, and optional fixtures. |
 | `nigiri-rs-core` | The typed Bitcoin and Liquid clients. Re-exported in full by the facade. |
-| `nigiri-rs-testcontainers` | Ephemeral Docker-backed regtest fixtures: a node, an indexer, and a funded wallet per test. |
-| `nigiri-rs-macros` | Procedural macros for the above. |
+| `nigiri-rs-lnd` | The host-managed LND client and protocol-level Lightning types. No Docker dependency. |
+| `nigiri-rs-fixtures` | Ephemeral Docker-backed Bitcoin, Liquid, peg, and ready-to-pay Lightning fixtures. |
+| `nigiri-rs-macros` | The `#[nigiri_rs::test]` fixture attribute. |
 
 The bare `nigiri-*` names on crates.io are deliberately unused: Nigiri is
 [Vulpem Ventures'](https://github.com/vulpemventures/nigiri) project, and this is an unaffiliated
 Rust port.
 
-`nigiri-rs` is a typed asynchronous client for compatible Bitcoin and Liquid regtest services. A host-owned [Nigiri](https://github.com/vulpemventures/nigiri) environment is one compatible setup, not the only architecture.
+`nigiri-rs` provides typed asynchronous Bitcoin, Liquid, and Lightning clients plus optional
+ephemeral regtest fixtures. A host-owned [Nigiri](https://github.com/vulpemventures/nigiri)
+environment and a host-owned LND node are compatible setups, not the only architecture.
 
 Version 0.4.0 sends node requests directly over JSON-RPC. It retains the public, type-directed `rpc<R, P>()` escape hatch for Bitcoin and Liquid, including an optional Bitcoin Core response-type re-export. The curated network APIs retain their stronger native contracts.
 
@@ -27,7 +30,8 @@ trying to do.
 **New here?** [Tutorial: your first fixture-backed test](docs/tutorial-first-test.md) takes you from
 an empty crate to a passing test against a throwaway chain. [Tutorial: a round trip across Liquid's
 peg](docs/tutorial-peg-round-trip.md) is the next one up: BTC into the sidechain and back out again,
-against a wired four-container pair.
+against a wired four-container pair. [Tutorial: settle a Lightning payment](docs/tutorial-lightning-payment.md)
+starts a ready-to-pay LND pair and verifies a payment by hash.
 
 | Guide | For |
 | --- | --- |
@@ -35,15 +39,16 @@ against a wired four-container pair.
 | [Peg in and peg out](docs/how-to-peg.md) | Getting a wired pair, claiming a real peg-in, releasing a simulated peg-out |
 | [Point a wallet at a fixture](docs/how-to-connect-a-wallet.md) | Wiring BDK or LWK to the runtime-mapped endpoints |
 | [Point at services you run](docs/how-to-point-at-your-own-services.md) | Custom endpoints, credentials, timeouts, response limits |
+| [Use a host-managed LND node](docs/how-to-use-lnd.md) | Certificate pinning, macaroons, readiness, and payment retries |
 | [Call any node RPC](docs/how-to-call-any-node-rpc.md) | Methods the curated API does not wrap |
 | [Work with Liquid assets](docs/how-to-work-with-liquid-assets.md) | Minting, sending, and reading confidential UTXOs |
 
 | Reference | Covers |
 | --- | --- |
-| [Client API](docs/reference-client.md) | `NigiriClient`, `NigiriConfig`, `Peg`, response records, network markers |
-| [Fixture API](docs/reference-fixtures.md) | `Fixture`, `FixtureBuilder`, `PegPair`, `PegPairBuilder`, `ContainerImage`, `FixtureChain` |
+| [Client API](docs/reference-client.md) | Bitcoin/Liquid clients plus `LndClient`, `LightningNode`, and Lightning records |
+| [Fixture API](docs/reference-fixtures.md) | `Fixture`, `PegPair`, `LndPair`, their builders, images, and chain markers |
 | [`#[nigiri_rs::test]`](docs/reference-test-macro.md) | Arguments, accepted signatures, every rejection message |
-| [Errors](docs/reference-errors.md) | `NigiriError` and `FixtureError`, variant by variant |
+| [Errors](docs/reference-errors.md) | `NigiriError`, `LndError`, and `FixtureError`, variant by variant |
 
 | Explanation | Question it answers |
 | --- | --- |
@@ -54,7 +59,8 @@ against a wired four-container pair.
 
 ## Lifecycle ownership
 
-The host owns the complete lifecycle of its regtest services. This library provides readiness checks but never:
+The host owns the complete lifecycle of services addressed by `NigiriClient` or `LndClient`. Those
+protocol clients provide readiness checks but never:
 
 - starts or stops services;
 - invokes Docker or Testcontainers;
@@ -62,7 +68,11 @@ The host owns the complete lifecycle of its regtest services. This library provi
 - removes containers or volumes;
 - performs cleanup from `Drop`.
 
-Host-owned Nigiri remains a compatible setup; start it before pointing a client at the default endpoints. The `nigiri-rs-testcontainers` companion crate in this workspace provides fixture lifecycle separately, and this core crate does not depend on it: no Docker or Testcontainers dependency is added here. Nothing in this repository's own test suite needs a host Nigiri installation any more: both chains' integration tests run against ephemeral `nigiri-rs-testcontainers` fixtures and require only Docker.
+Host-owned Nigiri and LND remain compatible setups; start them before pointing clients at their
+endpoints. The `nigiri-rs-fixtures` companion crate provides fixture lifecycle separately.
+`nigiri-rs-core` remains only the Bitcoin/Liquid protocol crate, while `nigiri-rs-lnd` owns the
+Lightning protocol boundary; neither depends on Docker or fixture lifecycle. Repository integration
+tests use ephemeral `nigiri-rs-fixtures` stacks and require Docker, not a host Nigiri or LND install.
 
 Start the required services before pointing a client at them:
 
@@ -78,19 +88,21 @@ The verified CLI and port contract is Nigiri v0.5.16, commit `39fd5891d093bfb8c2
 
 ## Provisioning services
 
-This crate does not start or stop anything. Two paths exist, and they can be used side by side.
+The protocol clients do not start or stop anything. Two paths exist, and they can be used side by
+side.
 
-**Ephemeral fixtures.** The companion `nigiri-rs-testcontainers` crate, reached through the facade's `testcontainers` feature, starts a throwaway Bitcoin or Liquid regtest stack for a test and removes it afterwards:
+**Ephemeral fixtures.** The companion `nigiri-rs-fixtures` crate, reached through the facade's
+`fixtures` feature, starts throwaway Bitcoin, Liquid, peg, or Lightning stacks and removes them:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["fixtures"] }
 ```
 
 ```rust
-use nigiri_rs::testcontainers::{Bitcoin, Fixture};
+use nigiri_rs::fixtures::{Bitcoin, Fixture};
 
-# async fn example() -> Result<(), nigiri_rs::testcontainers::FixtureError> {
+# async fn example() -> Result<(), nigiri_rs::fixtures::FixtureError> {
 let fixture = Fixture::<Bitcoin>::start().await?;
 let client = fixture.client();
 let electrum_host = fixture.electrum_endpoint().host();
@@ -102,7 +114,9 @@ let electrum_port = fixture.electrum_endpoint().port();
 
 Docker must be running; no Nigiri installation is needed. Containers, their anonymous volumes, and the network are removed when the fixture is dropped. Ports are assigned by the runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a machine pulls two pinned images per chain and is slow; later starts are ready in a few seconds. `Fixture::<Liquid>::start` starts the same way; swap the type parameter. Podman is untested.
 
-**One attribute instead of a preamble.** The same feature provides `#[nigiri_rs::test]`, which starts a fixture per parameter and hands the body what that parameter asked for. It needs the `testcontainers` feature and Docker; nothing else:
+**One attribute instead of a preamble.** The same feature provides `#[nigiri_rs::test]`, which starts
+a fixture per parameter and hands the body what that parameter asked for. It needs the `fixtures`
+feature and Docker; nothing else:
 
 ```rust,ignore
 use nigiri_rs::{Bitcoin, NigiriClient};
@@ -120,7 +134,16 @@ async fn my_wallet_sees_its_funding(client: NigiriClient<Bitcoin>) -> Result<(),
 }
 ```
 
-One fixture is started per parameter, so a cross-chain test takes two: add a `NigiriClient<Liquid>` alongside the Bitcoin one. The chain comes from the parameter type, never an attribute argument, so the two cannot disagree. A third parameter type is accepted, [`PegPair`](docs/reference-fixtures.md#pegpair), and it behaves differently on purpose: a client parameter is cloned out of a fixture the wrapper keeps alive, while a `PegPair` *is* the handle and moves into the body, because it owns its four containers and both clients together. `startup_timeout = <seconds>` and `flavor = "multi_thread"` are accepted. Tests are not `#[ignore]`d — if Docker is unavailable they fail loudly rather than reporting green having run nothing.
+One fixture is started per parameter, so a cross-chain test takes two. `PegPair` and `LndPair` are
+also accepted and move into the body because each is its owning four-container handle. Multiple
+requested stacks start concurrently. `startup_timeout = <seconds>` and `flavor = "multi_thread"`
+are accepted. Tests are never ignored: if Docker is unavailable they fail loudly.
+
+`LndPair::start()` returns two authenticated clients only after a 2,000,000-sat channel with
+1,000,000 sats pushed to Bob has six confirmations, both sides retain at least 100,000 sats nominal
+liquidity, graph synchronization follows peer/channel activation, and two public 1,000-msat probes
+settle (Alice to Bob and Bob to Alice). Those probe records remain in invoice/payment history; key
+your assertions by payment hash rather than assuming empty histories.
 
 The Electrum endpoint above is `fixture.electrum_endpoint()`, which delegates to the client. Any `NigiriClient<N>`, fixture-backed or not, exposes both endpoints a BDK or LWK wallet needs directly:
 
@@ -379,19 +402,22 @@ The dependency family is aligned with LWK 0.18.1: `elements 0.25.3` and compatib
 
 ## Tests
 
-Pure parsers, JSON-RPC request construction, exact amounts, HTTP bounds, error mapping, and network types need no Docker. A contributor without Docker installed runs:
+Protocol clients, parsers, request construction, amount bounds, error mapping, and the macro's
+compile-fail suite need no Docker. A contributor without Docker installed runs:
 
 ```sh
-cargo test -p nigiri-rs-core --all-targets
-cargo test --doc
+cargo test -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros --all-targets --all-features
+cargo test --workspace --doc --all-features
 ```
 
-That is also exactly what three of this repository's four CI matrix cells run. A plain workspace `cargo test` is no longer that Docker-free command: nothing in this repository is `#[ignore]`d any more, so an unscoped `cargo test` also runs `nigiri-rs-testcontainers`'s Docker-backed integration tests. They need no feature flag to run because they live in that crate itself.
+That is also the scope of the three Docker-free CI matrix cells. A plain workspace `cargo test` is
+not Docker-free: it also runs `nigiri-rs-fixtures` and facade integration tests.
 
-Bitcoin and Liquid integration tests need Docker but no Nigiri installation. Each one starts its own funded regtest stack through `nigiri-rs-testcontainers`, owns its chain, and removes everything it created when it finishes:
+Bitcoin, Liquid, peg, and real LND payment integration tests need Docker but no host installation.
+Each owns its resources and removes everything it created when it finishes:
 
 ```sh
-cargo test -p nigiri-rs-testcontainers --all-targets --all-features
+cargo test -p nigiri-rs-fixtures --all-targets --all-features
 ```
 
 Because a fixture owns its chain, those tests need no cross-process mutation lock: a reorg in one is invisible to every other, and they can all run at once. Nothing here is `#[ignore]`d, on purpose: an ignored Docker test reports green having verified nothing, and this project has shipped that exact failure mode twice — once as a CI filter that matched zero tests and exited 0, once as a test that had never run in any CI job. Ignoring a test loses that signal; running it fails loudly instead when Docker is unavailable.

@@ -106,6 +106,43 @@ A pair then does one thing more before `start` returns: it pairs the two clients
 the Bitcoin node's genesis, which is a weaker statement than it sounds — see
 [what `Peg::connect` proves](reference-client.md#what-connect-proves-and-what-it-does-not).
 
+### Lightning readiness has two phases
+
+An [`LndPair`](reference-fixtures.md#lndpair) builds on one Bitcoin fixture, then adds Alice and Bob.
+Its default 180-second deadline covers the complete public `start()` call: validation, image work,
+the backing stack, both LND nodes, wallet initialization, funding, six channel confirmations,
+diagnostics, both payment probes, and bounded failure cleanup.
+
+Readiness is deliberately split because an isolated LND node can be chain-synchronized while
+reporting `synced_to_graph = false`:
+
+1. **Before peering**, Alice and Bob must report Bitcoin `regtest`, `synced_to_chain = true`, and
+   exactly bitcoind's height. Graph sync is observed for diagnostics but is not required yet.
+2. Alice receives an on-chain P2WPKH output. The fixture waits for confirmed balance, connects Alice
+   to Bob over their private network, and opens the configured channel.
+3. The fixture snapshots its isolated mempool before channel dispatch, waits for a newly observed
+   transaction, mines exactly six blocks once, and rejects a final channel point whose transaction
+   was not in that trigger set.
+4. **After peer/channel activation**, both nodes must report the same active channel point, each
+   local balance must be greater than the 1,000-msat probe, and both chain and graph sync must match
+   bitcoind's height.
+5. Bob creates a public 1,000-msat invoice and Alice pays it; then Alice creates a fresh public
+   1,000-msat invoice and Bob pays it. Each payment must report `Succeeded` with the invoice's hash,
+   and each receiver's lookup must report that same hash as `Settled`.
+
+The two probes prove route-policy propagation and spendable liquidity in both directions. They are
+ordinary public API calls, not a fixture shortcut, so they intentionally leave two invoices and two
+payments in history. Tests must identify their own records by payment hash rather than assume empty
+histories.
+
+Retry boundaries preserve committed state. Wallet startup retries only known transient `GenSeed`
+transport/status failures, with the original in-memory password under the original deadline.
+`InitWallet` and later wallet errors are terminal because initialization may already have committed.
+The reverse payment creates a fresh invoice per attempt and retries only terminal `PaymentFailed`
+reasons `no route` or `insufficient balance`, revalidating the active synchronized channel first.
+Authentication, transport, malformed-response, and `OutcomeUnknown` results never enter that retry
+loop. In particular, an uncertain payment must be queried by hash before any caller retries it.
+
 ## The guarantee, precisely
 
 When `start()` returns:
@@ -113,6 +150,10 @@ When `start()` returns:
 - node, Esplora, and Electrum report the same tip;
 - the wallet holds spendable funds;
 - every endpoint on the client is the runtime-mapped one.
+
+For `LndPair`, add the stronger guarantees above: two synchronized LND nodes, one six-confirmation
+active channel with spendable local balance on both sides, and two settled 1,000-msat payments in
+opposite directions.
 
 **That agreement is established once, at startup.** It is not maintained.
 

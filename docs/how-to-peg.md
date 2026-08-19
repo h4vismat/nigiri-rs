@@ -11,7 +11,7 @@ supply; it changes what the numbers mean.
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["fixtures"] }
 bitcoin = "0.32"     # for Amount
 elements = "0.25"    # for Txid
 serde_json = "1"     # for the raw-RPC assertions below
@@ -27,7 +27,7 @@ network, gives the Elements node `-validatepegin=1` plus `-mainchainrpc*` pointe
 by container name, and hands back a `Peg` across the two:
 
 ```rust,ignore
-use nigiri_rs::testcontainers::PegPair;
+use nigiri_rs::fixtures::PegPair;
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let pair = PegPair::start().await?;
@@ -51,7 +51,7 @@ Or let the macro own it. A `PegPair` parameter binds the pair itself, not a clon
 
 ```rust,ignore
 use bitcoin::Amount;
-use nigiri_rs::testcontainers::PegPair;
+use nigiri_rs::fixtures::PegPair;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -81,7 +81,7 @@ The trap is that **`Peg::connect` accepts the two anyway.** Bitcoin's regtest ge
 chain parameter — the same value on every node, never generated per instance — and `liquidregtest`
 carries that same hash as its parent, so the comparison `connect` makes agrees for two nodes that
 have never heard of each other. That is measured, not assumed:
-`crates/nigiri-rs-testcontainers/tests/peg_wiring.rs` starts two independent fixtures against a real
+`crates/nigiri-rs-fixtures/tests/peg_wiring.rs` starts two independent fixtures against a real
 daemon and asserts `connect` succeeds.
 
 So a successful `connect` tells you the Liquid node was built for a regtest parent chain, and nothing
@@ -97,7 +97,7 @@ needs:
 ```rust,ignore
 use bitcoin::Amount;
 
-# async fn example(pair: &nigiri_rs::testcontainers::PegPair) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(pair: &nigiri_rs::fixtures::PegPair) -> Result<(), Box<dyn std::error::Error>> {
 let pegged = pair.peg().complete_peg_in(Amount::from_sat(100_000)).await?;
 
 println!("deposit: {}", pegged.mainchain_txid);  // bitcoin::Txid
@@ -133,7 +133,7 @@ It is the argument you passed, returned unchanged, so comparing the two cannot f
 was really pegged in. Ask the Liquid wallet instead:
 
 ```rust,ignore
-# async fn example(pair: &nigiri_rs::testcontainers::PegPair, pegged: &nigiri_rs::PegIn) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(pair: &nigiri_rs::fixtures::PegPair, pegged: &nigiri_rs::PegIn) -> Result<(), Box<dyn std::error::Error>> {
 let received: serde_json::Value = pair
     .liquid()
     .rpc("gettransaction", (pegged.claim_txid.to_string(),))
@@ -163,7 +163,7 @@ First the address and the deposit:
 use bitcoin::Amount;
 use nigiri_rs::NigiriError;
 
-# async fn example(pair: &nigiri_rs::testcontainers::PegPair) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(pair: &nigiri_rs::fixtures::PegPair) -> Result<(), Box<dyn std::error::Error>> {
 let peg = pair.peg();
 
 let request = peg.peg_in_request().await?;
@@ -194,7 +194,7 @@ assert!(matches!(error, NigiriError::PegInImmature { have: 1, .. }));
 Then maturity, and the retry that the lagging node makes necessary:
 
 ```rust,ignore
-# async fn example(pair: &nigiri_rs::testcontainers::PegPair, deposit: &bitcoin::Txid) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(pair: &nigiri_rs::fixtures::PegPair, deposit: &bitcoin::Txid) -> Result<(), Box<dyn std::error::Error>> {
 # use nigiri_rs::NigiriError;
 let peg = pair.peg();
 let need = peg.pegin_confirmation_depth();
@@ -259,7 +259,7 @@ Two calls, and the second one is the simulated federation:
 ```rust,ignore
 use bitcoin::Amount;
 
-# async fn example(pair: &nigiri_rs::testcontainers::PegPair) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(pair: &nigiri_rs::fixtures::PegPair) -> Result<(), Box<dyn std::error::Error>> {
 let destination = pair.bitcoin().new_address().await?;
 
 // A genuine Elements `sendtomainchain`. It burns L-BTC and encodes the Bitcoin destination in an
@@ -311,7 +311,7 @@ an API that took the destination as an argument could not reproduce it.
 An ordinary Liquid transfer is the last row:
 
 ```rust,ignore
-# async fn example(pair: &nigiri_rs::testcontainers::PegPair) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(pair: &nigiri_rs::fixtures::PegPair) -> Result<(), Box<dyn std::error::Error>> {
 # use bitcoin::Amount;
 # use nigiri_rs::NigiriError;
 let elsewhere = pair.liquid().new_address().await?;
@@ -339,7 +339,7 @@ a block you just mined through it introduces a race that has nothing to do with 
 The release mines its own confirming block, inherited from `faucet`:
 
 ```rust,ignore
-# async fn example(pair: &nigiri_rs::testcontainers::PegPair, released: &nigiri_rs::PegOut) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(pair: &nigiri_rs::fixtures::PegPair, released: &nigiri_rs::PegOut) -> Result<(), Box<dyn std::error::Error>> {
 let paid: serde_json::Value = pair
     .bitcoin()
     .rpc(
@@ -357,7 +357,7 @@ that pays the decoded destination. **Do not assume an index:** the release pays 
 there is more than one output and the payout is not at a fixed position.
 
 ```rust,ignore
-# async fn example(pair: &nigiri_rs::testcontainers::PegPair, released: &nigiri_rs::PegOut, paid: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(pair: &nigiri_rs::fixtures::PegPair, released: &nigiri_rs::PegOut, paid: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
 // `scriptPubKey.address` first, since that is what the pinned Bitcoin version reports; the hex
 // compared against the destination's own script is the fallback for a version that omits it.
 let destination_hex = format!("{:x}", released.destination.script_pubkey());
@@ -383,7 +383,7 @@ On the Liquid side, nothing in the peg mines a Liquid block. A claim sits in the
 you confirm it yourself:
 
 ```rust,ignore
-# async fn example(pair: &nigiri_rs::testcontainers::PegPair, claim_txid: &elements::Txid) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(pair: &nigiri_rs::fixtures::PegPair, claim_txid: &elements::Txid) -> Result<(), Box<dyn std::error::Error>> {
 let address = pair.liquid().new_address().await?;
 pair.liquid()
     .generate_to_address(1, &address.to_string())

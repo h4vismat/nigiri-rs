@@ -1,7 +1,8 @@
 # How to point the client at services you run
 
 Configure `NigiriClient` for a host-owned Nigiri installation, a remote regtest host, or any
-compatible Bitcoin/Elements node plus Esplora indexer.
+compatible Bitcoin/Elements node plus Esplora indexer. For LND's HTTPS gRPC endpoint, exact
+certificate pin, and macaroon, use [How to use a host-managed LND node](how-to-use-lnd.md).
 
 Nothing here starts, stops, or deletes anything. See
 [Lifecycle ownership](explanation-lifecycle-ownership.md) for why.
@@ -18,12 +19,18 @@ Nothing here starts, stops, or deletes anything. See
   The verified CLI and port contract is Nigiri v0.5.16, commit
   `39fd5891d093bfb8c2575b79640b95a830834f9c`.
 
-- The `nigiri-rs` dependency. The `testcontainers` feature is **not** needed for this:
+- The `nigiri-rs` dependency. The `fixtures` feature is **not** needed for this:
 
   ```toml
   [dependencies]
   nigiri-rs = "0.5"
   url = "2"
+  ```
+
+  Host-managed LND use enables only `lnd`:
+
+  ```toml
+  nigiri-rs = { version = "0.5", features = ["lnd"] }
   ```
 
 ## Use the defaults
@@ -189,6 +196,12 @@ defaults. If you point this at a remote host, use HTTPS or an isolated trusted n
 Arbitrary RPC methods can mutate node wallets and chain state. Against a **shared** node — a
 host-owned Nigiri, a CI host — tests that mutate must coordinate access and restore valid state.
 Against a fixture they need not: each one owns its chain.
+
+LND credentials are different: treat the macaroon as an authorization secret. `LndConfig` and
+`LndClient` redact it and certificate bodies from `Debug`, but your application must protect the
+files, avoid copying their bytes into logs, and provision the narrowest macaroon permissions it
+needs. The configured certificate is pinned as the exact end-entity certificate; rotation requires
+constructing a new config with the new certificate bytes.
 
 ## Troubleshooting
 

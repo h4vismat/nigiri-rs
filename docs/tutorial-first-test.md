@@ -26,7 +26,7 @@ Open `Cargo.toml` and add:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["testcontainers"] }
+nigiri-rs = { version = "0.5", features = ["fixtures"] }
 ```
 
 One dependency. `nigiri-rs` is a facade that re-exports the client, the fixtures, and the test
@@ -35,7 +35,7 @@ attribute, so you never name the three crates behind it.
 `dev-dependencies` is the right section: fixtures are a testing tool, and this keeps the Docker
 client libraries out of your release build.
 
-The `testcontainers` feature is what turns on both the fixtures and the `#[nigiri_rs::test]`
+The `fixtures` feature is what turns on both the fixtures and the `#[nigiri_rs::test]`
 attribute. Without it neither exists.
 
 ## Step 3: Write the test and run it
@@ -188,7 +188,7 @@ The attribute is a convenience over a plain API. When you need the fixture handl
 override an image, or to control exactly when teardown happens — use it directly:
 
 ```rust,ignore
-use nigiri_rs::testcontainers::{Bitcoin, Fixture};
+use nigiri_rs::fixtures::{Bitcoin, Fixture};
 
 #[tokio::test]
 async fn manual_fixture() -> Result<(), Box<dyn std::error::Error>> {

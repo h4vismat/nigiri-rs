@@ -1,13 +1,14 @@
 # Fixture API reference
 
-`nigiri-rs-testcontainers`, reached through the facade as `nigiri_rs::testcontainers` with the
-`testcontainers` feature enabled.
+`nigiri-rs-fixtures`, reached through the facade as `nigiri_rs::fixtures` with the `fixtures`
+feature enabled.
 
 A fixture is one throwaway regtest stack: a node with a funded wallet, an Electrs indexer following
 it, and a `NigiriClient` pointed at both. Nothing is shared between fixtures, so tests can run in
 parallel and mine or reorg freely without coordinating.
 
-[`PegPair`](#pegpair) is the one composite: two stacks wired for Liquid's peg, torn down together.
+[`PegPair`](#pegpair) wires two stacks for Liquid's peg. [`LndPair`](#lndpair) composes a Bitcoin
+stack with two ready-to-pay LND nodes.
 
 Requires a running Docker daemon. No Nigiri installation. Podman is untested.
 
@@ -26,11 +27,12 @@ the RPC password). Not `Clone`.
 | `builder` | `fn builder() -> FixtureBuilder<C>` |
 | `client` | `fn client(&self) -> &NigiriClient<C>` |
 | `electrum_endpoint` | `fn electrum_endpoint(&self) -> &ElectrumEndpoint` |
+| `shutdown` | `async fn shutdown(self) -> Result<(), FixtureError>` |
 
 ```rust
-use nigiri_rs::testcontainers::{Bitcoin, Fixture};
+use nigiri_rs::fixtures::{Bitcoin, Fixture};
 
-# async fn example() -> Result<(), nigiri_rs::testcontainers::FixtureError> {
+# async fn example() -> Result<(), nigiri_rs::fixtures::FixtureError> {
 let fixture = Fixture::<Bitcoin>::start().await?;
 let client = fixture.client();
 # let _ = client;
@@ -119,9 +121,9 @@ Derives `Clone`. Implements `Debug` by hand — the images and the timeout only,
 
 ```rust
 use std::time::Duration;
-use nigiri_rs::testcontainers::{Bitcoin, Fixture};
+use nigiri_rs::fixtures::{Bitcoin, Fixture};
 
-# async fn example() -> Result<(), nigiri_rs::testcontainers::FixtureError> {
+# async fn example() -> Result<(), nigiri_rs::fixtures::FixtureError> {
 let fixture = Fixture::<Bitcoin>::builder()
     .startup_timeout(Duration::from_secs(180))
     .start()
@@ -179,8 +181,12 @@ docker network inspect nigiri-rs-fixture-<uuid> \
     --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}'
 
 # Everything this crate left behind, pairs included.
-docker rm -f -v $(docker ps -aq --filter "name=nigiri-rs-")
-docker network rm $(docker network ls -q --filter "name=nigiri-rs-fixture-")
+docker ps -aq --filter "name=nigiri-rs-" | while IFS= read -r id; do
+    [ -n "$id" ] && docker rm -f -v "$id"
+done
+docker network ls -q --filter "name=nigiri-rs-fixture-" | while IFS= read -r id; do
+    [ -n "$id" ] && docker network rm "$id"
+done
 ```
 
 The `-v` matters — without it the anonymous volumes stay. And `docker rm` never removes a network, so
@@ -211,10 +217,11 @@ they are what lets a real `claimpegin` validate against a real deposit.
 | `bitcoin` | `fn bitcoin(&self) -> &NigiriClient<Bitcoin>` |
 | `liquid` | `fn liquid(&self) -> &NigiriClient<Liquid>` |
 | `peg` | `fn peg(&self) -> &Peg` |
+| `shutdown` | `async fn shutdown(self) -> Result<(), FixtureError>` |
 
 ```rust,no_run
 use bitcoin::Amount;
-use nigiri_rs::testcontainers::PegPair;
+use nigiri_rs::fixtures::PegPair;
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let pair = PegPair::start().await?;
@@ -317,9 +324,9 @@ plus the budget:
 
 ```rust,no_run
 use std::time::Duration;
-use nigiri_rs::testcontainers::PegPair;
+use nigiri_rs::fixtures::PegPair;
 
-# async fn example() -> Result<(), nigiri_rs::testcontainers::FixtureError> {
+# async fn example() -> Result<(), nigiri_rs::fixtures::FixtureError> {
 let pair = PegPair::builder()
     .startup_timeout(Duration::from_secs(300))
     .start()
@@ -336,6 +343,93 @@ Like `FixtureBuilder`, `startup_timeout` bounds **the whole startup** rather tha
 and **all four** image descriptors are validated before the first container starts. That last point
 matters more for a pair than for a single fixture: the Bitcoin half runs to completion first, so an
 unusable Elements image would otherwise be rejected only after two containers were already up.
+
+## `LndPair`
+
+```rust
+pub struct LndPair { /* private */ }
+```
+
+An owning, non-cloneable handle for four containers on one private network: bitcoind, Electrs, LND
+Alice, and LND Bob. Its manual `Debug` names safe client/topology values without credentials or
+container identifiers.
+
+| Method | Signature |
+| --- | --- |
+| `builder` | `fn builder() -> LndPairBuilder` |
+| `start` | `async fn start() -> Result<LndPair, FixtureError>` |
+| `bitcoin` | `fn bitcoin(&self) -> &NigiriClient<Bitcoin>` |
+| `alice` | `fn alice(&self) -> &LndClient` |
+| `bob` | `fn bob(&self) -> &LndClient` |
+| `channel_point` | `fn channel_point(&self) -> bitcoin::OutPoint` |
+| `shutdown` | `async fn shutdown(self) -> Result<(), FixtureError>` |
+
+`start()` is `builder().start()` with defaults. `bitcoin()` exposes the funded backing client;
+`alice()` and `bob()` expose authenticated protocol clients; `channel_point()` is the confirmed
+funding output both daemon views agreed on. No generated protobuf, runtime handle, container name,
+port mapping, password, seed, or macaroon is public.
+
+### Started-pair contract
+
+The 180-second default is a single deadline for the entire public call and its bounded failure
+diagnostics/cleanup. Before returning, the pair:
+
+1. validates all four images and all channel/funding arithmetic before starting a resource;
+2. starts a funded synchronized Bitcoin fixture with private-network block/transaction publication;
+3. starts Alice and Bob concurrently and reads their bounded TLS certificates;
+4. initializes independent stateless wallets; only transient `GenSeed` failures retry, with the
+   original in-memory password, while `InitWallet` and later outcomes are never blindly retried;
+5. waits for both nodes to report Bitcoin `regtest`, chain sync, and bitcoind's exact height;
+   pre-peer graph sync is deliberately not required;
+6. funds Alice, connects her to Bob by the private peer endpoint, observes a new isolated-mempool
+   transaction for the channel, mines exactly six confirmations once, and correlates the final
+   channel point to that trigger set;
+7. waits for both views of that point to be active, each local balance to exceed 1,000 msat, and
+   both nodes to report chain **and graph** sync at bitcoind's height;
+8. settles two public 1,000-msat invoices, Alice to Bob and Bob to Alice, checking payment and
+   settled-invoice hashes in each direction.
+
+The readiness records stay in history. The reverse direction may temporarily lack a propagated
+route: only terminal `PaymentFailed` reasons `no route` and `insufficient balance` retry, after the
+channel is revalidated and with a fresh invoice. Transport, authentication, invalid responses, and
+`OutcomeUnknown` are terminal; an uncertain payment must be queried by hash before any retry.
+
+### Ownership and teardown
+
+Drop performs best-effort cleanup. `shutdown()` explicitly awaits the LND phase and then the Bitcoin
+phase, attempting both and returning the first error. Dependency order is Bob, Alice, Electrs,
+bitcoind, then the shared network. Failure/cancellation during any startup await transfers cleanup
+to the supervisor. If the whole-call deadline has no time left, the public future detaches from that
+supervisor while it continues reverse-order cleanup; no client becomes a lifecycle owner.
+
+## `LndPairBuilder`
+
+```rust
+pub struct LndPairBuilder { /* private */ }
+```
+
+`Clone` and `Debug`; setters consume and return `self`.
+
+| Method | Signature | Default |
+| --- | --- | --- |
+| `startup_timeout` | `fn startup_timeout(self, Duration) -> Self` | 180 s |
+| `bitcoind_image` | `fn bitcoind_image(self, ContainerImage) -> Self` | pinned Bitcoin node |
+| `bitcoin_electrs_image` | `fn bitcoin_electrs_image(self, ContainerImage) -> Self` | pinned Bitcoin Electrs |
+| `alice_image` | `fn alice_image(self, ContainerImage) -> Self` | pinned LND v0.21.1-beta |
+| `bob_image` | `fn bob_image(self, ContainerImage) -> Self` | pinned LND v0.21.1-beta |
+| `channel_capacity` | `fn channel_capacity(self, Sats) -> Self` | 2,000,000 sats |
+| `push_amount` | `fn push_amount(self, Sats) -> Self` | 1,000,000 sats |
+| `start` | `async fn start(self) -> Result<LndPair, FixtureError>` | — |
+
+The push must be nonzero and below capacity. Alice's nominal remainder and Bob's nominal push must
+each be at least 100,000 sats. Validation also checks the 200,000-sat funding reserve, integer
+overflow, LND's signed request fields, and Bitcoin `MAX_MONEY`, all before the backing environment
+starts.
+
+The LND image is internally fixed to
+`lightninglabs/lnd:v0.21.1-beta@sha256:4af8f9bbf98c8b86b0e54b065d6ea45d1387256a43fa9270c11ef849511abae0`,
+matching checked-in protobuf commit `2b87887`. The default constructor remains private; supply a
+`ContainerImage` through the setters only when deliberately testing another image.
 
 ## `ContainerImage`
 
@@ -381,6 +475,7 @@ Pinned by both tag and digest.
 | Liquid node | `blockstream/elementsd` | `23.3.3` | `elementsd` |
 | Bitcoin indexer | `mempool/electrs` | `v3.4.0-dev1` | the image's own |
 | Liquid indexer | `mempool/electrs-liquid` | `v3.4.0-dev1` | the image's own |
+| LND Alice/Bob | `lightninglabs/lnd` | `v0.21.1-beta` | the image's own |
 
 The indexers are Mempool's Esplora-Electrs fork, not the one Nigiri runs, which has not been rebuilt
 since 2022. Both are pinned to the same `v3.4.0-dev1` build: the Liquid variant publishes no stable
@@ -450,7 +545,8 @@ a future divergence can be traced to a version rather than guessed at. It is doc
 runtime check — nothing in this crate talks to Nigiri.
 
 Note the crate does **not** re-export `NigiriClient`. Import it from `nigiri_rs` or
-`nigiri_rs_core`.
+`nigiri_rs_core`. It also does not re-export the LND domain surface; import `LndClient`, `Sats`, and
+the request/response types from `nigiri_rs` with `lnd`/`fixtures`, or from `nigiri_rs_lnd` directly.
 
 ## Errors
 

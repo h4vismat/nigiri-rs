@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "Typed LND Lightning service client"
+description = "Typed host-managed LND client with protocol-level Lightning records"
+readme = "README.md"
 repository = "https://github.com/h4vismat/nigiri-rs"
 
 [dependencies]

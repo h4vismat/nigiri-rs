@@ -57,22 +57,23 @@ jobs:
         #
         # Scoping by package, never by test name: a wrong package name is a hard error,
         # whereas a name filter that stops matching selects nothing and exits 0.
-        # nigiri-rs-macros is in the cheap cells because its trybuild suite is pure rustc
+        # nigiri-rs-lnd is Docker-free: it uses in-process protocol services. nigiri-rs-macros is
+        # in the cheap cells because its trybuild suite is pure rustc
         # compile-fail checking with no Docker in it, and macro diagnostics are exactly the
         # thing worth checking against the 1.88 floor as well as stable.
         include:
           - toolchain: "1.88"
             features: default
             cargo_features: ""
-            scope: -p nigiri-rs-core -p nigiri-rs-macros
+            scope: -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros
           - toolchain: "1.88"
             features: all
             cargo_features: --all-features
-            scope: -p nigiri-rs-core -p nigiri-rs-macros
+            scope: -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros
           - toolchain: stable
             features: default
             cargo_features: ""
-            scope: -p nigiri-rs-core -p nigiri-rs-macros
+            scope: -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros
           # The only cell that runs the Docker-backed tests.
           - toolchain: stable
             features: all
@@ -119,14 +120,15 @@ jobs:
           key: packaging
 
       # Catches missing files, bad metadata, and anything excluded from the published tarball that
-      # the crate actually needs to build. nigiri-rs-core and nigiri-rs-macros can be packaged
-      # today: neither has a path dependency. The facade and the fixtures both depend on
-      # unpublished nigiri-rs-core, and `cargo package` resolves that requirement against
-      # crates.io even under --no-verify. They become packageable in publish order: core, then
-      # macros and fixtures, then the facade. Their metadata is still checked by the workspace
-      # build and by `cargo metadata` below.
+      # the crate actually needs to build. Both protocol crates and macros have no unpublished
+      # workspace dependency. The facade and fixtures resolve their protocol dependencies through
+      # crates.io even under --no-verify, so their publish order is: core + lnd, then fixtures,
+      # then facade. Macros may publish independently.
       - name: cargo package nigiri-rs-core
         run: cargo package -p nigiri-rs-core --all-features
+
+      - name: cargo package nigiri-rs-lnd
+        run: cargo package -p nigiri-rs-lnd --all-features
 
       - name: cargo package nigiri-rs-macros
         run: cargo package -p nigiri-rs-macros --all-features

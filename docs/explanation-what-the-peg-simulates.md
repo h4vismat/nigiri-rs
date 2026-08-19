@@ -27,7 +27,7 @@ validates the proof against the `bitcoind` it was started pointing at — `-vali
 
 Every step a consumer's own claim path would take is therefore exercised for real, and a mistake in
 it fails here the way it would fail on liquidv1. The repository's own
-`crates/nigiri-rs-testcontainers/tests/peg_pair.rs` drives the whole sequence end to end against four
+`crates/nigiri-rs-fixtures/tests/peg_pair.rs` drives the whole sequence end to end against four
 real containers, in both the one-call form and the primitives.
 
 ## Peg-out is real up to the point where the federation would act
@@ -123,7 +123,7 @@ It does not, and the reason is that Bitcoin's regtest genesis is a hardcoded cha
 the same value on every regtest node ever started, never generated per instance, and `liquidregtest`
 carries that same value as its parent. Two nodes that have never heard of each other therefore agree
 on it, and `connect` accepts them. That is measured rather than reasoned:
-`crates/nigiri-rs-testcontainers/tests/peg_wiring.rs` starts two independent fixtures against a real
+`crates/nigiri-rs-fixtures/tests/peg_wiring.rs` starts two independent fixtures against a real
 daemon and asserts that `connect` succeeds, precisely so this claim cannot quietly drift.
 
 What the comparison does catch is a Liquid node built for a **different** parent chain — one carrying
