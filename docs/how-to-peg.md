@@ -435,9 +435,10 @@ download, and with `-validatepegin=1` it refuses outright. Mine one Liquid block
 during startup, which is why the Liquid half arrives at height 1; see
 `crates/nigiri-rs-core/examples/peg_smoke.rs` for the whole hand-wired recipe.
 
-**Containers left behind after a hard kill** — `Drop` runs even while panicking, but `SIGKILL` skips
-it, and a pair's two halves carry **independent** UUIDs, so no single suffix matches all four. The
-shared network name is the only thing they have in common; see
+**Containers left behind after a hard kill** — Drop requests and joins best-effort cleanup even while
+panicking, but cannot report cleanup errors; use `PegPair::shutdown().await` when they matter. A
+`SIGKILL` skips Drop and can leave resources. A pair's two halves carry **independent** UUIDs, so no
+single suffix matches all four. The shared network name is the only thing they have in common; see
 [Resource naming](reference-fixtures.md#resource-naming) for the recipe.
 
 ## Related

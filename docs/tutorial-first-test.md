@@ -1,8 +1,9 @@
 # Tutorial: your first fixture-backed test
 
 You'll write a Rust test that starts a private Bitcoin regtest chain in Docker, funds an address on
-it, and checks the money arrived — then throws the whole chain away. No Nigiri installation, no
-shared node, no cleanup code.
+it, and checks the money arrived. Each test owns its chain and requests best-effort cleanup when it
+ends. No Nigiri installation or shared node. Drop cannot report cleanup errors; use explicit
+`shutdown().await` on a manually owned fixture when they matter. A hard kill can leave resources.
 
 By the end you'll understand the two ways to reach a fixture, why ports must be read rather than
 assumed, and how to do the same thing on Liquid.
@@ -209,13 +210,14 @@ attribute reached tokio through `nigiri-rs` for you.
 
 **Keep the fixture alive as long as you use the client.** `client()` returns a borrow so the
 compiler enforces it, but `NigiriClient` is `Clone` — a cloned client outliving its fixture points at
-containers that no longer exist.
+containers that cleanup may already have removed.
 
 ## What you built
 
-A test suite where every test owns a private blockchain. No shared node to coordinate around, no
-cleanup step to forget, no `#[ignore]` hiding a test that never ran. Tests can mine, reorg, and
-mutate wallets in parallel, because none of them can see each other's chain.
+A test suite where every test owns a private blockchain and requests best-effort cleanup when it
+ends. Drop cannot report cleanup errors; use explicit `shutdown().await` on a manually owned fixture
+when they matter, and remember that a hard kill can leave resources. Tests can mine, reorg, and
+mutate wallets in parallel because none of them can see each other's chain.
 
 Where to go next:
 

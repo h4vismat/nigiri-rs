@@ -56,14 +56,14 @@ storage Docker did not create for that container alone.
 
 Keep the `Fixture` alive for as long as you use the client. `client()` returns a borrow, so the
 compiler enforces this — but note that `NigiriClient` is `Clone`, and a cloned client outliving its
-fixture points at containers that no longer exist.
+fixture may point at containers that cleanup has removed.
 
 Field order inside the struct is deliberate: Electrs is dropped before the node it indexes, so the
 indexer is never briefly pointed at a container that has already gone. A test in `fixture.rs` pins
 that order.
 
-Teardown also runs on the panic path. A failed start inside `#[nigiri_rs::test]` unwinds with the
-other fixtures' handles dropping normally.
+Drop also requests best-effort teardown on the panic path. A failed start inside
+`#[nigiri_rs::test]` unwinds with the other fixtures' handles dropping normally.
 
 ### What a started fixture guarantees
 
@@ -172,9 +172,10 @@ only the network *name*: the Bitcoin half's `nigiri-rs-fixture-<uuid-a>` is hand
 whose own two containers are suffixed `<uuid-b>`. So no single suffix matches all four containers of a
 pair, and a recipe that greps for one cleans up half of it.
 
-Teardown runs on `Drop`, including while panicking, but a `SIGKILL` skips it. After a hard kill the
-network is the only thing tying a pair's four containers together, so either ask it who is attached or
-sweep the prefixes:
+Drop requests and joins best-effort teardown, including while panicking, but cannot report cleanup
+errors; use `shutdown().await` when they matter. A `SIGKILL` skips Drop and can leave resources.
+After a hard kill the network is the only thing tying a pair's four containers together, so either
+ask it who is attached or sweep the prefixes:
 
 ```sh
 # One pair, by its network: this lists all four containers.
@@ -263,7 +264,7 @@ order *is* the teardown order. A test in `peg_pair.rs` pins that order with drop
 
 `bitcoin()`, `liquid()`, and `peg()` all return borrows, so the compiler keeps the pair alive for as
 long as you use them. The `NigiriClient` caveat from `Fixture` still applies: a *cloned* client
-outliving the pair points at containers that no longer exist.
+outliving the pair may point at containers that cleanup has removed.
 
 ### What a started pair guarantees
 
@@ -398,11 +399,12 @@ channel is revalidated and with a fresh invoice. Transport, authentication, inva
 
 ### Ownership and teardown
 
-Drop performs best-effort cleanup. `shutdown()` explicitly awaits the LND phase and then the Bitcoin
-phase, attempting both and returning the first error. Dependency order is Bob, Alice, Electrs,
-bitcoind, then the shared network. Failure/cancellation during any startup await transfers cleanup
-to the supervisor. If the whole-call deadline has no time left, the public future detaches from that
-supervisor while it continues reverse-order cleanup; no client becomes a lifecycle owner.
+Drop requests and joins best-effort cleanup but cannot report its errors. `shutdown()` explicitly
+awaits the LND phase and then the Bitcoin phase, attempting both and returning the first error.
+A hard kill can leave resources. Dependency order is Bob, Alice, Electrs, bitcoind, then the shared
+network. Failure/cancellation during any startup await transfers cleanup to the supervisor. If the
+whole-call deadline has no time left, the public future detaches from that supervisor while it
+continues reverse-order cleanup; no client becomes a lifecycle owner.
 
 ## `LndPairBuilder`
 

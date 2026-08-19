@@ -1,6 +1,7 @@
 # How to run a throwaway regtest stack
 
-Start a Bitcoin or Liquid regtest chain in Docker, use it, and have it removed when you're done.
+Start and use a Bitcoin or Liquid regtest chain in Docker. Drop requests best-effort cleanup; use
+`shutdown().await` when cleanup errors matter, and remember that a hard kill can leave resources.
 
 Use this when you need the fixture handle itself. If you only need a ready client in a test,
 [`#[nigiri_rs::test]`](reference-test-macro.md) does the same thing with less code.
@@ -83,8 +84,8 @@ Bob, Alice, Electrs, bitcoind, then the network.
 
 **Keep the fixture alive for as long as you use the client.** `client()` returns a borrow, so the
 compiler stops you holding it too long — but `NigiriClient` is `Clone`, and a cloned client that
-outlives its fixture points at containers that no longer exist. You'll see connection-refused
-errors, not a compile error.
+outlives its fixture may point at containers that cleanup has removed. You may see
+connection-refused errors, not a compile error.
 
 ## Give it a longer budget
 
@@ -225,8 +226,9 @@ that started incorrectly.
 **`invalid fixture configuration: ...`** — an image descriptor, startup budget, or LND allocation
 failed validation. Rejected before Docker is asked to do anything.
 
-**Containers left behind after a hard kill.** Teardown runs on `Drop`, including while panicking, but
-a `SIGKILL` skips it. Everything is prefixed and UUID-scoped, so:
+**Containers left behind after a hard kill.** Drop requests and joins best-effort teardown, including
+while panicking, but cannot report cleanup errors; use `shutdown().await` when they matter. A
+`SIGKILL` skips Drop and can leave resources. Everything is prefixed and UUID-scoped, so:
 
 ```sh
 docker ps -a --filter "name=nigiri-rs-" --format "{{.Names}}"

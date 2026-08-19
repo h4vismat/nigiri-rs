@@ -276,7 +276,9 @@ confirmation depth, lagging node view and all — and its peg-out path is exerci
 federation that behaves like the real one in the way that matters: it reads the destination out of
 your transaction, so encoding it wrongly pays nobody.
 
-Four containers per test, removed when the test ends. No shared node, no cleanup step.
+Four containers per test. Drop requests and joins best-effort cleanup when the test ends, but cannot
+report cleanup errors; use `PegPair::shutdown().await` when they matter. A hard kill can leave
+resources. No shared node.
 
 Where to go next:
 

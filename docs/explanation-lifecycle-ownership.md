@@ -81,10 +81,11 @@ time. The fixtures crate exists to make that one line rather than a README parag
 still yours to write.
 
 **Ownership is now a type, so you can drop it too early.** `Fixture` owning its containers means a
-fixture that goes out of scope takes the chain with it. `client()` returns a borrow so the common
-mistake is caught at compile time — but `NigiriClient` is `Clone`, and a cloned client outliving its
-fixture points at containers that no longer exist. `LndClient` is also cheaply cloneable, so the same
-caveat applies to `alice()` and `bob()`. That surfaces as connection-refused at runtime.
+fixture that goes out of scope requests best-effort cleanup of the chain. `client()` returns a borrow
+so the common mistake is caught at compile time — but `NigiriClient` is `Clone`, and a cloned client
+outliving its fixture may point at containers that cleanup has removed. `LndClient` is also cheaply
+cloneable, so the same caveat applies to `alice()` and `bob()`. That can surface as
+connection-refused at runtime.
 
 **Five crates instead of one.** More manifests, a publish order to respect, and a facade to keep the
 import paths stable. Publish the two protocol crates before fixtures, then publish the facade;

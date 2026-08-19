@@ -26,9 +26,11 @@ The macro rewrites your function into a parameterless `#[tokio::test]` wrapper t
    their owning handle, by move.
 3. Calls your original body, now an inner `async fn`, with those bindings.
 
-Fixture handles stay owned by the wrapper, which keeps containers alive for the test and tears them
-down on normal return or panic. `PegPair` and `LndPair` already are their four-container handles, so
-moving either into the body keeps its topology alive for exactly as long.
+Fixture handles stay owned by the wrapper, which keeps containers alive for the test and requests
+best-effort cleanup on normal return or panic. Drop cannot report cleanup errors; use manually owned
+fixtures and explicit `shutdown().await` when they matter. A hard kill can leave resources.
+`PegPair` and `LndPair` already are their four-container handles, so moving either into the body
+keeps its topology alive for exactly as long.
 
 Generated code reaches everything it needs through `nigiri_rs::__private`, so **your crate needs
 only `nigiri-rs`**. You do not add `tokio` or `nigiri-rs-fixtures` to make an expansion
@@ -184,7 +186,9 @@ A single fixture is emitted sequentially — joining one future buys nothing —
 no startup code at all.
 
 If one start fails, the others still finish; the wrapper then panics on the first failure and the
-remaining handles drop as the panic unwinds, running the same teardown a successful test would.
+remaining handles drop as the panic unwinds, requesting the same best-effort teardown as a
+successful test. Drop cannot report cleanup errors; use manually owned fixtures and explicit
+`shutdown().await` when they matter. A hard kill can leave resources.
 
 ## Rejections
 
