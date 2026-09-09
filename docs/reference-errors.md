@@ -20,6 +20,7 @@ pub enum NigiriError {
     InvalidRequest { detail: Cow<'static, str> },
     InvalidResponse { operation: Cow<'static, str>, detail: String },
     PostTransactionMiningFailed { operation: Cow<'static, str>, txid: String, source: Box<NigiriError> },
+    AssetTransferFailed { asset: elements::AssetId, issuance_txin: IssuanceTxIn, source: Box<NigiriError> },
     PegOutputNotFound { liquid_txid: String },
     PegOutputMalformed { liquid_txid: String, detail: String },
     PegInImmature { have: u64, need: u64 },
@@ -46,8 +47,10 @@ The underlying `reqwest::Error` is the source, with its URL stripped.
 
 > `HTTP status {status} during {operation}: {body}`
 
-A non-success status whose body was **not** a JSON-RPC envelope — a proxy error page, a gateway
-failure. The body is included, with any sensitive argument redacted.
+A non-success Esplora status, or an unsuccessful RPC HTTP status without a valid RPC error
+envelope. This includes a success-shaped RPC envelope delivered with HTTP 503. The retained
+body is bounded and sensitive arguments are redacted. Malformed RPC envelopes may instead
+produce `InvalidResponse`; no unsuccessful HTTP response becomes a successful RPC.
 
 A node that returns HTTP 500 *with* a proper JSON-RPC error envelope produces `RpcFailed` instead,
 not this.
@@ -69,11 +72,12 @@ transaction hex passed to `broadcast_tx`).
 > `{operation} timed out after {duration:?}`
 
 Either a single HTTP operation exceeded `config.timeout`, or a polling loop exhausted its budget.
-Three operations produce it:
+Both adapters use this classification for sending and reading response bodies. Polling budgets
+also include in-flight requests and sleeps:
 
 | `operation` | Bound by |
 | --- | --- |
-| an RPC method name | `config.timeout` |
+| an RPC method name or Esplora operation label | `config.timeout` |
 | `wait for readiness` | `config.timeout` |
 | `wait for confirmation` | the `timeout` argument you passed |
 
@@ -103,11 +107,13 @@ Produced by:
 
 A service responded, but with something unusable:
 
-- The body was not a JSON-RPC envelope and the status was a success.
+- A successful HTTP response lacked a valid JSON-RPC envelope: missing fields, duplicate fields,
+  a missing/mismatched ID, or simultaneous non-null result and error. An explicit `null` result
+  remains valid for a unit-returning call.
 - The result did not deserialize into the requested type.
 - A txid, block hash, or address did not parse, or was for the wrong network.
 - The body exceeded `max_response_bytes` (`detail: "response body exceeded the configured safety
-  limit"`).
+  limit"`). Reading stops as soon as the limit is crossed.
 
 **Response content is deliberately omitted** from deserialization failures, so a mismatched type does
 not leak the payload into your logs.
@@ -116,12 +122,22 @@ not leak the payload into your logs.
 
 > `{operation} committed transaction {txid}, but confirmation mining failed`
 
-The one variant that reports a **partial success**. `faucet` and `broadcast_tx` each commit a
+Reports a **partial success**. `faucet` and `broadcast_tx` each commit a
 transaction and then mine one block; if the commit succeeds and the mining fails, this carries the
 committed transaction ID and the underlying mining error as its source.
 
 The transaction is on the node. It is simply not confirmed. Do not retry blindly — inspect node state
 first, or the retry sends a second transaction.
+
+### `AssetTransferFailed`
+
+`mint` completed issuance, but the subsequent transfer failed. `asset` is the native
+`elements::AssetId`; `issuance_txin` retains its `elements::Txid` and input index (`vin`).
+`source` is the transfer error, available through `Error::source()`.
+
+Use these identifiers to inspect and recover the existing issuance. Repeating `mint` issues
+another asset. A transfer timeout can still mean the transfer committed, so inspect node state
+before resending it. An `issueasset` failure returns its original error without this wrapper.
 
 ### `PegOutputNotFound`
 
@@ -137,7 +153,8 @@ like a peg-out at all.
 A peg-out-shaped output was present but not usable for this pair — a wrong-chain output decodes
 fine, it just names another pair, so this is not that case. `detail` names the specific problem: a
 destination script that is not a standard address, an output with no explicit value, a value that
-does not parse as an amount, or (when every peg-out-shaped output named a different parent chain)
+does not parse as an amount, a missing/wrong explicit asset, multiple same-parent peg-out outputs,
+or (when every peg-out-shaped output named a different parent chain)
 which chain it named instead.
 
 ### `PegInImmature`
@@ -146,7 +163,9 @@ which chain it named instead.
 
 `Peg::claim_peg_in` checked the deposit's confirmation count against the sidechain's reported
 `pegin_confirmation_depth` before submitting `claimpegin`, rather than letting the node reject the
-claim. `Peg::complete_peg_in` treats this as retryable and mines another block.
+claim. `Peg::complete_peg_in` also returns immediately if its initial deposit lookup is immature;
+its submission retry loop only retries the pinned Elements maturity rejection described in
+[the client reference](reference-client.md#complete_peg_in-mines-and-how-many-blocks-is-not-fixed).
 
 ### `PegNotConfigured`
 
@@ -171,7 +190,7 @@ pub enum LndError {
     CredentialRead { path: PathBuf, source: io::Error },
     Transport { operation: Cow<'static, str>, detail: Cow<'static, str>, source: Box<dyn Error + Send + Sync> },
     Authentication { operation: Cow<'static, str>, detail: Cow<'static, str> },
-    Status { operation: Cow<'static, str>, detail: Cow<'static, str> },
+    Status { operation: Cow<'static, str>, code: LndStatusCode, detail: Cow<'static, str> },
     Timeout { operation: Cow<'static, str>, duration: Duration },
     InvalidResponse { operation: Cow<'static, str>, detail: Cow<'static, str>, identifier: Option<String> },
     PaymentFailed { payment_hash: sha256::Hash, reason: Cow<'static, str> },
@@ -188,7 +207,8 @@ payment preimages are never included.
 Caller input was rejected before an RPC: an invalid HTTPS endpoint, empty/oversized credential,
 zero timeout, invalid peer address or channel/invoice/payment request, checked amount overflow,
 sub-satoshi conversion, missing BOLT11 amount, non-whole-second duration, or value beyond LND's
-signed request range.
+signed request range. Public response-record constructors also return this variant for invalid
+network identities, peer addresses, inconsistent balances, or invalid payment proofs.
 
 ### `CredentialRead`
 
@@ -209,9 +229,19 @@ status failures so callers can stop rather than retry credentials blindly.
 
 ### `Status`
 
-LND returned another gRPC status. The operation and bounded status classification are retained. The
-fixture considers only a narrow set of unavailable/deadline/resource/aborted/unknown statuses
-transient during pre-commit readiness; it does not make every status retryable. After a mutation is
+LND returned another gRPC status. The operation, owned `LndStatusCode`, and bounded diagnostic
+`detail` are retained. Match `code` for policy decisions; `detail` is display text. Code conversion
+occurs once at the adapter boundary and exposes no Tonic types.
+
+`LndStatusCode` is a `Clone + Copy + Debug + Eq + PartialEq`, non-exhaustive enum with variants
+`Ok`, `Cancelled`, `Unknown`, `InvalidArgument`, `DeadlineExceeded`, `NotFound`, `AlreadyExists`,
+`PermissionDenied`, `ResourceExhausted`, `FailedPrecondition`, `Aborted`, `OutOfRange`,
+`Unimplemented`, `Internal`, `Unavailable`, `DataLoss`, and `Unauthenticated`. Authentication codes
+from the LND adapter normally become `Authentication` instead.
+
+The fixture retries only `Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Aborted`, and
+`Unknown` status codes during readiness. Wallet initialization additionally requires the operation
+to be `generate wallet seed`, so the committing `InitWallet` phase is never retried. After a mutation is
 dispatched, `Cancelled`, `Unknown`, `DeadlineExceeded`, `ResourceExhausted`, `Internal`, and
 `Unavailable` are classified as `OutcomeUnknown`; authentication, validation, and precondition
 failures remain definitive.

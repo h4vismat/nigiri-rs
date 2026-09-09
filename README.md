@@ -86,7 +86,7 @@ The protocol clients do not start or stop anything. Two paths exist, and they ca
 side.
 
 **Ephemeral fixtures.** The companion `nigiri-rs-fixtures` crate, reached through the facade's
-`fixtures` feature, starts and owns throwaway Bitcoin, Liquid, peg, or Lightning stacks:
+`fixtures` feature, starts and owns throwaway Bitcoin, Liquid, or peg stacks:
 
 ```toml
 [dev-dependencies]
@@ -106,7 +106,12 @@ let electrum_port = fixture.electrum_endpoint().port();
 # }
 ```
 
-Docker must be running; no Nigiri installation is needed. Drop requests best-effort cleanup of the
+For Lightning stacks, enable `lightning-fixtures` instead; it includes `fixtures` and `lnd`.
+Direct users of `nigiri-rs-fixtures` enable its `lnd` feature. Bitcoin/Liquid fixtures do not
+compile the LND protobuf toolchain.
+
+Docker must be running locally; no Nigiri installation is needed. Remote Docker hosts are rejected
+because fixture ports are bound to loopback. Drop requests best-effort cleanup of the
 containers, their anonymous volumes, and the network; use `shutdown().await` when cleanup failures
 matter. A hard process kill can still leave resources for manual removal. Ports are assigned by the
 runtime, so read them from the fixture instead of assuming Nigiri's fixed ones. The first start on a
@@ -136,7 +141,9 @@ async fn my_wallet_sees_its_funding(client: NigiriClient<Bitcoin>) -> Result<(),
 One fixture is started per parameter, so a cross-chain test takes two. `PegPair` and `LndPair` are
 also accepted and move into the body because each is its owning four-container handle. Multiple
 requested stacks start concurrently. `startup_timeout = <seconds>` and `flavor = "multi_thread"`
-are accepted. Tests are never ignored: if Docker is unavailable they fail loudly.
+are accepted. A renamed dependency can use `#[regtest::test(crate = "::regtest")]`.
+Fixture parameters cannot be combined with `#[should_panic]`: assert expected failures inside the
+body so a setup failure cannot accidentally pass. Tests are never ignored: if Docker is unavailable they fail loudly.
 
 `LndPair::start()` returns two authenticated clients only after a 2,000,000-sat channel with
 1,000,000 sats pushed to Bob has six confirmations, both sides retain at least 100,000 sats nominal
@@ -329,11 +336,11 @@ Both `NigiriClient<Bitcoin>` and `NigiriClient<Liquid>` provide:
 - variable block generation;
 - block invalidation and reconsideration.
 
-`NigiriClient<Liquid>` additionally provides typed asset minting and asset faucet operations. These methods do not exist on the Bitcoin client. `mint` derives the asset identifier from the JSON contract it submits to Elements, then calls `issueasset` and `sendtoaddress`. Those calls are not atomic: if sending fails after issuance, the asset already exists. Inspect node state before retrying; retrying can create another asset.
+`NigiriClient<Liquid>` additionally provides typed asset minting and asset faucet operations. These methods do not exist on the Bitcoin client. `mint` derives the asset identifier from the JSON contract it submits to Elements, then calls `issueasset` and `sendtoaddress`. Those calls are not atomic: if sending fails after issuance, the asset already exists. `NigiriError::AssetTransferFailed` retains the issued asset ID and issuance outpoint so callers can recover without issuing again. Retrying `mint` can create another asset.
 
 ### Deliberate scope limits
 
-Liquid's peg is covered by `Peg`, and half of it is real. Peg-in is genuine end to end: a real federation-controlled address, a real `claimpegin` with a real merkle proof. Peg-out is split — `sendtomainchain` is a genuine Elements call that genuinely burns L-BTC, but regtest has no federation to service it, so `release_peg_out` plays that part. **That release is a simulation with no reserve:** the BTC comes from the Bitcoin node's own wallet, total BTC on the mainchain side grows with every release, and no 1:1 invariant holds across the pair. `initpegoutwallet` is deliberately not wrapped: this chain runs with PAK enforcement off, so the node rejects the call outright, and `sendtomainchain` does not need it. See [Client API](docs/reference-client.md#peg) for the whole surface and [`PegPair`](docs/reference-fixtures.md#pegpair) for a wired four-container pair to run it against.
+Liquid's peg is covered by `Peg`, and half of it is real. Peg-in is genuine end to end: a real federation-controlled address, a real `claimpegin` with a real merkle proof. Peg-out is split — `sendtomainchain` is a genuine Elements call that genuinely burns L-BTC, but regtest has no federation to service it, so `release_peg_out` plays that part. **That release is a simulation with no reserve:** the BTC comes from the Bitcoin node's own wallet, total BTC on the mainchain side grows with every release, and no 1:1 invariant holds across the pair. `initpegoutwallet` is deliberately not wrapped: this chain runs with PAK enforcement off, so the node rejects the call outright, and `sendtomainchain` does not need it. Release validates one unambiguous output with the correct explicit pegged asset. It remains stateless: callers enforce confirmation and prevent repeat releases. See [Client API](docs/reference-client.md#peg) for the whole surface and [`PegPair`](docs/reference-fixtures.md#pegpair) for a wired four-container pair to run it against.
 
 The crate models only capabilities that the verified default Nigiri networks can execute. Custom federation lifecycle, chain configuration, and cross-chain orchestration remain the host application's responsibility.
 
@@ -405,12 +412,14 @@ Protocol clients, parsers, request construction, amount bounds, error mapping, a
 compile-fail suite need no Docker. A contributor without Docker installed runs:
 
 ```sh
-cargo test -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros --all-targets --all-features
+cargo test --workspace --all-targets
+cargo test --workspace --all-targets --features lightning-fixtures,bitcoin-rpc-types
 cargo test --workspace --doc --all-features
 ```
 
-That is also the scope of the three Docker-free CI matrix cells. A plain workspace `cargo test` is
-not Docker-free: it also runs `nigiri-rs-fixtures` and facade integration tests.
+A plain workspace `cargo test` includes fake-engine fixture tests and downstream macro consumers,
+without starting Docker. Live tests are explicitly gated by `docker-tests`; `--all-features` enables
+that gate as well as Lightning and typed Bitcoin RPC support.
 
 Bitcoin, Liquid, peg, and real LND payment integration tests need Docker but no host installation.
 Each owns its resources and requests best-effort cleanup when it finishes:

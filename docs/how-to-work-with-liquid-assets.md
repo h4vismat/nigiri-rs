@@ -57,18 +57,21 @@ bug: the ID is a hash of the contract, and the contracts differ.
 ### It is not atomic
 
 `mint` calls `issueasset` and then `sendtoaddress`. If the send fails after issuance, **the asset
-still exists**. The error you get back is the send's.
+still exists**. `NigiriError::AssetTransferFailed` retains the issued asset ID, issuance input,
+and underlying transfer error.
 
 Inspect node state before retrying — a blind retry issues a second asset with a different ID.
 
 ```rust,ignore
 match client.mint(&address, 1_000, "Test", "TST").await {
     Ok(minted) => { /* ... */ }
-    Err(error) => {
-        // The asset may exist even though this failed. Check `listissuances`
-        // before calling mint again.
-        eprintln!("mint failed: {error}");
+    Err(nigiri_rs::NigiriError::AssetTransferFailed { asset, issuance_txin, source }) => {
+        eprintln!("asset {asset} issued at {}:{}", issuance_txin.txid, issuance_txin.vin);
+        eprintln!("transfer failed: {source}");
+        // Inspect this issuance and any committed transfer before sending it again.
+        // Reuse the existing asset; do not repeat mint.
     }
+    Err(error) => eprintln!("issuance failed: {error}"),
 }
 ```
 
@@ -226,7 +229,9 @@ If you need `initpegoutwallet` on a custom environment that does enable PAK, rea
 otherwise rejected. Nothing was issued; `mint` returns before attempting the send.
 
 **`Nigiri RPC sendtoaddress failed with code -6: Insufficient funds`** after a mint — the issuance
-succeeded, the transfer did not. The asset exists. Check `listissuances` before retrying.
+succeeded; `AssetTransferFailed` wraps this send error and retains `asset` and `issuance_txin`.
+Use those identifiers with `listissuances` and transaction queries to recover. A transfer timeout
+can mean the transfer committed without a response, so inspect it before resending.
 
 **`utxo.value` is `None`** — the output is confidential. Expected, not an error. Use the commitment
 fields or unblind through a wallet.

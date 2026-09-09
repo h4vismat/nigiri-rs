@@ -38,12 +38,13 @@ compile. (`__private` is `#[doc(hidden)]` and not covered by semver. Do not refe
 
 ## Arguments
 
-Two, both optional.
+Three, all optional.
 
 | Argument | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `startup_timeout` | integer, seconds | 60 (`Fixture`), 120 (`PegPair`), 180 (`LndPair`) | Passed to the corresponding builder for every fixture in the test. Omitted, each keeps its own default. |
 | `flavor` | string | current-thread | Forwarded to `#[tokio::test(flavor = ...)]`. |
+| `crate` | string containing a Rust path | `::nigiri_rs` | Facade path, e.g. `crate = "::regtest"` for a renamed dependency. |
 
 ```rust,ignore
 #[nigiri_rs::test(startup_timeout = 120)]
@@ -53,7 +54,7 @@ async fn slow_first_pull(client: NigiriClient<Bitcoin>) { /* ... */ }
 async fn needs_real_threads(client: NigiriClient<Bitcoin>) { /* ... */ }
 ```
 
-Both may be combined: `#[nigiri_rs::test(startup_timeout = 120, flavor = "multi_thread")]`.
+Arguments may be combined: `#[nigiri_rs::test(startup_timeout = 120, flavor = "multi_thread")]`.
 
 `flavor` is passed through to tokio verbatim and is not validated by this macro — tokio reports an
 unknown flavor.
@@ -74,7 +75,7 @@ The function must be `async`. Beyond that:
 | One `LndPair` | Yes | One Bitcoin/Electrs stack plus two ready-to-pay LND nodes — four containers. |
 | Two or more parameters, any mix | Yes | One fixture or pair each, **started concurrently**. |
 | Any return type | Yes | Preserved verbatim, including `Result<_, _>`. |
-| Other attributes on the fn | Yes | Preserved and re-emitted below the runtime attribute. |
+| Other attributes on the fn | Yes, except `should_panic` with fixtures | Preserved and re-emitted below the runtime attribute. |
 
 Parameter types may be written as `NigiriClient<Bitcoin>` or fully qualified as
 `nigiri_rs::NigiriClient<Bitcoin>` — the chain is read from the last path segment, so either import
@@ -139,7 +140,7 @@ the value applies to every fixture in the test, pair included.
 
 ### An `LndPair` parameter
 
-`LndPair` also moves into the body. It returns Alice, Bob, the backing Bitcoin client, and the
+`LndPair` requires `lightning-fixtures` and also moves into the body. It returns Alice, Bob, the backing Bitcoin client, and the
 confirmed channel point from one owner. Its default is 180 seconds. Startup has already settled two
 1,000-msat public readiness invoices in opposite directions, so macro tests must identify their own
 payment and invoice records by hash rather than assume empty histories.
@@ -192,9 +193,13 @@ successful test. Drop cannot report cleanup errors; use manually owned fixtures 
 
 ## Rejections
 
-All of these are compile errors with the message shown. Six are pinned by `trybuild` cases in
+`#[should_panic]` is rejected for fixture tests because a setup panic could pass without ever
+running the body. Assert the expected failure inside the test body instead. A test with no fixture
+parameters retains ordinary `#[should_panic]` behavior.
+
+All of these are compile errors with the message shown. Seven are pinned by `trybuild` cases in
 `crates/nigiri-rs-macros/tests/ui/`: `not_async.rs`, `generic_fn.rs`, `reserved_parameter_name.rs`,
-`unsupported_parameter.rs`, `unknown_argument.rs`, and `bad_timeout.rs`.
+`unsupported_parameter.rs`, `unknown_argument.rs`, `bad_timeout.rs`, and `fixture_should_panic.rs`.
 
 | Cause | Message |
 | --- | --- |
@@ -205,7 +210,7 @@ All of these are compile errors with the message shown. Six are pinned by `trybu
 | Non-identifier pattern in a parameter | `each parameter must be a plain name, so the generated wrapper can bind it` |
 | Parameter named `__nigiri_rs_*` | `parameter names beginning `__nigiri_rs_` are reserved for the code `#[nigiri_rs::test]` generates; rename this parameter` |
 | Parameter is not an accepted fixture type | ``#[nigiri_rs::test]` parameters must be `NigiriClient<Bitcoin>`, `NigiriClient<Liquid>`, `PegPair`, or `LndPair`; the chain is taken from this type` |
-| Unknown attribute argument | ``unknown argument `x`; `#[nigiri_rs::test]` accepts `startup_timeout` and `flavor`. The chain is taken from the parameter type, not from an argument.`` |
+| Unknown attribute argument | ``unknown argument `x`; `#[nigiri_rs::test]` accepts `startup_timeout`, `flavor`, and `crate`. The chain is taken from the parameter type, not from an argument.`` |
 | `startup_timeout` not an integer | ``startup_timeout` takes a number of seconds, e.g. `#[nigiri_rs::test(startup_timeout = 120)]`` |
 | `flavor` not a string | ``flavor` takes a string, e.g. `flavor = "multi_thread"`` |
 
@@ -233,8 +238,9 @@ The chain is named because concurrent starts mean more than one can fail. A pair
 
 `trybuild` can only ever check the rejections above. Generated code names
 `::nigiri_rs::__private::…`, and `nigiri-rs-macros` cannot depend on the facade that re-exports it —
-that would be a dependency cycle. **Successful expansion is proven only by**
-`crates/nigiri-rs/tests/macro_smoke.rs`, which runs against real containers. Do not try to add a
+that would be a dependency cycle. Successful expansion without a direct Tokio dependency, including a renamed facade dependency,
+is checked by the workspace packages under `tests/consumers/`. Live fixture injection is checked
+by `crates/nigiri-rs/tests/macro_smoke.rs` with `docker-tests` enabled. Do not try to add a
 passing-expansion `trybuild` case to the macro crate.
 
 ## Related

@@ -224,10 +224,11 @@ for attempt in 0..=20 {
             claim = Some(txid);
             break;
         }
-        // Only these two are worth another block. A dead socket or a malformed request is not —
-        // stop rather than spending twenty blocks and then reporting a maturity problem that was
-        // never real. The node's rejection of a premature claim arrives as `RpcFailed`.
-        Err(NigiriError::PegInImmature { .. } | NigiriError::RpcFailed { .. }) => continue,
+        Err(NigiriError::PegInImmature { .. }) => continue,
+        // Elements 23.3.3 also uses -8 for permanent invalid parameters.
+        Err(NigiriError::RpcFailed { method, code: -8, message })
+            if method == "claimpegin"
+                && message == "Peg-in Bitcoin transaction needs more confirmations to be sent." => continue,
         Err(other) => return Err(other.into()),
     }
 }
@@ -305,10 +306,19 @@ an API that took the destination as an argument could not reproduce it.
 
 | What the scan found | Result |
 | --- | --- |
-| A peg-out for this pair | `Ok(PegOut)` |
+| Exactly one same-parent peg-out with the configured explicit pegged asset | `Ok(PegOut)` |
 | Its destination script is not a standard address, or its value is missing or unreadable | `NigiriError::PegOutputMalformed` |
+| Missing/wrong explicit asset, or multiple same-parent peg-out outputs | `NigiriError::PegOutputMalformed` |
 | Every peg-out-shaped output names a different parent chain | `NigiriError::PegOutputMalformed`, detail naming both chains |
 | No peg-out-shaped output at all | `NigiriError::PegOutputNotFound` |
+
+The asset is checked against `getsidechaininfo.pegged_asset`, captured by `Peg::connect`.
+Validation completes before any Bitcoin payment. Wrong-parent outputs are skipped while looking
+for the single output belonging to this pair.
+
+The release helper is stateless: it accepts unconfirmed Liquid transactions, and calling it again
+with the same transaction (including through a clone) pays again. If your test requires a minimum
+confirmation depth or one release per transaction, enforce that policy in your caller.
 
 An ordinary Liquid transfer is the last row:
 
@@ -418,7 +428,8 @@ mature; mine to `pegin_confirmation_depth()` and then retry a block at a time.
 
 **A claim rejected at exactly the reported depth** — expected, not a bug. The node's view of the
 mainchain lags the mainchain, and different runs need a different number of extra blocks. Mine one
-more and resubmit. `complete_peg_in` already does, up to twenty times.
+more and resubmit. `complete_peg_in` does this up to twenty times only for the exact Elements
+23.3.3 `claimpegin` maturity rejection above; other RPC codes or messages return immediately.
 
 **`no peg-out output in Liquid transaction ...`** — `NigiriError::PegOutputNotFound`. The transaction
 you named is not a `sendtomainchain`. An ordinary transfer gives exactly this.
