@@ -5,6 +5,29 @@ use bitcoin::hashes::sha256;
 /// Maximum retained length for daemon-provided diagnostic text.
 pub(crate) const MAX_ERROR_TEXT_BYTES: usize = 1_024;
 
+/// Transport-independent status classification reported by the Lightning adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum LndStatusCode {
+    Ok,
+    Cancelled,
+    Unknown,
+    InvalidArgument,
+    DeadlineExceeded,
+    NotFound,
+    AlreadyExists,
+    PermissionDenied,
+    ResourceExhausted,
+    FailedPrecondition,
+    Aborted,
+    OutOfRange,
+    Unimplemented,
+    Internal,
+    Unavailable,
+    DataLoss,
+    Unauthenticated,
+}
+
 /// Errors returned by the LND Lightning boundary.
 #[derive(thiserror::Error)]
 #[non_exhaustive]
@@ -36,6 +59,7 @@ pub enum LndError {
     /// LND returned a non-authentication gRPC status.
     #[error("LND status failed during {operation}: {detail}")]
     Status {
+        code: LndStatusCode,
         operation: Cow<'static, str>,
         detail: Cow<'static, str>,
     },
@@ -75,7 +99,6 @@ impl std::fmt::Debug for LndError {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn bounded(value: impl Into<Cow<'static, str>>) -> Cow<'static, str> {
     let value = value.into();
     if value.len() <= MAX_ERROR_TEXT_BYTES {

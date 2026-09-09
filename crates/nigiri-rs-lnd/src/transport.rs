@@ -29,7 +29,7 @@ pub(crate) struct ClientInner {
 
 impl ClientInner {
     pub(crate) fn authenticated(config: &LndConfig) -> Result<Arc<Self>, LndError> {
-        let transport = LazyChannel::new(tls_endpoint(config)?);
+        let transport = LazyChannel::new(tls_endpoint(config.tls())?);
         let macaroon = lowercase_hex(config.macaroon())
             .parse()
             .map_err(invalid_transport_configuration)?;
@@ -54,14 +54,12 @@ impl fmt::Debug for ClientInner {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) struct UnauthenticatedLndClient {
     transport: LazyChannel,
     pub(crate) timeout: Duration,
 }
 
 impl UnauthenticatedLndClient {
-    #[allow(dead_code)]
     pub(crate) async fn channel(&self) -> Channel {
         self.transport.channel().await
     }
@@ -76,8 +74,9 @@ impl fmt::Debug for UnauthenticatedLndClient {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn unauthenticated(config: &LndConfig) -> Result<UnauthenticatedLndClient, LndError> {
+pub(crate) fn unauthenticated(
+    config: &crate::config::TlsConfig,
+) -> Result<UnauthenticatedLndClient, LndError> {
     Ok(UnauthenticatedLndClient {
         transport: LazyChannel::new(tls_endpoint(config)?),
         timeout: config.timeout(),
@@ -183,7 +182,7 @@ where
     bounded_mutating_request_until(deadline, operation, identifier, call(request)).await
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) async fn bounded_request<ResponseMessage, CallFuture>(
     duration: Duration,
     operation: &'static str,
@@ -256,9 +255,49 @@ pub(crate) fn map_status(operation: &'static str, status: Status) -> LndError {
             detail: Cow::Borrowed("credentials were rejected"),
         },
         code => LndError::Status {
+            code: status_code(code),
             operation,
             detail: bounded(format!("gRPC status {code}")),
         },
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn public_status_code_does_not_depend_on_daemon_diagnostics() {
+    let error = map_status(
+        "get info",
+        Status::unavailable("arbitrary secret daemon detail"),
+    );
+    assert!(matches!(
+        error,
+        LndError::Status {
+            code: crate::LndStatusCode::Unavailable,
+            ..
+        }
+    ));
+    assert!(!error.to_string().contains("secret"));
+}
+
+fn status_code(code: Code) -> crate::LndStatusCode {
+    match code {
+        Code::Ok => crate::LndStatusCode::Ok,
+        Code::Cancelled => crate::LndStatusCode::Cancelled,
+        Code::Unknown => crate::LndStatusCode::Unknown,
+        Code::InvalidArgument => crate::LndStatusCode::InvalidArgument,
+        Code::DeadlineExceeded => crate::LndStatusCode::DeadlineExceeded,
+        Code::NotFound => crate::LndStatusCode::NotFound,
+        Code::AlreadyExists => crate::LndStatusCode::AlreadyExists,
+        Code::PermissionDenied => crate::LndStatusCode::PermissionDenied,
+        Code::ResourceExhausted => crate::LndStatusCode::ResourceExhausted,
+        Code::FailedPrecondition => crate::LndStatusCode::FailedPrecondition,
+        Code::Aborted => crate::LndStatusCode::Aborted,
+        Code::OutOfRange => crate::LndStatusCode::OutOfRange,
+        Code::Unimplemented => crate::LndStatusCode::Unimplemented,
+        Code::Internal => crate::LndStatusCode::Internal,
+        Code::Unavailable => crate::LndStatusCode::Unavailable,
+        Code::DataLoss => crate::LndStatusCode::DataLoss,
+        Code::Unauthenticated => crate::LndStatusCode::Unauthenticated,
     }
 }
 
@@ -299,7 +338,7 @@ fn has_transport_source(status: &Status) -> bool {
     false
 }
 
-fn tls_endpoint(config: &LndConfig) -> Result<Endpoint, LndError> {
+fn tls_endpoint(config: &crate::config::TlsConfig) -> Result<Endpoint, LndError> {
     let domain = match config
         .endpoint()
         .host()
@@ -713,13 +752,13 @@ mod tests {
         )
         .unwrap();
 
-        let transport = unauthenticated(&config).unwrap();
+        let transport = unauthenticated(config.tls()).unwrap();
 
         assert!(format!("{transport:?}").starts_with("UnauthenticatedLndClient"));
     }
 
     async fn probe_without_authentication(config: &LndConfig) -> Result<String, LndError> {
-        let transport = unauthenticated(config)?;
+        let transport = unauthenticated(config.tls())?;
         let mut harness = HarnessClient::new(transport.channel().await);
         let response =
             bounded_request(transport.timeout, "probe", harness.probe(ProbeRequest {})).await?;

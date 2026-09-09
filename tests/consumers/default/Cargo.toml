@@ -1,0 +1,9 @@
+[package]
+name = "nigiri-macro-consumer-default"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dev-dependencies]
+nigiri-rs = { package = "nigiri-rs", path = "../../../crates/nigiri-rs", features = ["fixtures"] }

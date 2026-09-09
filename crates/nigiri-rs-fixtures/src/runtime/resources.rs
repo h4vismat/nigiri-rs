@@ -40,7 +40,6 @@ impl ResourceLedger {
         self.confirm(name, id);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn confirm_network(&mut self, name: &str, id: String) {
         self.confirm(name, id);
     }

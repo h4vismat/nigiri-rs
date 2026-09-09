@@ -149,9 +149,12 @@ fn client<N: nigiri_rs_core::NigiriNetwork>(node_rpc_url: Url) -> NigiriClient<N
     .unwrap()
 }
 
+const PEGGED_ASSET: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
 fn sidechain_info(parent: &str, depth: u64) -> Value {
     json!({
         "parent_blockhash": parent,
+        "pegged_asset": PEGGED_ASSET,
         "pegin_confirmation_depth": depth,
         "enforce_pak": false,
     })
@@ -326,10 +329,10 @@ async fn complete_peg_in_mines_to_the_reported_depth() {
             // faucet: sendtoaddress, then getnewaddress + generatetoaddress for its own block.
             ok(Value::String(MAINCHAIN_TXID.to_owned())),
             ok(Value::String(mining_address.to_owned())),
-            ok(json!([format!("{}", "ee".repeat(32))])),
+            ok(json!(["ee".repeat(32)])),
             // complete_peg_in: an address to mine the remaining depth to.
             ok(Value::String(mining_address.to_owned())),
-            ok(json!([format!("{}", "ff".repeat(32))])),
+            ok(json!(["ff".repeat(32)])),
             // claim_peg_in: the deposit, then its proof.
             ok(json!({"hex": RAW_TX_HEX, "confirmations": 8})),
             ok(Value::String(PROOF_HEX.to_owned())),
@@ -372,7 +375,7 @@ async fn complete_peg_in_retries_while_the_node_lags_the_chain() {
         "500 Internal Server Error",
         json!({
             "result": null,
-            "error": {"code": -8, "message": "needs more confirmations to be sent"},
+            "error": {"code": -8, "message": "Peg-in Bitcoin transaction needs more confirmations to be sent."},
             "id": "nigiri-rs",
         })
         .to_string(),
@@ -392,18 +395,18 @@ async fn complete_peg_in_retries_while_the_node_lags_the_chain() {
             // faucet: sendtoaddress, getnewaddress, generatetoaddress.
             ok(Value::String(MAINCHAIN_TXID.to_owned())),
             ok(Value::String(mining_address.to_owned())),
-            ok(json!([format!("{}", "ee".repeat(32))])),
+            ok(json!(["ee".repeat(32)])),
             // complete_peg_in: mining address, then the bulk mine to depth.
             ok(Value::String(mining_address.to_owned())),
-            ok(json!([format!("{}", "ff".repeat(32))])),
+            ok(json!(["ff".repeat(32)])),
             // fetched once, up front: the deposit and its proof cannot change once mature, so a
             // rejected claimpegin never asks the Bitcoin node for either again.
             ok(json!({"hex": RAW_TX_HEX, "confirmations": 8})),
             ok(Value::String(PROOF_HEX.to_owned())),
             // retry 1: one block, no re-fetch.
-            ok(json!([format!("{}", "1a".repeat(32))])),
+            ok(json!(["1a".repeat(32)])),
             // retry 2: one block, no re-fetch, then the resubmitted claim is accepted.
-            ok(json!([format!("{}", "1b".repeat(32))])),
+            ok(json!(["1b".repeat(32)])),
         ],
     )
     .await;
@@ -471,10 +474,10 @@ async fn complete_peg_in_does_not_retry_a_permanent_failure() {
             // faucet: sendtoaddress, then getnewaddress + generatetoaddress for its own block.
             ok(Value::String(MAINCHAIN_TXID.to_owned())),
             ok(Value::String(mining_address.to_owned())),
-            ok(json!([format!("{}", "ee".repeat(32))])),
+            ok(json!(["ee".repeat(32)])),
             // complete_peg_in: an address to mine the remaining depth to.
             ok(Value::String(mining_address.to_owned())),
-            ok(json!([format!("{}", "ff".repeat(32))])),
+            ok(json!(["ff".repeat(32)])),
             // claim_peg_in: a deposit lookup that comes back malformed, not "not deep enough" —
             // a non-envelope body with a success status maps to NigiriError::InvalidResponse.
             // This is the 7th and last required slot.
@@ -483,7 +486,7 @@ async fn complete_peg_in_does_not_retry_a_permanent_failure() {
             // not remove this thinking it is dead: without it, this test cannot tell a correct
             // fail-fast from the pre-fix bug, per the block comment above. It is slot index 7,
             // at or beyond `expected`, so it gets the short `grace` timeout, not the generous one.
-            ok(json!([format!("{}", "1a".repeat(32))])),
+            ok(json!(["1a".repeat(32)])),
         ],
         7, // seven required slots; the trailing generatetoaddress is the trap.
         grace,
@@ -531,7 +534,7 @@ fn peg_out_transaction(script_hex: &str, value_btc: &str) -> Value {
     serde_json::from_str(&format!(
         r#"{{"vout":[
             {{"value":0.5,"scriptPubKey":{{"hex":"{ordinary}"}}}},
-            {{"value":{value_btc},"scriptPubKey":{{"hex":"{script_hex}"}}}}
+            {{"asset":"{PEGGED_ASSET}","value":{value_btc},"scriptPubKey":{{"hex":"{script_hex}"}}}}
         ]}}"#
     ))
     .expect("the scripted transaction is valid JSON")
@@ -549,7 +552,7 @@ async fn release_peg_out_pays_the_decoded_destination() {
             ok(Value::String(
                 "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080".to_owned(),
             )),
-            ok(json!([format!("{}", "cd".repeat(32))])),
+            ok(json!(["cd".repeat(32)])),
         ],
     )
     .await;
@@ -613,7 +616,7 @@ fn transaction_with_wrong_chain_before_golden(value_btc: &str) -> Value {
         r#"{{"vout":[
             {{"value":0.5,"scriptPubKey":{{"hex":"{ordinary}"}}}},
             {{"value":0.5,"scriptPubKey":{{"hex":"{WRONG_CHAIN_PEG_OUT_SCRIPT}"}}}},
-            {{"value":{value_btc},"scriptPubKey":{{"hex":"{GOLDEN_PEG_OUT_SCRIPT}"}}}}
+            {{"asset":"{PEGGED_ASSET}","value":{value_btc},"scriptPubKey":{{"hex":"{GOLDEN_PEG_OUT_SCRIPT}"}}}}
         ]}}"#
     ))
     .expect("the scripted transaction is valid JSON")
@@ -631,7 +634,7 @@ async fn release_peg_out_skips_a_wrong_chain_output_and_finds_the_real_one() {
             ok(Value::String(
                 "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080".to_owned(),
             )),
-            ok(json!([format!("{}", "cd".repeat(32))])),
+            ok(json!(["cd".repeat(32)])),
         ],
     )
     .await;
@@ -810,4 +813,75 @@ async fn send_to_mainchain_sends_an_exact_decimal_amount() {
         )
         .unwrap()
     );
+}
+
+// This explicitly characterizes the simulation's existing stateless contract.
+#[tokio::test]
+async fn release_simulation_can_repeat_an_unconfirmed_transaction() {
+    let mut transaction = peg_out_transaction(GOLDEN_PEG_OUT_SCRIPT, "0.00010000");
+    transaction["confirmations"] = json!(0);
+    let payout = [
+        ok(json!(RELEASE_TXID)),
+        ok(json!("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080")),
+        ok(json!(["cd".repeat(32)])),
+    ];
+    let (peg, liquid_requests, bitcoin_requests) = connected_peg(
+        vec![ok(transaction.clone()), ok(transaction)],
+        payout
+            .iter()
+            .cloned()
+            .chain(payout.iter().cloned())
+            .collect(),
+    )
+    .await;
+    let txid = PEG_OUT_TXID.parse().unwrap();
+    peg.release_peg_out(&txid).await.unwrap();
+    peg.clone().release_peg_out(&txid).await.unwrap();
+    assert_eq!(liquid_requests.await.unwrap().len(), 3);
+    assert_eq!(
+        bitcoin_requests
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request["method"] == "sendtoaddress")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn release_rejects_missing_or_wrong_assets_before_payment() {
+    for asset in [Value::Null, json!("33".repeat(32))] {
+        let mut transaction = peg_out_transaction(GOLDEN_PEG_OUT_SCRIPT, "0.00010000");
+        transaction["vout"][1]["asset"] = asset;
+        let (peg, liquid, bitcoin) = connected_peg(vec![ok(transaction)], vec![]).await;
+        let error = peg
+            .release_peg_out(&PEG_OUT_TXID.parse().unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, NigiriError::PegOutputMalformed { ref detail, .. } if detail.contains("asset")),
+            "{error}"
+        );
+        liquid.await.unwrap();
+        assert_eq!(bitcoin.await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn release_rejects_multiple_same_parent_outputs_before_payment() {
+    let mut transaction = peg_out_transaction(GOLDEN_PEG_OUT_SCRIPT, "0.00010000");
+    let duplicate = transaction["vout"][1].clone();
+    transaction["vout"].as_array_mut().unwrap().push(duplicate);
+    let (peg, liquid, bitcoin) = connected_peg(vec![ok(transaction)], vec![]).await;
+    let error = peg
+        .release_peg_out(&PEG_OUT_TXID.parse().unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, NigiriError::PegOutputMalformed { ref detail, .. } if detail.contains("multiple")),
+        "{error}"
+    );
+    liquid.await.unwrap();
+    assert_eq!(bitcoin.await.unwrap().len(), 1);
 }

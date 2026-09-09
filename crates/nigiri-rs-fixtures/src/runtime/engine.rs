@@ -24,10 +24,6 @@ use super::spec::ContainerSpec;
 // Docker's archive response adds 512-byte tar headers, file padding, and end markers. Reserving 64
 // KiB for framing keeps the collector deterministic; the decoder separately rejects unexpected
 // metadata entries rather than letting them supply alternate path or size authority.
-#[allow(
-    dead_code,
-    reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
-)]
 const TAR_ARCHIVE_OVERHEAD_BYTES: usize = 64 * 1024;
 const TAR_BLOCK_BYTES: usize = 512;
 const TAR_END_BLOCKS: usize = 2;
@@ -55,6 +51,7 @@ impl EngineError {
         self.operation
     }
 
+    #[cfg(feature = "lnd")]
     pub(crate) fn is_cancelled(&self) -> bool {
         self.operation == "start fixture"
             && self
@@ -65,6 +62,7 @@ impl EngineError {
 
     /// A bounded file read may be retried only when Docker reports that the path is not present
     /// yet. Archive framing, metadata, path, and size failures are permanent safety violations.
+    #[cfg(feature = "lnd")]
     pub(crate) fn is_transient_file_unavailable(&self) -> bool {
         self.operation == "read container file"
             && self
@@ -116,10 +114,7 @@ pub(crate) trait ContainerEngine: Clone + Send + Sync + 'static {
         container_port: u16,
     ) -> impl Future<Output = EngineResult<u16>> + Send;
     fn logs(&self, id: &str) -> impl Future<Output = EngineResult<String>> + Send;
-    #[allow(
-        dead_code,
-        reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
-    )]
+    #[cfg_attr(not(any(feature = "lnd", test)), allow(dead_code))]
     fn read_container_file(
         &self,
         id: &str,
@@ -139,7 +134,7 @@ pub(crate) struct BollardEngine {
 impl BollardEngine {
     pub(crate) async fn connect() -> EngineResult<Self> {
         let configured_host = std::env::var("DOCKER_HOST").ok();
-        let endpoint_host = endpoint_host(configured_host.as_deref());
+        let endpoint_host = endpoint_host(configured_host.as_deref())?;
         let docker = Docker::connect_with_defaults()
             .map_err(|error| EngineError::new("connect to container engine", error))?;
         docker
@@ -248,13 +243,13 @@ impl ContainerEngine for BollardEngine {
             .stderr(true)
             .tail("all")
             .build();
-        let mut logs = self.docker.logs(id, Some(options));
-        let mut output = String::new();
-        while let Some(item) = logs.next().await {
-            let item = item.map_err(|error| EngineError::new("read container logs", error))?;
-            output.push_str(&String::from_utf8_lossy(&item.into_bytes()));
-        }
-        Ok(output)
+        // Start at the beginning to retain multiline secret opening context. Collection stops
+        // promptly at its byte/chunk bound; the result explicitly describes an initial sample.
+        collect_log_sample(self.docker.logs(id, Some(options)).map(|item| {
+            item.map(|item| item.into_bytes())
+                .map_err(|error| EngineError::new("read container logs", error))
+        }))
+        .await
     }
 
     async fn read_container_file(
@@ -319,10 +314,6 @@ impl ContainerEngine for BollardEngine {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
-)]
 fn append_archive_chunk(
     archive: &mut Vec<u8>,
     chunk: &[u8],
@@ -339,10 +330,6 @@ fn append_archive_chunk(
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
-)]
 fn expected_archive_basename(path: &str) -> io::Result<&str> {
     let Some(relative) = path.strip_prefix('/') else {
         return Err(invalid_archive("container file path is not canonical"));
@@ -361,10 +348,6 @@ fn expected_archive_basename(path: &str) -> io::Result<&str> {
     basename.ok_or_else(|| invalid_archive("container file path is not canonical"))
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
-)]
 fn validate_container_file_stat(
     stat: &PathStatResponse,
     expected_basename: &str,
@@ -388,10 +371,6 @@ fn validate_container_file_stat(
     Ok(size)
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
-)]
 fn decode_single_file_archive(
     archive_bytes: &[u8],
     expected_basename: &str,
@@ -498,18 +477,10 @@ fn validate_strict_tar_framing(archive_bytes: &[u8], file_size: usize) -> io::Re
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
-)]
 fn invalid_archive(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
-)]
 fn read_file_error(message: &'static str) -> EngineError {
     EngineError::new("read container file", invalid_archive(message))
 }
@@ -527,11 +498,73 @@ fn sanitized_read_file_api_error(error: BollardError) -> EngineError {
     read_file_error("container file archive request failed")
 }
 
-fn endpoint_host(configured_host: Option<&str>) -> String {
-    configured_host
-        .and_then(|host| url::Url::parse(host).ok())
-        .and_then(|host| host.host_str().map(str::to_owned))
-        .unwrap_or_else(|| "127.0.0.1".to_owned())
+fn endpoint_host(configured_host: Option<&str>) -> EngineResult<String> {
+    let supported = match configured_host {
+        None => true,
+        Some(host) => url::Url::parse(host).is_ok_and(|url| match url.scheme() {
+            "unix" => url.host_str().is_none(),
+            "npipe" => matches!(url.host_str(), None | Some(".")),
+            "tcp" | "http" | "https" => url.host().is_some_and(|host| match host {
+                url::Host::Domain(host) => {
+                    host == "localhost"
+                        || host
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|address| address.is_loopback())
+                }
+                url::Host::Ipv4(address) => address.is_loopback(),
+                url::Host::Ipv6(address) => address.is_loopback(),
+            }),
+            _ => false,
+        }),
+    };
+    if !supported {
+        return Err(EngineError::new(
+            "connect to container engine",
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsupported Docker endpoint: fixtures require a local socket or loopback daemon because service ports bind to 127.0.0.1",
+            ),
+        ));
+    }
+    Ok("127.0.0.1".to_owned())
+}
+
+/// Bound both retained bytes and stream polling work, including streams of empty chunks.
+/// Keeping the prefix is necessary: an arbitrary tail might start inside a private-key block.
+const MAX_LOG_SAMPLE_BYTES: usize = 64 * 1024;
+const MAX_LOG_SAMPLE_CHUNKS: usize = 1024;
+
+async fn collect_log_sample<B: AsRef<[u8]>>(
+    stream: impl futures_util::Stream<Item = EngineResult<B>>,
+) -> EngineResult<String> {
+    futures_util::pin_mut!(stream);
+    let mut bytes = Vec::new();
+    for _ in 0..MAX_LOG_SAMPLE_CHUNKS {
+        let Some(chunk) = stream.next().await else {
+            return Ok(crate::diagnostics::redacted_tail(&String::from_utf8_lossy(
+                &bytes,
+            )));
+        };
+        let chunk = chunk?;
+        let chunk = chunk.as_ref();
+        let remaining = MAX_LOG_SAMPLE_BYTES - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if bytes.len() == MAX_LOG_SAMPLE_BYTES {
+            break;
+        }
+    }
+    // Discard the incomplete final line so cutting through a credential anchor cannot reveal a
+    // fragment. A multiline block that began earlier is still redacted across all retained lines.
+    bytes.truncate(
+        bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1),
+    );
+    let redacted = crate::diagnostics::redacted_tail(&String::from_utf8_lossy(&bytes));
+    Ok(format!(
+        "{redacted}\n[TRUNCATED: initial log sample only; later logs were not collected]"
+    ))
 }
 
 fn image_descriptor(spec: &ContainerSpec) -> String {
@@ -584,6 +617,7 @@ fn container_body(spec: &ContainerSpec, labels: HashMap<String, String>) -> Cont
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt;
     use std::{collections::HashMap, error::Error, io::Cursor};
 
     use bollard::{container::PathStatResponse, models::PortBinding};
@@ -645,20 +679,59 @@ mod tests {
     }
 
     #[test]
-    fn runtime_endpoint_host_tracks_local_and_remote_engine_addresses() {
-        assert_eq!(super::endpoint_host(None), "127.0.0.1");
-        assert_eq!(
-            super::endpoint_host(Some("unix:///var/run/docker.sock")),
-            "127.0.0.1"
-        );
-        assert_eq!(
-            super::endpoint_host(Some("tcp://engine.example:2375")),
-            "engine.example"
-        );
-        assert_eq!(
-            super::endpoint_host(Some("ssh://operator@engine.example:22")),
-            "engine.example"
-        );
+    fn runtime_endpoint_host_rejects_remote_engines() {
+        assert_eq!(super::endpoint_host(None).unwrap(), "127.0.0.1");
+        for local in [
+            "unix:///var/run/docker.sock",
+            "tcp://127.0.0.1:2375",
+            "http://localhost:2375",
+            "tcp://[::1]:2375",
+        ] {
+            assert_eq!(super::endpoint_host(Some(local)).unwrap(), "127.0.0.1");
+        }
+        for remote in [
+            "tcp://engine.example:2375",
+            "ssh://operator@engine.example:22",
+            "npipe://remote/pipe/docker_engine",
+            "not a URL",
+        ] {
+            let error = super::endpoint_host(Some(remote)).unwrap_err();
+            assert!(error.to_string().contains("loopback"));
+            assert!(!error.to_string().contains("operator"));
+        }
+    }
+
+    #[tokio::test]
+    async fn log_collection_stops_at_byte_or_chunk_budget() {
+        let oversized = vec![b'x'; super::MAX_LOG_SAMPLE_BYTES + 1];
+        let sample = super::collect_log_sample(
+            futures_util::stream::once(async { Ok::<_, super::EngineError>(oversized) })
+                .chain(futures_util::stream::pending()),
+        )
+        .await
+        .unwrap();
+        assert!(sample.len() <= super::MAX_LOG_SAMPLE_BYTES + 200);
+        assert!(sample.contains("initial log sample"));
+        let empty = futures_util::stream::repeat_with(|| Ok::<_, super::EngineError>(Vec::new()));
+        let sample = super::collect_log_sample(empty).await.unwrap();
+        assert!(sample.contains("initial log sample"));
+    }
+
+    #[tokio::test]
+    async fn bounded_log_sample_redacts_multiline_secrets_across_chunks() {
+        let chunks = vec![
+            b"ready\n-----BEGIN PRIVATE KEY-----\n".to_vec(),
+            b"never reveal this\n".to_vec(),
+            vec![b'x'; super::MAX_LOG_SAMPLE_BYTES],
+        ];
+        let sample = super::collect_log_sample(futures_util::stream::iter(
+            chunks.into_iter().map(Ok::<_, super::EngineError>),
+        ))
+        .await
+        .unwrap();
+        assert!(!sample.contains("never reveal"));
+        assert!(!sample.contains("xxxxx"));
+        assert!(sample.contains("REDACTED"));
     }
 
     fn tar_archive(entries: &[(&str, EntryType, &[u8])]) -> Vec<u8> {

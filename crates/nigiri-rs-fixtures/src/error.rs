@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use nigiri_rs_core::NigiriError;
+#[cfg(feature = "lnd")]
 use nigiri_rs_lnd::LndError;
 
 /// Error model for starting and operating a composite Docker-backed fixture.
@@ -46,10 +47,12 @@ pub enum FixtureError {
     },
     #[error(transparent)]
     Client(#[from] NigiriError),
+    #[cfg(feature = "lnd")]
     #[error("Lightning client failed: {0}")]
     Lightning(#[source] LndError),
 }
 
+#[cfg(feature = "lnd")]
 impl From<LndError> for FixtureError {
     fn from(source: LndError) -> Self {
         Self::Lightning(source)
@@ -60,6 +63,7 @@ impl From<LndError> for FixtureError {
 mod tests {
     use std::{error::Error, io, time::Duration};
 
+    #[cfg(feature = "lnd")]
     use nigiri_rs_lnd::LndError;
 
     use crate::FixtureError;
@@ -144,9 +148,11 @@ mod tests {
 
     // Catches a regression that flattens a Lightning failure into diagnostic text and loses the
     // typed LND cause callers need for classification.
+    #[cfg(feature = "lnd")]
     #[test]
     fn lightning_failure_retains_the_typed_lnd_source() {
         let error = FixtureError::Lightning(LndError::Status {
+            code: nigiri_rs_lnd::LndStatusCode::Unknown,
             operation: "initialize wallet".into(),
             detail: "credentials were rejected".into(),
         });

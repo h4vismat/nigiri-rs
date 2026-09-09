@@ -111,7 +111,22 @@ async fn observe_heights<C: FixtureChain>(
     // retried; anything else about it is transient.
     let electrum = match electrum {
         Ok(height) => height,
-        Err(error @ FixtureError::ReadinessTimeout { .. }) => return Err(error),
+        Err(FixtureError::ReadinessTimeout {
+            service,
+            duration,
+            last_observation,
+            diagnostics,
+        }) => {
+            return Err(FixtureError::ReadinessTimeout {
+                service,
+                duration,
+                last_observation: redacted_head(
+                    &format!("{observation}; {last_observation}"),
+                    MAX_SOURCE_BYTES,
+                ),
+                diagnostics,
+            });
+        }
         Err(error) => return Ok(Err(transient_observation("electrum", &error))),
     };
 
@@ -315,7 +330,7 @@ mod tests {
                             let response = if let Some(round) = node_round {
                                 match round.node {
                                     Some(height) => json_response(&format!(
-                                        "{{\"result\":{height},\"error\":null,\"id\":\"1\"}}"
+                                        "{{\"result\":{height},\"error\":null,\"id\":\"nigiri-rs\"}}"
                                     )),
                                     None => status_response(503, "node warming up"),
                                 }
@@ -607,6 +622,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_silent_probe_preserves_the_last_completed_readiness_round() {
+        let stub = SyncStub::start(vec![Round::all(101)])
+            .await
+            .with_silent_electrum()
+            .await;
+        let deadline = Deadline::new(Duration::from_millis(50)).unwrap();
+        let observation = "node=101 esplora=100 electrum=99";
+        let error = super::observe_heights(
+            &stub.client,
+            stub.client.electrum_endpoint(),
+            &deadline,
+            observation,
+        )
+        .await
+        .unwrap_err();
+        let FixtureError::ReadinessTimeout {
+            last_observation, ..
+        } = error
+        else {
+            panic!("expected readiness timeout")
+        };
+        assert!(
+            last_observation.contains(observation),
+            "latest readiness state was lost: {last_observation}"
+        );
+    }
+
     // Catches a regression that retries an Electrum probe whose own expiry already spent the shared
     // budget. Retrying it would report the failure as the fixture's rather than the indexer's, sending
     // a reader to the wrong service.
@@ -667,8 +710,7 @@ mod tests {
             "an expiry must name the fixture or the service it was waiting on, got {service}"
         );
         assert!(
-            last_observation.contains("node=101 esplora=100 electrum=100")
-                || last_observation.contains("Electrum"),
+            last_observation.contains("node=101 esplora=100 electrum=100"),
             "the expiry must carry what was last observed: {last_observation}"
         );
     }

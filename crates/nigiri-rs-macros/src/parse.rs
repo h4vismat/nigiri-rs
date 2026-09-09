@@ -52,6 +52,7 @@ impl FixtureParam {
 pub(crate) struct MacroArgs {
     pub(crate) startup_timeout: Option<u64>,
     pub(crate) flavor: Option<syn::LitStr>,
+    pub(crate) crate_path: Option<syn::Path>,
 }
 
 impl Parse for MacroArgs {
@@ -94,12 +95,25 @@ impl Parse for MacroArgs {
                     };
                     args.flavor = Some(string.clone());
                 }
+                "crate" => {
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(string),
+                        ..
+                    }) = &pair.value
+                    else {
+                        return Err(Error::new(
+                            pair.value.span(),
+                            "`crate` takes a Rust path string, e.g. `crate = \"::regtest\"`",
+                        ));
+                    };
+                    args.crate_path = Some(string.parse()?);
+                }
                 other => {
                     return Err(Error::new(
                         pair.path.span(),
                         format!(
                             "unknown argument `{other}`; \
-                             `#[nigiri_rs::test]` accepts `startup_timeout` and `flavor`. \
+                             `#[nigiri_rs::test]` accepts `startup_timeout`, `flavor`, and `crate`. \
                              The chain is taken from the parameter type, not from an argument."
                         ),
                     ));
@@ -130,6 +144,17 @@ pub(crate) fn parse(
     let mut fixtures = Vec::new();
     for arg in &item.sig.inputs {
         fixtures.push(fixture_param(arg)?);
+    }
+    if !fixtures.is_empty()
+        && let Some(attribute) = item
+            .attrs
+            .iter()
+            .find(|attribute| attribute.path().is_ident("should_panic"))
+    {
+        return Err(Error::new(
+            attribute.span(),
+            "`#[should_panic]` is unsupported on fixture tests: setup failures could pass without running the body; assert the expected failure inside the test instead",
+        ));
     }
     // The signature is left intact here. The expander builds a parameterless wrapper around the
     // original function, which keeps its own parameters as the inner fn — so nothing needs
@@ -419,6 +444,47 @@ mod tests {
         assert_eq!(
             ACCEPTED_PARAMETERS,
             "`NigiriClient<Bitcoin>`, `NigiriClient<Liquid>`, `PegPair`, or `LndPair`"
+        );
+    }
+    #[test]
+    fn fixture_setup_cannot_satisfy_should_panic() {
+        let result = parse(
+            quote::quote! {},
+            quote::quote! {
+                #[should_panic]
+                async fn body(pair: PegPair) {}
+            },
+        );
+        assert!(
+            result.is_err(),
+            "setup errors must never satisfy a panic expectation"
+        );
+    }
+
+    #[test]
+    fn no_fixture_test_keeps_should_panic() {
+        assert!(
+            parse(
+                quote::quote! {},
+                quote::quote! {
+                    #[should_panic(expected = "body")]
+                    async fn body() { panic!("body"); }
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn explicit_facade_path_supports_a_renamed_dependency() {
+        assert!(
+            parse(
+                quote::quote! { crate = "::regtest" },
+                quote::quote! {
+                    async fn body() {}
+                }
+            )
+            .is_ok()
         );
     }
 }

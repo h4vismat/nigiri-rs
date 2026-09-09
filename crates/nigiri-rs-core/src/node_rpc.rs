@@ -12,8 +12,9 @@ struct Request<'a, P> {
 
 #[derive(Deserialize)]
 struct Response {
-    result: Option<serde_json::Value>,
-    error: Option<RpcErrorPayload>,
+    result: serde_json::Value,
+    error: serde_json::Value,
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -75,96 +76,52 @@ where
         method,
         params,
     };
-    let response = client
-        .http
-        .post(client.config.node_rpc_url.clone())
-        .basic_auth(
-            &client.config.node_rpc_user,
-            Some(&client.config.node_rpc_password),
-        )
-        .json(&request)
-        .send()
-        .await
-        .map_err(|source| transport_error(client, method, source))?;
-    let status = response.status();
-    let body = read_bounded(client, method, response).await?;
-
-    let response = match serde_json::from_slice::<Response>(&body) {
-        Ok(response) => response,
-        Err(_) if !status.is_success() => {
-            return Err(NigiriError::HttpStatus {
-                operation: method.to_owned().into(),
-                status,
-                body: crate::http::redact_sensitive(
-                    String::from_utf8_lossy(&body).into_owned(),
-                    sensitive,
-                ),
-            });
-        }
-        Err(_) => {
+    let response = crate::http::send(
+        client,
+        method,
+        client
+            .http
+            .post(client.config.node_rpc_url.clone())
+            .basic_auth(
+                &client.config.node_rpc_user,
+                Some(&client.config.node_rpc_password),
+            )
+            .json(&request),
+    )
+    .await?;
+    let status = response.status;
+    let http_error = (!status.is_success()).then(|| response.status_error(method, sensitive));
+    let body = response.into_body(method)?;
+    let envelope = serde_json::from_slice::<Response>(&body)
+        .ok()
+        .filter(|response| response.id == "nigiri-rs");
+    let Some(envelope) = envelope else {
+        return Err(http_error.unwrap_or_else(|| {
+            invalid_response(method, "expected a matching JSON-RPC response envelope")
+        }));
+    };
+    let result = envelope.result;
+    let error = envelope.error;
+    if !error.is_null() {
+        if !result.is_null() {
             return Err(invalid_response(
                 method,
-                "expected a JSON-RPC response envelope",
+                "response contains both a result and an error",
             ));
         }
-    };
-
-    if let Some(error) = response.error {
+        let error: RpcErrorPayload = serde_json::from_value(error)
+            .map_err(|_| invalid_response(method, "invalid JSON-RPC error payload"))?;
         return Err(NigiriError::RpcFailed {
             method: method.to_owned().into(),
             code: error.code,
             message: crate::http::redact_sensitive(error.message, sensitive),
         });
     }
-
-    serde_json::from_value(response.result.unwrap_or(serde_json::Value::Null))
+    if let Some(error) = http_error {
+        return Err(error);
+    }
+    serde_json::from_value(result)
         .map_err(|_| invalid_response(method, "result did not match the requested type"))
-}
-
-async fn read_bounded<N: NigiriNetwork>(
-    client: &NigiriClient<N>,
-    method: &str,
-    mut response: reqwest::Response,
-) -> Result<Vec<u8>, NigiriError> {
-    let mut body = Vec::new();
-    let mut exceeded = false;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|source| transport_error(client, method, source))?
-    {
-        let remaining = client.config.max_response_bytes.saturating_sub(body.len());
-        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-        if chunk.len() > remaining {
-            exceeded = true;
-        }
-    }
-
-    if exceeded {
-        return Err(invalid_response(
-            method,
-            "response body exceeded the configured safety limit",
-        ));
-    }
-    Ok(body)
-}
-
-fn transport_error<N: NigiriNetwork>(
-    client: &NigiriClient<N>,
-    method: &str,
-    source: reqwest::Error,
-) -> NigiriError {
-    if source.is_timeout() {
-        NigiriError::Timeout {
-            operation: method.to_owned().into(),
-            duration: client.config.timeout,
-        }
-    } else {
-        NigiriError::HttpTransport {
-            operation: method.to_owned().into(),
-            source: source.without_url(),
-        }
-    }
 }
 
 fn invalid_response(method: &str, detail: &'static str) -> NigiriError {
@@ -245,6 +202,43 @@ mod tests {
             ..Default::default()
         })
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn malformed_envelopes_never_succeed() {
+        for body in [
+            r#"{"result":null,"result":1,"error":null,"id":"nigiri-rs"}"#,
+            r#"{"result":null,"id":"nigiri-rs"}"#,
+            r#"{"result":null,"error":{"code":"-8","message":"bad"},"id":"nigiri-rs"}"#,
+            r#"{}"#,
+            r#"{"error":null,"id":"nigiri-rs"}"#,
+            r#"{"result":null,"error":null}"#,
+            r#"{"result":null,"error":null,"id":"other"}"#,
+            r#"{"result":null,"error":null,"id":1}"#,
+            r#"{"result":1,"error":{"code":-8,"message":"bad"},"id":"nigiri-rs"}"#,
+        ] {
+            let (url, _) = one_shot_server("200 OK", body.to_owned()).await;
+            let error = super::call::<_, _, serde_json::Value>(&client(url, 1024), "test", ())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, NigiriError::InvalidResponse { .. }),
+                "{body}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn success_envelope_on_http_failure_is_not_success() {
+        let (url, _) = one_shot_server(
+            "503 Service Unavailable",
+            r#"{"result":null,"error":null,"id":"nigiri-rs"}"#.to_owned(),
+        )
+        .await;
+        assert!(matches!(
+            super::call::<_, _, ()>(&client(url, 1024), "test", ()).await,
+            Err(NigiriError::HttpStatus { .. })
+        ));
     }
 
     #[tokio::test]

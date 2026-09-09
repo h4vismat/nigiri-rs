@@ -1,11 +1,11 @@
 [package]
 name = "nigiri-rs-macros"
 version = "0.2.0"
-edition = "2024"
-rust-version = "1.88"
-license = "MIT"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "Fixture test attribute for nigiri-rs"
-repository = "https://github.com/h4vismat/nigiri-rs"
+repository.workspace = true
 
 [lib]
 proc-macro = true

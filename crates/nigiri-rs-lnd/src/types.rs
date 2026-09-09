@@ -18,7 +18,30 @@ pub struct NodeInfo {
 }
 
 impl NodeInfo {
-    #[allow(dead_code)]
+    /// Constructs node information with a nonempty network identity.
+    pub fn try_new(
+        public_key: PublicKey,
+        alias: String,
+        version: String,
+        block_height: u32,
+        network: String,
+        synced_to_chain: bool,
+        synced_to_graph: bool,
+    ) -> Result<Self, LndError> {
+        if network.is_empty() {
+            return Err(invalid("network must not be empty"));
+        }
+        Ok(Self::new(
+            public_key,
+            alias,
+            version,
+            block_height,
+            network,
+            synced_to_chain,
+            synced_to_graph,
+        ))
+    }
+
     #[must_use]
     pub(crate) fn new(
         public_key: PublicKey,
@@ -79,7 +102,16 @@ pub struct WalletBalance {
 }
 
 impl WalletBalance {
-    #[allow(dead_code)]
+    /// Validates that the total equals confirmed plus unconfirmed funds.
+    pub fn try_new(total: Sats, confirmed: Sats, unconfirmed: Sats) -> Result<Self, LndError> {
+        if confirmed.as_u64().checked_add(unconfirmed.as_u64()) != Some(total.as_u64()) {
+            return Err(invalid(
+                "wallet total must equal confirmed plus unconfirmed balance",
+            ));
+        }
+        Ok(Self::new(total, confirmed, unconfirmed))
+    }
+
     #[must_use]
     pub(crate) const fn new(total: Sats, confirmed: Sats, unconfirmed: Sats) -> Self {
         Self {
@@ -151,7 +183,17 @@ pub struct Peer {
 }
 
 impl Peer {
-    #[allow(dead_code)]
+    /// Constructs a peer with a validated host and port endpoint.
+    pub fn try_new(
+        public_key: PublicKey,
+        address: impl AsRef<str>,
+        connected: bool,
+    ) -> Result<Self, LndError> {
+        let address = crate::endpoint::parse_peer_endpoint(address.as_ref())
+            .map_err(|()| invalid("peer address is malformed"))?;
+        Ok(Self::new(public_key, address, connected))
+    }
+
     #[must_use]
     pub(crate) fn new(public_key: PublicKey, address: String, connected: bool) -> Self {
         Self {
@@ -227,7 +269,29 @@ pub struct Channel {
 }
 
 impl Channel {
-    #[allow(dead_code)]
+    /// Validates that channel balances fit within its capacity.
+    pub fn try_new(
+        channel_point: OutPoint,
+        remote_public_key: PublicKey,
+        active: bool,
+        capacity: Sats,
+        local_balance: Millisats,
+        remote_balance: Millisats,
+    ) -> Result<Self, LndError> {
+        let accounted = u128::from(local_balance.as_u64()) + u128::from(remote_balance.as_u64());
+        if accounted > u128::from(capacity.as_u64()) * 1000 {
+            return Err(invalid("channel balances must not exceed capacity"));
+        }
+        Ok(Self::new(
+            channel_point,
+            remote_public_key,
+            active,
+            capacity,
+            local_balance,
+            remote_balance,
+        ))
+    }
+
     #[must_use]
     pub(crate) const fn new(
         channel_point: OutPoint,
@@ -343,7 +407,20 @@ impl std::fmt::Debug for InvoiceRecord {
 }
 
 impl InvoiceRecord {
-    #[allow(dead_code)]
+    /// Builds a record from a parsed invoice, deriving its hash and validating its amount.
+    pub fn from_invoice(invoice: Bolt11Invoice, state: InvoiceState) -> Result<Self, LndError> {
+        let amount = invoice
+            .amount_milli_satoshis()
+            .ok_or_else(|| invalid("invoice must have an amount"))?;
+        let payment_hash = *invoice.payment_hash();
+        Ok(Self::new(
+            invoice,
+            payment_hash,
+            Millisats::new(amount),
+            state,
+        ))
+    }
+
     #[must_use]
     pub(crate) fn new(
         invoice: Bolt11Invoice,
@@ -420,7 +497,24 @@ pub struct PaymentRecord {
 }
 
 impl PaymentRecord {
-    #[allow(dead_code)]
+    /// Validates the payment proof before constructing a portable payment record.
+    pub fn try_new(
+        payment_hash: sha256::Hash,
+        preimage: Option<[u8; 32]>,
+        value: Millisats,
+        fee: Millisats,
+        state: PaymentState,
+    ) -> Result<Self, LndError> {
+        use bitcoin::hashes::Hash;
+        if state == PaymentState::Succeeded && preimage.is_none() {
+            return Err(invalid("succeeded payment must have a preimage"));
+        }
+        if preimage.is_some_and(|proof| sha256::Hash::hash(&proof) != payment_hash) {
+            return Err(invalid("payment preimage must prove the payment hash"));
+        }
+        Ok(Self::new(payment_hash, preimage, value, fee, state))
+    }
+
     #[must_use]
     pub(crate) const fn new(
         payment_hash: sha256::Hash,

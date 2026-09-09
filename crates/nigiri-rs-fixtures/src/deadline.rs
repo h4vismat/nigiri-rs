@@ -20,6 +20,7 @@ impl Deadline {
         })
     }
 
+    #[cfg(feature = "lnd")]
     pub(crate) fn validate_duration(duration: Duration) -> Result<(), FixtureError> {
         Self::absolute_instant(duration).map(drop)
     }

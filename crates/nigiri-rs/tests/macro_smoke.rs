@@ -14,11 +14,12 @@
 use std::time::Duration;
 
 use bitcoin::Amount;
-use nigiri_rs::fixtures::{LndPair, PegPair};
-use nigiri_rs::{
-    Bitcoin, CreateInvoiceRequest, InvoiceState, Liquid, Millisats, NigiriClient, PaymentOptions,
-    PaymentState,
-};
+#[cfg(feature = "lightning-fixtures")]
+use nigiri_rs::fixtures::LndPair;
+use nigiri_rs::fixtures::PegPair;
+use nigiri_rs::{Bitcoin, Liquid, NigiriClient};
+#[cfg(feature = "lightning-fixtures")]
+use nigiri_rs::{CreateInvoiceRequest, InvoiceState, Millisats, PaymentOptions, PaymentState};
 use serde::Deserialize;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;

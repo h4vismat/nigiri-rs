@@ -13,12 +13,65 @@ pub const MAX_MACAROON_BYTES: usize = 65_536;
 /// Immutable configuration for an authenticated LND gRPC connection.
 #[derive(Clone)]
 pub struct LndConfig {
-    endpoint: Url,
-    #[allow(dead_code)]
-    certificate: Arc<[u8]>,
-    #[allow(dead_code)]
+    tls: TlsConfig,
     macaroon: Arc<[u8]>,
+}
+
+/// Validated endpoint and certificate, independent of wallet authentication.
+#[derive(Clone)]
+pub(crate) struct TlsConfig {
+    endpoint: Url,
+    certificate: Arc<[u8]>,
     timeout: Duration,
+}
+
+impl TlsConfig {
+    pub(crate) fn new(
+        endpoint: &str,
+        certificate: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Self, LndError> {
+        let endpoint = validate_endpoint(endpoint)?;
+        validate_credential(
+            "TLS certificate",
+            certificate.len(),
+            MAX_TLS_CERTIFICATE_BYTES,
+        )?;
+        if timeout.is_zero() {
+            return Err(invalid("timeout must be greater than zero"));
+        }
+        Ok(Self {
+            endpoint,
+            certificate: certificate.into(),
+            timeout,
+        })
+    }
+    pub(crate) fn from_url(
+        endpoint: &Url,
+        certificate: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Self, LndError> {
+        // Url erases an explicitly supplied HTTPS default port. Restore it solely for the
+        // shared authority validator, preserving every other URL component for validation.
+        let mut endpoint_text = endpoint.as_str().to_owned();
+        if endpoint.scheme() == "https" && endpoint.port().is_none() {
+            let end = endpoint_text.find("://").map(|i| i + 3).unwrap_or(0);
+            let authority_end = endpoint_text[end..]
+                .find(['/', '?', '#'])
+                .map_or(endpoint_text.len(), |i| end + i);
+            endpoint_text.insert_str(authority_end, ":443");
+        }
+        Self::new(&endpoint_text, certificate, timeout)
+    }
+    pub(crate) fn endpoint(&self) -> &Url {
+        &self.endpoint
+    }
+    pub(crate) fn certificate(&self) -> &[u8] {
+        &self.certificate
+    }
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
 }
 
 impl LndConfig {
@@ -29,23 +82,21 @@ impl LndConfig {
         macaroon: Vec<u8>,
         timeout: Duration,
     ) -> Result<Self, LndError> {
-        let endpoint = validate_endpoint(endpoint.as_ref())?;
-        validate_credential(
-            "TLS certificate",
-            certificate.len(),
-            MAX_TLS_CERTIFICATE_BYTES,
-        )?;
-        validate_credential("macaroon", macaroon.len(), MAX_MACAROON_BYTES)?;
-        if timeout.is_zero() {
-            return Err(invalid("timeout must be greater than zero"));
-        }
+        Self::authenticated(
+            TlsConfig::new(endpoint.as_ref(), certificate, timeout)?,
+            macaroon,
+        )
+    }
 
+    pub(crate) fn authenticated(tls: TlsConfig, macaroon: Vec<u8>) -> Result<Self, LndError> {
+        validate_credential("macaroon", macaroon.len(), MAX_MACAROON_BYTES)?;
         Ok(Self {
-            endpoint,
-            certificate: certificate.into(),
+            tls,
             macaroon: macaroon.into(),
-            timeout,
         })
+    }
+    pub(crate) fn tls(&self) -> &TlsConfig {
+        &self.tls
     }
 
     /// Reads bounded credential files before applying the same validation as [`Self::new`].
@@ -64,20 +115,19 @@ impl LndConfig {
 
     #[must_use]
     pub fn endpoint(&self) -> &Url {
-        &self.endpoint
+        self.tls.endpoint()
     }
 
     #[must_use]
     pub fn timeout(&self) -> Duration {
-        self.timeout
+        self.tls.timeout()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn certificate(&self) -> &[u8] {
-        &self.certificate
+        self.tls.certificate()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn macaroon(&self) -> &[u8] {
         &self.macaroon
     }
@@ -87,8 +137,8 @@ impl fmt::Debug for LndConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LndConfig")
-            .field("endpoint", &self.endpoint)
-            .field("timeout", &self.timeout)
+            .field("endpoint", &self.endpoint())
+            .field("timeout", &self.timeout())
             .finish_non_exhaustive()
     }
 }

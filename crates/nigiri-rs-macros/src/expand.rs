@@ -21,13 +21,19 @@ pub(crate) fn expand(parsed: TestFn) -> TokenStream {
     inner.sig.ident = inner_name.clone();
     inner.vis = syn::Visibility::Inherited;
 
-    let stacks = start_stacks(&fixtures, &args);
+    let crate_path = args
+        .crate_path
+        .clone()
+        .unwrap_or_else(|| syn::parse_quote!(::nigiri_rs));
+    let tokio_path = quote!(#crate_path::__private::tokio);
+    let tokio_crate = syn::LitStr::new(&tokio_path.to_string(), proc_macro2::Span::call_site());
+    let stacks = start_stacks(&fixtures, &args, &crate_path);
 
     let call_args = fixtures.iter().map(|fixture| fixture.ident());
 
     let runtime_attr = match &args.flavor {
-        Some(flavor) => quote! { #[::nigiri_rs::__private::tokio::test(flavor = #flavor)] },
-        None => quote! { #[::nigiri_rs::__private::tokio::test] },
+        Some(flavor) => quote! { #[#tokio_path::test(flavor = #flavor, crate = #tokio_crate)] },
+        None => quote! { #[#tokio_path::test(crate = #tokio_crate)] },
     };
 
     quote! {
@@ -53,14 +59,18 @@ pub(crate) fn expand(parsed: TestFn) -> TokenStream {
 ///
 /// One fixture is emitted sequentially — joining a single future buys nothing — and zero
 /// fixtures emit nothing at all.
-fn start_stacks(fixtures: &[FixtureParam], args: &MacroArgs) -> TokenStream {
+fn start_stacks(
+    fixtures: &[FixtureParam],
+    args: &MacroArgs,
+    crate_path: &syn::Path,
+) -> TokenStream {
     if fixtures.len() < 2 {
         return fixtures
             .iter()
             .enumerate()
             .map(|(index, fixture)| {
                 let handle = handle_ident(index);
-                let start = start_expr(fixture, args);
+                let start = start_expr(fixture, args, crate_path);
                 let bind = bind_fixture(fixture, index);
                 let failed = start_failure_message(fixture);
                 quote! {
@@ -71,7 +81,9 @@ fn start_stacks(fixtures: &[FixtureParam], args: &MacroArgs) -> TokenStream {
             .collect();
     }
 
-    let futures = fixtures.iter().map(|fixture| start_expr(fixture, args));
+    let futures = fixtures
+        .iter()
+        .map(|fixture| start_expr(fixture, args, crate_path));
     let slots = (0..fixtures.len()).map(started_ident);
     let unwrap = fixtures.iter().enumerate().map(|(index, fixture)| {
         let slot = started_ident(index);
@@ -89,7 +101,7 @@ fn start_stacks(fixtures: &[FixtureParam], args: &MacroArgs) -> TokenStream {
         // than running end to end. If one fails the others still finish; the `expect` below
         // panics on the first failure and the remaining handles drop as the panic unwinds,
         // which runs the same teardown a successful test would.
-        let ( #(#slots),* ) = ::nigiri_rs::__private::tokio::join!( #(#futures),* );
+        let ( #(#slots),* ) = #crate_path::__private::tokio::join!( #(#futures),* );
         #(#unwrap)*
     }
 }
@@ -118,36 +130,36 @@ fn bind_fixture(fixture: &FixtureParam, index: usize) -> TokenStream {
     }
 }
 
-fn start_expr(fixture: &FixtureParam, args: &MacroArgs) -> TokenStream {
+fn start_expr(fixture: &FixtureParam, args: &MacroArgs, crate_path: &syn::Path) -> TokenStream {
     match fixture {
         FixtureParam::Client { chain, .. } => match args.startup_timeout {
             Some(secs) => quote! {
-                ::nigiri_rs::__private::fixtures::Fixture::<#chain>::builder()
+                #crate_path::__private::fixtures::Fixture::<#chain>::builder()
                     .startup_timeout(::core::time::Duration::from_secs(#secs))
                     .start()
             },
             None => quote! {
-                ::nigiri_rs::__private::fixtures::Fixture::<#chain>::start()
+                #crate_path::__private::fixtures::Fixture::<#chain>::start()
             },
         },
         FixtureParam::PegPair { .. } => match args.startup_timeout {
             Some(secs) => quote! {
-                ::nigiri_rs::__private::fixtures::PegPair::builder()
+                #crate_path::__private::fixtures::PegPair::builder()
                     .startup_timeout(::core::time::Duration::from_secs(#secs))
                     .start()
             },
             None => quote! {
-                ::nigiri_rs::__private::fixtures::PegPair::start()
+                #crate_path::__private::fixtures::PegPair::start()
             },
         },
         FixtureParam::LndPair { .. } => match args.startup_timeout {
             Some(secs) => quote! {
-                ::nigiri_rs::__private::fixtures::LndPair::builder()
+                #crate_path::__private::fixtures::LndPair::builder()
                     .startup_timeout(::core::time::Duration::from_secs(#secs))
                     .start()
             },
             None => quote! {
-                ::nigiri_rs::__private::fixtures::LndPair::start()
+                #crate_path::__private::fixtures::LndPair::start()
             },
         },
     }

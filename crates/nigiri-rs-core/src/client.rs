@@ -75,19 +75,15 @@ impl<N: NigiriNetwork> NigiriClient<N> {
 
     /// Waits until the configured Esplora endpoint responds successfully.
     pub async fn wait_ready(&self) -> Result<(), NigiriError> {
-        let started = tokio::time::Instant::now();
-        loop {
-            if self.block_height().await.is_ok() {
-                return Ok(());
+        within_deadline("wait for readiness", self.config.timeout, async {
+            loop {
+                if self.block_height().await.is_ok() {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            if started.elapsed() >= self.config.timeout {
-                return Err(NigiriError::Timeout {
-                    operation: "wait for readiness".into(),
-                    duration: self.config.timeout,
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        })
+        .await
     }
 
     /// Returns the current Esplora block height.
@@ -230,20 +226,35 @@ impl<N: NigiriNetwork> NigiriClient<N> {
         txid: &N::Txid,
         timeout: Duration,
     ) -> Result<(), NigiriError> {
-        let started = tokio::time::Instant::now();
-        loop {
-            if self.get_tx_status(txid).await?.confirmed {
-                return Ok(());
+        within_deadline("wait for confirmation", timeout, async {
+            loop {
+                match self.get_tx_status(txid).await {
+                    Ok(status) if status.confirmed => return Ok(()),
+                    Ok(_) => {}
+                    Err(NigiriError::HttpStatus { status, .. })
+                        if status == reqwest::StatusCode::NOT_FOUND => {}
+                    Err(error) => return Err(error),
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            if started.elapsed() >= timeout {
-                return Err(NigiriError::Timeout {
-                    operation: "wait for confirmation".into(),
-                    duration: timeout,
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        })
+        .await
     }
+}
+
+async fn within_deadline<T>(
+    operation: &'static str,
+    duration: Duration,
+    future: impl std::future::Future<Output = Result<T, NigiriError>>,
+) -> Result<T, NigiriError> {
+    tokio::time::timeout(duration, future)
+        .await
+        .unwrap_or_else(|_| {
+            Err(NigiriError::Timeout {
+                operation: operation.into(),
+                duration,
+            })
+        })
 }
 
 fn invalid(operation: &'static str, expected: &'static str) -> NigiriError {
