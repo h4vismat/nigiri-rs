@@ -29,7 +29,7 @@ Open `Cargo.toml` and add:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["fixtures"] }
+nigiri-rs = { version = "0.6", features = ["fixtures"] }
 bitcoin = "0.32"
 serde_json = "1"
 ```

@@ -14,7 +14,7 @@ Use this when you need the fixture handle itself. If you only need a ready clien
 
   ```toml
   [dev-dependencies]
-  nigiri-rs = { version = "0.5", features = ["fixtures"] }
+  nigiri-rs = { version = "0.6", features = ["fixtures"] }
   tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
   ```
 

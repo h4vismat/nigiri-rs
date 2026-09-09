@@ -24,7 +24,7 @@ serde = "1.0.228"
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 url = "2.5.8"
-nigiri-rs-core = { version = "0.4.0", path = "crates/nigiri-rs-core" }
-nigiri-rs-lnd = { version = "0.1.0", path = "crates/nigiri-rs-lnd" }
-nigiri-rs-fixtures = { version = "0.2.0", path = "crates/nigiri-rs-fixtures" }
-nigiri-rs-macros = { version = "0.2.0", path = "crates/nigiri-rs-macros" }
+nigiri-rs-core = { version = "0.4.1", path = "crates/nigiri-rs-core" }
+nigiri-rs-lnd = { version = "0.2.0", path = "crates/nigiri-rs-lnd" }
+nigiri-rs-fixtures = { version = "0.3.0", path = "crates/nigiri-rs-fixtures" }
+nigiri-rs-macros = { version = "0.3.0", path = "crates/nigiri-rs-macros" }

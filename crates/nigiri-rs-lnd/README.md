@@ -12,7 +12,7 @@ two-node Lightning topology. Through the `nigiri-rs` facade, enable `lightning-f
 
 ```toml
 [dependencies]
-nigiri-rs-lnd = "0.1"
+nigiri-rs-lnd = "0.2"
 ```
 
 TLS uses an exact pin of the supplied end-entity certificate and still verifies

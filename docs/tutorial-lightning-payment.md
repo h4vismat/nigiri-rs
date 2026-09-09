@@ -8,7 +8,7 @@ first run pulls three pinned images.
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["lightning-fixtures"] }
+nigiri-rs = { version = "0.6", features = ["lightning-fixtures"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

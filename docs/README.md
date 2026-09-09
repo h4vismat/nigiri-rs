@@ -62,11 +62,11 @@ Why the design is shaped this way.
 
 | Crate | Version | What it is |
 | --- | --- | --- |
-| `nigiri-rs` | 0.5.0 | The facade. Re-exports core, optional LND, and optional fixtures/macro. |
-| `nigiri-rs-core` | 0.4.0 | Typed Bitcoin and Liquid clients only. No Docker or Lightning ownership. |
-| [`nigiri-rs-lnd`](../crates/nigiri-rs-lnd/README.md) | 0.1.0 | Host-managed LND client and protocol-level Lightning types. No Docker. |
-| `nigiri-rs-fixtures` | 0.2.0 | Ephemeral Bitcoin, Liquid, peg, and Lightning fixtures. |
-| `nigiri-rs-macros` | 0.2.0 | `#[nigiri_rs::test]`. |
+| `nigiri-rs` | 0.6.0 | The facade. Re-exports core, optional LND, and optional fixtures/macro. |
+| `nigiri-rs-core` | 0.4.1 | Typed Bitcoin and Liquid clients only. No Docker or Lightning ownership. |
+| [`nigiri-rs-lnd`](../crates/nigiri-rs-lnd/README.md) | 0.2.0 | Host-managed LND client and protocol-level Lightning types. No Docker. |
+| `nigiri-rs-fixtures` | 0.3.0 | Ephemeral Bitcoin, Liquid, peg, and Lightning fixtures. |
+| `nigiri-rs-macros` | 0.3.0 | `#[nigiri_rs::test]`. |
 
 Rust edition 2024, MSRV 1.88.
 
@@ -77,25 +77,22 @@ dependency:
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["fixtures"] }
+nigiri-rs = { version = "0.6", features = ["fixtures"] }
 ```
 
 `dev-dependencies` is usually the right section: fixtures are a testing tool, and it keeps the Docker
 client libraries out of your release build. Use `[dependencies]` only if you talk to a regtest
 environment from the application itself, and then you probably want the feature off.
 
-Note the version line: **`nigiri-rs` is 0.5.0, `nigiri-rs-core` is 0.4.0.** Separate crates, separate
-version numbers — do not read the facade's number as the core crate's, which you do not name above.
-The facade went 0.2.0 → 0.4.0 → 0.5.0 and never had a 0.3.0; that number belongs to the core crate.
-Only 0.2.0 of the facade was ever published to crates.io; 0.4.0 and 0.5.0 are not yet installable
-from there.
+The facade and companion crates have independent versions. Use the facade version in the
+installation snippet above; direct dependencies should use the matching version in the table.
 
 Every snippet in these pages assumes that dependency.
 
 Working against unreleased changes instead? Point at git and pin a commit for reproducibility:
 
 ```toml
-nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", rev = "0900676", features = ["fixtures"] }
+nigiri-rs = { git = "https://github.com/h4vismat/nigiri-rs", rev = "785f22a", features = ["fixtures"] }
 ```
 
 ## Feature flags
@@ -105,8 +102,10 @@ All live on the `nigiri-rs` facade and are off by default.
 | Feature | Pulls in | Enables |
 | --- | --- | --- |
 | `lnd` | `nigiri-rs-lnd` | `LndClient`, `LightningNode`, and all project-owned Lightning types |
-| `fixtures` | `lnd`, `nigiri-rs-fixtures`, `nigiri-rs-macros`, `tokio` | `nigiri_rs::fixtures`, `#[nigiri_rs::test]`, including `LndPair` |
+| `fixtures` | `nigiri-rs-fixtures`, `nigiri-rs-macros`, `tokio` | Bitcoin, Liquid, and peg fixtures; `#[nigiri_rs::test]` |
+| `lightning-fixtures` | `fixtures`, `lnd`, `nigiri-rs-fixtures/lnd` | `LndPair` and Lightning protocol types |
+| `docker-tests` | `fixtures`, `nigiri-rs-fixtures/docker-tests` | Live Docker tests in this repository |
 | `bitcoin-rpc-types` | `corepc-types` 0.15 | `nigiri_rs::bitcoin_rpc_types`, maintained Bitcoin Core response records — pick the module matching your node (`v31` for a fixture, `v30` for Nigiri) |
 
-`fixtures` implies `lnd` because `LndPair` returns `LndClient` values. Standalone host-managed LND
-use needs only `lnd`, so it does not pull Docker lifecycle dependencies.
+`lightning-fixtures` includes the `lnd` feature because `LndPair` returns `LndClient` values.
+Standalone host-managed LND use needs only `lnd`; Bitcoin/Liquid fixtures need only `fixtures`.

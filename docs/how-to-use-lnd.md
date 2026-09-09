@@ -7,7 +7,7 @@ types.
 
 ```toml
 [dependencies]
-nigiri-rs = { version = "0.5", features = ["lnd"] }
+nigiri-rs = { version = "0.6", features = ["lnd"] }
 ```
 
 The `lnd` feature does not enable `fixtures`, Bollard, or lifecycle management. It exposes the

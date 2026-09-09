@@ -52,7 +52,8 @@ nigiri-rs                    facade
 Neither protocol crate depends on `nigiri-rs-fixtures`; the two protocol crates do not depend on one
 another either. No Docker dependency reaches a consumer who only wants a client. The facade exposes
 the host-managed Lightning surface behind `lnd` and lifecycle management behind `fixtures`, both off
-by default. `fixtures` implies `lnd` because `LndPair` returns authenticated `LndClient` values.
+by default. `lightning-fixtures` enables both and exposes `LndPair`, whose nodes return
+authenticated `LndClient` values. Bitcoin/Liquid fixtures do not require `lnd`.
 
 So there are two paths, and they compose:
 

@@ -11,7 +11,7 @@ supply; it changes what the numbers mean.
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["fixtures"] }
+nigiri-rs = { version = "0.6", features = ["fixtures"] }
 bitcoin = "0.32"     # for Amount
 elements = "0.25"    # for Txid
 serde_json = "1"     # for the raw-RPC assertions below
