@@ -19,7 +19,7 @@
 //! plain `fixtures` does not pull in LND or its protobuf compiler.
 //!
 //! ```toml
-//! nigiri-rs = { version = "0.5", features = ["fixtures"] }
+//! nigiri-rs = { version = "0.6", features = ["fixtures"] }
 //! ```
 //!
 //! # Testing a wallet against a throwaway chain

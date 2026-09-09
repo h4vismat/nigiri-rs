@@ -23,14 +23,14 @@ Nothing here starts, stops, or deletes anything. See
 
   ```toml
   [dependencies]
-  nigiri-rs = "0.5"
+  nigiri-rs = "0.6"
   url = "2"
   ```
 
   Host-managed LND use enables only `lnd`:
 
   ```toml
-  nigiri-rs = { version = "0.5", features = ["lnd"] }
+  nigiri-rs = { version = "0.6", features = ["lnd"] }
   ```
 
 ## Use the defaults
