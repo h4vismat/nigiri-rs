@@ -1,22 +1,22 @@
-use std::{
-    collections::HashMap,
-    error::Error,
-    fmt,
-    future::Future,
-    io::{self, Cursor, Read},
-};
+use std::{collections::HashMap, error::Error, fmt, future::Future, io};
 
 use bollard::{
     Docker,
-    container::PathStatResponse,
     errors::Error as BollardError,
     models::{ContainerCreateBody, HostConfig, NetworkCreateRequest, PortBinding},
     query_parameters::{
-        ContainerArchiveInfoOptionsBuilder, CreateContainerOptionsBuilder,
-        CreateImageOptionsBuilder, DownloadFromContainerOptionsBuilder, LogsOptionsBuilder,
+        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, LogsOptionsBuilder,
         RemoveContainerOptionsBuilder,
     },
 };
+#[cfg(any(feature = "lnd", test))]
+use bollard::{
+    container::PathStatResponse,
+    query_parameters::{ContainerArchiveInfoOptionsBuilder, DownloadFromContainerOptionsBuilder},
+};
+#[cfg(any(feature = "lnd", test))]
+use std::io::{Cursor, Read};
+
 use futures_util::StreamExt;
 
 use super::spec::ContainerSpec;
@@ -24,11 +24,15 @@ use super::spec::ContainerSpec;
 // Docker's archive response adds 512-byte tar headers, file padding, and end markers. Reserving 64
 // KiB for framing keeps the collector deterministic; the decoder separately rejects unexpected
 // metadata entries rather than letting them supply alternate path or size authority.
+#[cfg(any(feature = "lnd", test))]
 const TAR_ARCHIVE_OVERHEAD_BYTES: usize = 64 * 1024;
+#[cfg(any(feature = "lnd", test))]
 const TAR_BLOCK_BYTES: usize = 512;
+#[cfg(any(feature = "lnd", test))]
 const TAR_END_BLOCKS: usize = 2;
 // Docker serializes Go's os.FileMode. A regular file has none of these ModeType bits set; special
 // permission bits such as setuid are intentionally not part of this mask.
+#[cfg(any(feature = "lnd", test))]
 const DOCKER_FILE_MODE_TYPE_MASK: u32 = 0x8f28_0000;
 
 pub(crate) type EngineResult<T> = Result<T, EngineError>;
@@ -114,7 +118,7 @@ pub(crate) trait ContainerEngine: Clone + Send + Sync + 'static {
         container_port: u16,
     ) -> impl Future<Output = EngineResult<u16>> + Send;
     fn logs(&self, id: &str) -> impl Future<Output = EngineResult<String>> + Send;
-    #[cfg_attr(not(any(feature = "lnd", test)), allow(dead_code))]
+    #[cfg(any(feature = "lnd", test))]
     fn read_container_file(
         &self,
         id: &str,
@@ -252,6 +256,7 @@ impl ContainerEngine for BollardEngine {
         .await
     }
 
+    #[cfg(any(feature = "lnd", test))]
     async fn read_container_file(
         &self,
         id: &str,
@@ -314,6 +319,7 @@ impl ContainerEngine for BollardEngine {
     }
 }
 
+#[cfg(any(feature = "lnd", test))]
 fn append_archive_chunk(
     archive: &mut Vec<u8>,
     chunk: &[u8],
@@ -330,6 +336,7 @@ fn append_archive_chunk(
     Ok(())
 }
 
+#[cfg(any(feature = "lnd", test))]
 fn expected_archive_basename(path: &str) -> io::Result<&str> {
     let Some(relative) = path.strip_prefix('/') else {
         return Err(invalid_archive("container file path is not canonical"));
@@ -348,6 +355,7 @@ fn expected_archive_basename(path: &str) -> io::Result<&str> {
     basename.ok_or_else(|| invalid_archive("container file path is not canonical"))
 }
 
+#[cfg(any(feature = "lnd", test))]
 fn validate_container_file_stat(
     stat: &PathStatResponse,
     expected_basename: &str,
@@ -371,6 +379,7 @@ fn validate_container_file_stat(
     Ok(size)
 }
 
+#[cfg(any(feature = "lnd", test))]
 fn decode_single_file_archive(
     archive_bytes: &[u8],
     expected_basename: &str,
@@ -441,6 +450,7 @@ fn decode_single_file_archive(
     }
 }
 
+#[cfg(any(feature = "lnd", test))]
 fn validate_strict_tar_framing(archive_bytes: &[u8], file_size: usize) -> io::Result<()> {
     let padded_file_size = file_size
         .checked_add(TAR_BLOCK_BYTES - 1)
@@ -477,14 +487,17 @@ fn validate_strict_tar_framing(archive_bytes: &[u8], file_size: usize) -> io::Re
     Ok(())
 }
 
+#[cfg(any(feature = "lnd", test))]
 fn invalid_archive(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+#[cfg(any(feature = "lnd", test))]
 fn read_file_error(message: &'static str) -> EngineError {
     EngineError::new("read container file", invalid_archive(message))
 }
 
+#[cfg(any(feature = "lnd", test))]
 fn sanitized_read_file_api_error(error: BollardError) -> EngineError {
     if is_not_found(&error) {
         return EngineError::new(

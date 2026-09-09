@@ -42,8 +42,11 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all --check
 
-      # --all-features so the bitcoin-rpc-types surface is linted too.
-      - name: cargo clippy
+      - name: cargo clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Cover optional APIs as well as code compiled without those features.
+      - name: cargo clippy (all features)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
