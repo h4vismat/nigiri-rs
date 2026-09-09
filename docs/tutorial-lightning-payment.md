@@ -8,11 +8,13 @@ first run pulls three pinned images.
 
 ```toml
 [dev-dependencies]
-nigiri-rs = { version = "0.5", features = ["fixtures"] }
+nigiri-rs = { version = "0.5", features = ["lightning-fixtures"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-`fixtures` implies `lnd`, so one facade dependency exposes `LndPair` and the Lightning domain types.
+`lightning-fixtures` enables `fixtures` and `lnd`, exposing `LndPair` and the Lightning domain
+types. The `fixtures` feature alone provides Bitcoin/Liquid fixtures without the LND dependency.
+For a direct dependency, enable `nigiri-rs-fixtures` with `features = ["lnd"]`.
 
 ## Write the payment test
 

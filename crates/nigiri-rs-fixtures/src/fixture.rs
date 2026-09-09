@@ -13,7 +13,7 @@ use crate::{
     electrs, node, readiness,
     runtime::{
         BollardEngine, ContainerEngine, RuntimeHandle, attach_container_log, runtime_error,
-        supervise, supervise_for_coordinator,
+        supervise,
     },
 };
 
@@ -91,17 +91,6 @@ impl<C: FixtureChain> Fixture<C> {
             .map_err(|error| runtime_error("fixture", error))
     }
 
-    pub(crate) async fn shutdown_within(mut self, deadline: &Deadline) -> Result<(), FixtureError> {
-        let runtime = self
-            .runtime
-            .take()
-            .expect("fixture runtime is shut down once");
-        runtime
-            .shutdown_within(deadline)
-            .await
-            .map_err(|error| runtime_error("fixture", error))
-    }
-
     /// The Docker network every container of this fixture is attached to.
     ///
     /// Crate-private: a composite attaches its own containers to it. The name is an implementation
@@ -119,6 +108,7 @@ impl<C: FixtureChain> Fixture<C> {
     ///
     /// Crate-private so the runtime remains an implementation detail and callers cannot use a
     /// fixture as a handle for unrelated containers.
+    #[cfg(feature = "lnd")]
     pub(crate) fn engine(&self) -> BollardEngine {
         self.engine.clone()
     }
@@ -156,7 +146,7 @@ impl<C: FixtureChain> Fixture<C> {
     ///
     /// Test-only, and only for a composite's teardown test: proving a pair removes everything it
     /// created means naming all four containers, and these handles are private to this type.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "lnd", feature = "docker-tests")))]
     pub(crate) fn container_ids(&self) -> [String; 2] {
         self.container_ids.clone()
     }
@@ -201,7 +191,7 @@ struct TopologyNames {
 }
 
 #[derive(Clone, Copy)]
-enum FixtureStartupOwner {
+pub(crate) enum FixtureStartupOwner {
     CallerDeadline,
     CompositeCoordinator,
 }
@@ -294,6 +284,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
     ///
     /// The nested fixture supervisor always completes cleanup before its coordinator returns, so
     /// only the outer public guard can detach at the shared deadline.
+    #[cfg(feature = "lnd")]
     pub(crate) async fn start_under_for_coordinator(
         self,
         deadline: &Deadline,
@@ -302,7 +293,7 @@ impl<C: FixtureChain> FixtureBuilder<C> {
             .await
     }
 
-    async fn start_under_with_owner(
+    pub(crate) async fn start_under_with_owner(
         self,
         deadline: &Deadline,
         owner: FixtureStartupOwner,
@@ -402,16 +393,12 @@ impl<C: FixtureChain> FixtureBuilder<C> {
                 Either::Left(supervise(engine, supervisor_deadline, work))
             }
             FixtureStartupOwner::CompositeCoordinator => {
-                Either::Right(supervise_for_coordinator(engine, work))
+                Either::Right(crate::runtime::supervise_for_coordinator(engine, work))
             }
         };
-        let ((client, names, container_ids), runtime) = deadline
-            .run(
-                C::NODE_SERVICE,
-                "starting the complete fixture topology",
-                supervised,
-            )
-            .await??;
+        // Every startup phase uses the shared deadline. An outer timer at the same instant
+        // races the phase's detailed failure and can replace its latest readiness observation.
+        let ((client, names, container_ids), runtime) = supervised.await?;
 
         Ok(Fixture {
             runtime: Some(runtime),
@@ -430,34 +417,28 @@ async fn attach_engine_log<E: ContainerEngine>(
     id: &str,
     error: FixtureError,
 ) -> FixtureError {
-    let addition = match deadline
+    let result = deadline
         .run(
             service,
             "reading bounded startup diagnostics",
             engine.logs(id),
         )
-        .await
-    {
-        Ok(Ok(logs)) => crate::diagnostics::redacted_tail(&format!(
-            "{service} log:\n{logs}\n[end {service} log]"
-        )),
-        Ok(Err(failure)) => crate::diagnostics::redacted_tail(&format!(
-            "could not read the {service} diagnostic log: {failure}"
-        )),
-        Err(_) => format!("skipped the {service} diagnostic log: startup deadline exhausted"),
-    };
+        .await;
+    let addition = crate::runtime::render_log_diagnostics(service, result);
     crate::runtime::attach_diagnostics(error, addition)
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "docker-tests")]
+    use crate::FixtureChain;
     use std::{collections::HashMap, time::Duration};
 
     use nigiri_rs_core::{Bitcoin, Liquid};
 
     use super::{Fixture, attach_engine_log};
     use crate::{
-        ContainerImage, FixtureChain, FixtureError,
+        ContainerImage, FixtureError,
         deadline::Deadline,
         runtime::{ContainerEngine, ContainerSpec, EngineResult},
     };
@@ -633,6 +614,7 @@ mod tests {
     }
 
     /// The label Docker puts on a volume it created implicitly for a container.
+    #[cfg(feature = "docker-tests")]
     const DOCKER_ANONYMOUS_VOLUME_LABEL: &str = "com.docker.volume.anonymous";
 
     // Catches a regression that leaves a container, volume, or network behind, and one that gives a
@@ -641,6 +623,7 @@ mod tests {
     //
     // Storage is asserted before the drop and absence after it, in one fixture, because starting a
     // second one to check the other half would double the slowest test in the suite.
+    #[cfg(feature = "docker-tests")]
     async fn assert_dropping_a_fixture_removes_every_resource_it_created<C: FixtureChain>() {
         use bollard::{Docker, models::MountPointTypeEnum};
 
@@ -763,11 +746,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "docker-tests")]
     async fn dropping_a_bitcoin_fixture_removes_every_resource_it_created() {
         assert_dropping_a_fixture_removes_every_resource_it_created::<Bitcoin>().await;
     }
 
     #[tokio::test]
+    #[cfg(feature = "docker-tests")]
     async fn dropping_a_liquid_fixture_removes_every_resource_it_created() {
         assert_dropping_a_fixture_removes_every_resource_it_created::<Liquid>().await;
     }
@@ -775,6 +760,7 @@ mod tests {
     // The one test that proves the whole assembly against a real daemon: a fixture that reports
     // itself ready must already be funded and reachable through its mapped Electrum port.
     #[tokio::test]
+    #[cfg(feature = "docker-tests")]
     async fn fixture_starts_ready() {
         let fixture = Fixture::<Bitcoin>::start()
             .await
@@ -826,6 +812,7 @@ mod tests {
     // its own daemons at the node over the fixture network. The mapped host port is not a substitute:
     // sibling containers dial the node by name on the user-defined network, not through the host.
     #[tokio::test]
+    #[cfg(feature = "docker-tests")]
     async fn a_started_fixture_reports_the_topology_names_a_composite_must_dial() {
         let fixture = Fixture::<Bitcoin>::start()
             .await
@@ -881,6 +868,7 @@ mod tests {
     // daemon that never syncs is explained by the node it was following, whose log lives behind a
     // handle only the fixture owns.
     #[tokio::test]
+    #[cfg(feature = "docker-tests")]
     async fn inner_logs_are_attached_to_a_composites_error() {
         let fixture = Fixture::<Bitcoin>::start()
             .await
@@ -956,6 +944,7 @@ mod tests {
     // Catches a regression that starts a fixture on a network other than the one it was given,
     // which would leave a composite's containers unable to resolve each other by name.
     #[tokio::test]
+    #[cfg(feature = "docker-tests")]
     async fn a_fixture_started_on_a_shared_network_reports_that_network() {
         let first = Fixture::<Bitcoin>::start()
             .await

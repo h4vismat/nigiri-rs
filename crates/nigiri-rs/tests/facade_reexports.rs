@@ -73,6 +73,12 @@ fn fixtures_are_reachable_when_the_feature_is_on() {
     accepts::<nigiri_rs::fixtures::FixtureError>();
     accepts::<nigiri_rs::fixtures::PegPair>();
     accepts::<nigiri_rs::fixtures::PegPairBuilder>();
+}
+
+#[cfg(feature = "lightning-fixtures")]
+#[test]
+fn lightning_fixtures_are_opt_in() {
+    fn accepts<T>() {}
     accepts::<nigiri_rs::fixtures::LndPair>();
     accepts::<nigiri_rs::fixtures::LndPairBuilder>();
 }

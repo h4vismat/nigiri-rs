@@ -15,7 +15,8 @@
 //!
 //! Enable the `fixtures` feature to reach `fixtures`, which provisions a throwaway
 //! regtest stack per test. It is off by default because it pulls Docker client dependencies that a
-//! consumer talking to a host-owned Nigiri does not need.
+//! consumer talking to a host-owned Nigiri does not need. Use `lightning-fixtures` for `LndPair`;
+//! plain `fixtures` does not pull in LND or its protobuf compiler.
 //!
 //! ```toml
 //! nigiri-rs = { version = "0.5", features = ["fixtures"] }
@@ -71,7 +72,12 @@ pub use nigiri_rs_fixtures as fixtures;
 /// two ready-to-pay LND nodes on a funded Bitcoin fixture. Either pair may be mixed with client
 /// parameters, which still produce independent stacks.
 ///
-/// Two arguments are accepted: `startup_timeout = <seconds>` and `flavor = "multi_thread"`.
+/// Optional arguments: `startup_timeout = <seconds>`, `flavor = "multi_thread"`, and
+/// `crate = "::regtest"` when the facade dependency is renamed to `regtest`. No direct Tokio
+/// dependency is needed. `LndPair` requires `lightning-fixtures`.
+///
+/// `#[should_panic]` is rejected when fixture parameters are present: setup failures must not
+/// satisfy the expected panic. Assert expected failures inside the body instead.
 #[cfg(feature = "fixtures")]
 pub use nigiri_rs_macros::test;
 

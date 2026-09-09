@@ -463,3 +463,150 @@ async fn broadcast_preserves_committed_txid_when_confirmation_mining_fails() {
     assert_eq!(requests[1]["method"], "getnewaddress");
     assert_eq!(requests[2]["method"], "generatetoaddress");
 }
+
+#[tokio::test]
+async fn oversized_stream_is_rejected_before_the_server_finishes() {
+    for rpc in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n12345\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+            esplora_url: url.clone(),
+            node_rpc_url: url,
+            max_response_bytes: 4,
+            timeout: Duration::from_millis(100),
+            ..Default::default()
+        })
+        .unwrap();
+        let result = if rpc {
+            client.rpc::<Value, _>("test", ()).await.map(|_| ())
+        } else {
+            client.block_height().await.map(|_| ())
+        };
+        assert!(matches!(result, Err(NigiriError::InvalidResponse { .. })));
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn confirmation_deadline_bounds_an_in_flight_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+        esplora_url: url,
+        timeout: Duration::from_secs(2),
+        ..Default::default()
+    })
+    .unwrap();
+    let timeout = Duration::from_millis(25);
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        client.wait_for_confirmation(&"11".repeat(32).parse().unwrap(), timeout),
+    )
+    .await
+    .expect("outer deadline must cancel the in-flight request");
+    assert!(matches!(result, Err(NigiriError::Timeout { duration, .. }) if duration == timeout));
+    server.abort();
+}
+
+#[tokio::test]
+async fn confirmation_retries_an_indexer_404() {
+    let (url, _) = sequential_http_server(vec![("404 Not Found", "not indexed".into()), ("200 OK", r#"{"confirmed":true,"block_height":1,"block_hash":"1111111111111111111111111111111111111111111111111111111111111111","block_time":1}"#.into())]).await;
+    NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+        esplora_url: url,
+        timeout: Duration::from_secs(2),
+        ..Default::default()
+    })
+    .unwrap()
+    .wait_for_confirmation(&"11".repeat(32).parse().unwrap(), Duration::from_secs(2))
+    .await
+    .unwrap();
+}
+
+async fn sequential_http_server(
+    responses: Vec<(&str, String)>,
+) -> (Url, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let responses: Vec<_> = responses
+        .into_iter()
+        .map(|(s, b)| (s.to_owned(), b))
+        .collect();
+    let task = tokio::spawn(async move {
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    (url, task)
+}
+
+#[tokio::test]
+async fn readiness_deadline_includes_the_poll_delay() {
+    let (url, _) = one_shot_server("503 Service Unavailable", "starting".into()).await;
+    let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+        esplora_url: url,
+        timeout: Duration::from_millis(25),
+        ..Default::default()
+    })
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_millis(80), client.wait_ready())
+        .await
+        .expect("readiness must bound its poll delay");
+    assert!(matches!(result, Err(NigiriError::Timeout { .. })));
+}
+
+#[tokio::test]
+async fn confirmation_does_not_retry_permanent_http_errors() {
+    let (url, request) = one_shot_server("401 Unauthorized", "bad credentials".into()).await;
+    let client = NigiriClient::<Bitcoin>::with_config(config(url)).unwrap();
+    let result = client
+        .wait_for_confirmation(&"11".repeat(32).parse().unwrap(), Duration::from_secs(1))
+        .await;
+    assert!(
+        matches!(result, Err(NigiriError::HttpStatus { status, .. }) if status == reqwest::StatusCode::UNAUTHORIZED)
+    );
+    request.await.unwrap();
+}
+
+#[tokio::test]
+async fn esplora_body_timeout_is_classified_consistently() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).await.unwrap() > 0);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n1")
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let duration = Duration::from_millis(25);
+    let client = NigiriClient::<Bitcoin>::with_config(NigiriConfig {
+        esplora_url: url,
+        timeout: duration,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        matches!(client.block_height().await, Err(NigiriError::Timeout { duration: actual, operation }) if actual == duration && operation == "block height")
+    );
+    server.abort();
+}

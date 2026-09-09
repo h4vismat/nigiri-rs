@@ -32,11 +32,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Check facade feature boundaries
+        run: |
+          cargo check -p nigiri-rs --no-default-features
+          for features in fixtures lnd lightning-fixtures bitcoin-rpc-types fixtures,bitcoin-rpc-types; do
+            cargo check -p nigiri-rs --no-default-features --features "$features"
+          done
+
       - name: cargo fmt
         run: cargo fmt --all --check
 
-      # --all-features so the bitcoin-rpc-types surface is linted too.
-      - name: cargo clippy
+      - name: cargo clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Cover optional APIs as well as code compiled without those features.
+      - name: cargo clippy (all features)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
@@ -46,26 +56,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 1.88 is the rust-version floor declared in Cargo.toml; stable catches regressions
-        # from newer compilers. Default features alone never compile
-        # tests/rpc_types_feature.rs or the gated test in tests/rpc_api.rs, so both feature
-        # columns are required to know the optional feature still works.
-        #
-        # Each cell states its own test scope instead of deriving it from the toolchain and
-        # feature names. A derived condition re-scopes every cell the moment a matrix value
-        # is renamed, and does it silently; stated data cannot drift out from under itself.
-        #
-        # Scoping by package, never by test name: a wrong package name is a hard error,
-        # whereas a name filter that stops matching selects nothing and exits 0.
-        # nigiri-rs-lnd is Docker-free: it uses in-process protocol services. nigiri-rs-macros is
-        # in the cheap cells because its trybuild suite is pure rustc
-        # compile-fail checking with no Docker in it, and macro diagnostics are exactly the
-        # thing worth checking against the 1.88 floor as well as stable.
+        # The declared MSRV and stable both run default workspace tests without Docker.
+        # MSRV all-features checks protocol/macros behavior; its build still covers all targets.
+        # Stable all-features explicitly enables the live Docker suite and runs it serially.
         include:
           - toolchain: "1.88"
             features: default
             cargo_features: ""
-            scope: -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros
+            scope: --workspace
             test_args: ""
           - toolchain: "1.88"
             features: all
@@ -75,7 +73,7 @@ jobs:
           - toolchain: stable
             features: default
             cargo_features: ""
-            scope: -p nigiri-rs-core -p nigiri-rs-lnd -p nigiri-rs-macros
+            scope: --workspace
             test_args: ""
           # The only cell that runs Docker-backed tests also uses the release gate's proven
           # single Rust test thread so concurrent cold fixture startups do not saturate Docker.
@@ -101,8 +99,8 @@ jobs:
       - name: cargo build
         run: cargo build --workspace --all-targets ${{ matrix.cargo_features }}
 
-      # Nothing is #[ignore]d any more, so this cell's scope is what decides whether it
-      # starts containers. test_args is empty in every Docker-free cell.
+      # Live tests require docker-tests; default workspace tests use fake engines only.
+      # The all-features workspace cell runs real containers serially.
       - name: cargo test
         run: cargo test ${{ matrix.scope }} --all-targets ${{ matrix.cargo_features }} ${{ matrix.test_args }}
 

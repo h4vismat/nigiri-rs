@@ -12,6 +12,7 @@ fn generated_code_paths_resolve() {
 
     accepts::<nigiri_rs::__private::fixtures::Fixture<nigiri_rs::Bitcoin>>();
     accepts::<nigiri_rs::__private::fixtures::FixtureError>();
+    #[cfg(feature = "lightning-fixtures")]
     accepts::<nigiri_rs::__private::fixtures::LndPair>();
 
     // The generated wrapper is annotated `#[::nigiri_rs::__private::tokio::test]`, so the runtime

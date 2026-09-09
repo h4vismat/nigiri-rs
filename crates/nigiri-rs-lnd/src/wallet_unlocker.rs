@@ -78,20 +78,30 @@ pub async fn initialize_wallet(
     let validated = validated_transport_config(&config, wallet_password)?;
     let transport = unauthenticated(&validated)?;
     let mut rpc = WalletUnlockerClient::new(transport.channel().await);
-    initialize_wallet_with(config, wallet_password, &mut rpc).await
+    initialize_wallet_validated(validated, wallet_password, &mut rpc).await
 }
 
+#[cfg(test)]
 pub(crate) async fn initialize_wallet_with<R: WalletUnlockerRpc>(
     config: LndBootstrapConfig,
     wallet_password: &[u8],
     rpc: &mut R,
 ) -> Result<LndConfig, LndError> {
-    validated_transport_config(&config, wallet_password)?;
-    let deadline = operation_deadline(config.timeout)?;
+    let validated = validated_transport_config(&config, wallet_password)?;
+    initialize_wallet_validated(validated, wallet_password, rpc).await
+}
+
+async fn initialize_wallet_validated<R: WalletUnlockerRpc>(
+    validated: crate::config::TlsConfig,
+    wallet_password: &[u8],
+    rpc: &mut R,
+) -> Result<LndConfig, LndError> {
+    let timeout = validated.timeout();
+    let deadline = operation_deadline(timeout)?;
 
     let seed = bounded_request_until(
         deadline,
-        config.timeout,
+        timeout,
         "generate wallet seed",
         rpc.gen_seed(Request::new(GenSeedRequest {
             aezeed_passphrase: Vec::new(),
@@ -105,7 +115,7 @@ pub(crate) async fn initialize_wallet_with<R: WalletUnlockerRpc>(
 
     let initialized = bounded_request_until(
         deadline,
-        config.timeout,
+        timeout,
         "initialize wallet",
         rpc.init_wallet(Request::new(InitWalletRequest {
             wallet_password: wallet_password.to_vec(),
@@ -130,25 +140,17 @@ pub(crate) async fn initialize_wallet_with<R: WalletUnlockerRpc>(
         return Err(uncertain_initialization());
     }
 
-    LndConfig::new(
-        config.endpoint.as_str(),
-        config.tls_certificate,
-        initialized.admin_macaroon,
-        config.timeout,
-    )
+    LndConfig::authenticated(validated, initialized.admin_macaroon)
 }
 
 fn validated_transport_config(
     config: &LndBootstrapConfig,
     wallet_password: &[u8],
-) -> Result<LndConfig, LndError> {
+) -> Result<crate::config::TlsConfig, LndError> {
     validate_wallet_password(wallet_password)?;
-    // `unauthenticated` consumes the same transport validator as an authenticated client. The
-    // single inert byte satisfies only `LndConfig`'s macaroon invariant and is never transmitted.
-    LndConfig::new(
-        config.endpoint.as_str(),
+    crate::config::TlsConfig::from_url(
+        &config.endpoint,
         config.tls_certificate.clone(),
-        vec![0],
         config.timeout,
     )
 }
@@ -285,6 +287,18 @@ mod tests {
             tls_certificate: b"fixture TLS certificate".to_vec(),
             timeout: Duration::from_secs(17),
         }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_accepts_normalized_https_default_port() {
+        let mut config = config();
+        config.endpoint = Url::parse("https://localhost:443").unwrap();
+        let mut rpc = FakeWalletUnlockerRpc::succeeding();
+        let authenticated = initialize_wallet_with(config, PASSWORD, &mut rpc)
+            .await
+            .unwrap();
+        assert_eq!(authenticated.endpoint().port_or_known_default(), Some(443));
+        assert_eq!(rpc.calls.len(), 2);
     }
 
     #[test]

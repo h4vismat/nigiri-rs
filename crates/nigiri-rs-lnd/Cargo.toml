@@ -1,23 +1,23 @@
 [package]
 name = "nigiri-rs-lnd"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.88"
-license = "MIT"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "Typed host-managed LND client with protocol-level Lightning records"
 readme = "README.md"
-repository = "https://github.com/h4vismat/nigiri-rs"
+repository.workspace = true
 
 [dependencies]
-bitcoin = "0.32.7"
+bitcoin = { workspace = true }
 lightning-invoice = "0.34.1"
 prost = "0.14.1"
 rustls = { version = "0.23.37", default-features = false, features = ["ring", "std"] }
-thiserror = "2.0.18"
-tokio = { version = "1.50.0", features = ["fs", "io-util", "sync", "time"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "time"] }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
-url = "2.5.8"
+url = { workspace = true }
 
 [dev-dependencies]
 h2 = "0.4"

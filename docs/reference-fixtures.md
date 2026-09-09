@@ -8,9 +8,21 @@ it, and a `NigiriClient` pointed at both. Nothing is shared between fixtures, so
 parallel and mine or reorg freely without coordinating.
 
 [`PegPair`](#pegpair) wires two stacks for Liquid's peg. [`LndPair`](#lndpair) composes a Bitcoin
-stack with two ready-to-pay LND nodes.
+stack with two ready-to-pay LND nodes. `LndPair` requires facade feature `lightning-fixtures`
+(or `lnd` when depending directly on `nigiri-rs-fixtures`).
 
-Requires a running Docker daemon. No Nigiri installation. Podman is untested.
+Requires a local running Docker daemon. No Nigiri installation. Podman is untested. Non-loopback
+remote `DOCKER_HOST` endpoints are rejected because published ports and returned endpoints use
+loopback.
+
+Single-chain startup errors retain the failing phase and readiness observations before background
+cleanup. Composite startup coordinates dependent teardown before returning an inner failure;
+its public deadline can expire while that cleanup continues in the background.
+Outstanding create requests settle before the resource ledger is removed, so cancellation cannot
+lose a resource whose create response arrives late. Cleanup remains best effort after process
+termination or an uncertain Docker transport failure. Diagnostic log collection reads at most
+64 KiB or 1,024 chunks from the beginning of the log, redacts the sample, and marks truncation;
+it does not promise the newest log lines.
 
 ## `Fixture<C>`
 

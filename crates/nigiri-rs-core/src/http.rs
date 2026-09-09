@@ -8,60 +8,74 @@ pub(crate) async fn send_bounded<N: NigiriNetwork>(
     request: RequestBuilder,
     sensitive: &[&str],
 ) -> Result<Vec<u8>, NigiriError> {
-    let response = request
-        .send()
-        .await
-        .map_err(|source| NigiriError::HttpTransport {
-            operation: operation.into(),
-            source: source.without_url(),
-        })?;
-    read_bounded(
-        operation,
-        response,
-        sensitive,
-        client.config.max_response_bytes,
-    )
-    .await
+    let response = send(client, operation, request).await?;
+    if !response.status.is_success() {
+        return Err(response.status_error(operation, sensitive));
+    }
+    response.into_body(operation)
 }
 
-async fn read_bounded(
-    operation: &'static str,
-    mut response: reqwest::Response,
-    sensitive: &[&str],
-    limit: usize,
-) -> Result<Vec<u8>, NigiriError> {
-    let status = response.status();
-    let mut body = Vec::new();
-    let mut exceeded = false;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|source| NigiriError::HttpTransport {
-            operation: operation.into(),
-            source: source.without_url(),
-        })?
-    {
-        let remaining = limit.saturating_sub(body.len());
-        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-        if chunk.len() > remaining {
-            exceeded = true;
+pub(crate) struct BoundedResponse {
+    pub(crate) status: reqwest::StatusCode,
+    pub(crate) body: Vec<u8>,
+    exceeded: bool,
+}
+
+impl BoundedResponse {
+    pub(crate) fn status_error(&self, operation: &str, sensitive: &[&str]) -> NigiriError {
+        NigiriError::HttpStatus {
+            operation: operation.to_owned().into(),
+            status: self.status,
+            body: bounded_error_text(&self.body, self.exceeded, sensitive),
         }
     }
 
-    if !status.is_success() {
-        return Err(NigiriError::HttpStatus {
-            operation: operation.into(),
-            status,
-            body: bounded_error_text(&body, exceeded, sensitive),
-        });
+    pub(crate) fn into_body(self, operation: &str) -> Result<Vec<u8>, NigiriError> {
+        if self.exceeded {
+            return Err(NigiriError::InvalidResponse {
+                operation: operation.to_owned().into(),
+                detail: "response body exceeded the configured safety limit".to_owned(),
+            });
+        }
+        Ok(self.body)
     }
-    if exceeded {
-        return Err(NigiriError::InvalidResponse {
-            operation: operation.into(),
-            detail: "response body exceeded the configured safety limit".to_owned(),
-        });
+}
+
+pub(crate) async fn send<N: NigiriNetwork>(
+    client: &crate::NigiriClient<N>,
+    operation: &str,
+    request: RequestBuilder,
+) -> Result<BoundedResponse, NigiriError> {
+    let transport_error = |source: reqwest::Error| {
+        if source.is_timeout() {
+            NigiriError::Timeout {
+                operation: operation.to_owned().into(),
+                duration: client.config.timeout,
+            }
+        } else {
+            NigiriError::HttpTransport {
+                operation: operation.to_owned().into(),
+                source: source.without_url(),
+            }
+        }
+    };
+    let mut response = request.send().await.map_err(transport_error)?;
+    let status = response.status();
+    let mut body = Vec::new();
+    let mut exceeded = false;
+    while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+        let remaining = client.config.max_response_bytes.saturating_sub(body.len());
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if chunk.len() > remaining {
+            exceeded = true;
+            break;
+        }
     }
-    Ok(body)
+    Ok(BoundedResponse {
+        status,
+        body,
+        exceeded,
+    })
 }
 
 fn bounded_error_text(body: &[u8], exceeded: bool, sensitive: &[&str]) -> String {
@@ -102,13 +116,11 @@ fn redact_value(text: &str, value: &str) -> String {
         let echoed = &rest[offset..];
         // The echo is however much of the value is actually present, never less than the anchor.
         let matched = value
-            .char_indices()
-            .map(|(index, character)| index + character.len_utf8())
-            .take_while(|end| {
-                echoed.len() >= *end && echoed.as_bytes()[..*end] == value.as_bytes()[..*end]
-            })
-            .last()
-            .unwrap_or(anchor.len());
+            .chars()
+            .zip(echoed.chars())
+            .take_while(|(expected, actual)| expected == actual)
+            .map(|(character, _)| character.len_utf8())
+            .sum::<usize>();
 
         redacted.push_str("[redacted]");
         rest = &echoed[matched..];
@@ -152,6 +164,24 @@ pub(crate) fn endpoint(
 #[cfg(test)]
 mod tests {
     use super::redact_sensitive;
+
+    #[test]
+    fn unicode_partial_echo_stops_on_a_character_boundary() {
+        let value = "秘密の認証文字列";
+        assert_eq!(
+            redact_sensitive("秘密の認証文外 and 秘密の認証文字列".into(), &[value]),
+            "[redacted]外 and [redacted]"
+        );
+    }
+
+    #[test]
+    fn long_repeated_sensitive_values_are_redacted() {
+        let value = "a".repeat(100_000);
+        assert_eq!(
+            redact_sensitive(format!("{value} {value}"), &[&value]),
+            "[redacted] [redacted]"
+        );
+    }
 
     const TXID: &str = "9f2b7c1d4e6a8b0c2d4f6a8b0c2d4e6f8a0b2c4d6e8f0a1b3c5d7e9f1a3b5c7d";
 

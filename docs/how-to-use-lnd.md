@@ -11,7 +11,9 @@ nigiri-rs = { version = "0.5", features = ["lnd"] }
 ```
 
 The `lnd` feature does not enable `fixtures`, Bollard, or lifecycle management. It exposes the
-project-owned Lightning API from `nigiri-rs-lnd` through the facade.
+project-owned Lightning API from `nigiri-rs-lnd` through the facade. To provision a test topology,
+enable `lightning-fixtures` for `nigiri_rs::fixtures::LndPair`; `fixtures` alone contains the
+Bitcoin/Liquid fixtures. Direct users of `nigiri-rs-fixtures` enable its `lnd` feature.
 
 ## Load credentials and wait for readiness
 
@@ -43,6 +45,10 @@ requires those stronger states.
 `LndConfig::new` accepts credential bytes instead. Both constructors enforce an HTTPS endpoint with
 a host and explicit port, no userinfo/query/fragment, a nonzero timeout, a certificate no larger
 than `MAX_TLS_CERTIFICATE_BYTES` (1 MiB), and a macaroon no larger than `MAX_MACAROON_BYTES` (64 KiB).
+An explicit `https://localhost:443` is accepted. For a new wallet, `initialize_wallet` accepts
+`LndBootstrapConfig` with a parsed HTTPS `Url`, certificate bytes, and timeout. Bootstrap also
+accepts port 443 after URL normalization removes the explicit port. It validates TLS settings
+independently of authentication and uses the returned admin macaroon for the authenticated config.
 
 ## Understand the certificate pin
 
@@ -87,6 +93,21 @@ match client.pay_invoice(invoice, options).await {
 `PaymentFailed` is different: LND reported a terminal failure and the error includes the payment
 hash plus a bounded reason. `InvalidResponse` means the daemon returned data that could not satisfy
 the public domain model. See [Error reference](reference-errors.md) for every variant.
+
+## Classify errors and build test adapters
+
+Match `LndError::Status { code, .. }` using the owned `LndStatusCode` enum, rather than parsing the
+human-readable `detail`. The adapter translates transport codes at its boundary, so your retry
+policy does not need a Tonic dependency. Select retries according to the operation as well as the
+code; an uncertain committed mutation requires reconciliation first.
+
+Implement `LightningNode` for application test doubles or alternative adapters. Its response
+records have public validated constructors: `NodeInfo::try_new`, `WalletBalance::try_new`,
+`Peer::try_new`, `Channel::try_new`, and `PaymentRecord::try_new` return `Result<_, LndError>`.
+`InvoiceRecord::from_invoice(invoice, state)` derives the hash and amount from a parsed BOLT11
+invoice, rejecting an invoice without an amount. Payment construction checks any supplied preimage
+against the hash and requires a preimage for success. See the [response record reference](reference-client.md#response-records-and-states)
+for constructor arguments and balance invariants.
 
 ## Related
 

@@ -9,6 +9,7 @@ use crate::{ContainerImage, FixtureError, deadline::Deadline};
 mod bitcoin;
 mod liquid;
 
+#[cfg(feature = "lnd")]
 pub(crate) use bitcoin::bitcoin_zmq_args;
 
 /// A chain a fixture can start, and the six things that differ between chains.

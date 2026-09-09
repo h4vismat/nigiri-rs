@@ -1,12 +1,16 @@
-use std::{fmt, net::IpAddr};
+#[cfg(feature = "lnd")]
+use crate::{
+    RPC_PASSWORD, RPC_USER,
+    lnd::{BITCOIN_ZMQ_BLOCK_PORT, BITCOIN_ZMQ_TX_PORT, LND_GRPC_PORT, LND_PEER_PORT},
+};
+use std::fmt;
+#[cfg(feature = "lnd")]
+use std::net::IpAddr;
 
+#[cfg(feature = "lnd")]
 use nigiri_rs_core::Bitcoin;
 
-use crate::{
-    ContainerImage, FixtureChain, FixtureError, RPC_PASSWORD, RPC_USER,
-    lnd::{BITCOIN_ZMQ_BLOCK_PORT, BITCOIN_ZMQ_TX_PORT, LND_GRPC_PORT, LND_PEER_PORT},
-    node::merge_node_args,
-};
+use crate::{ContainerImage, FixtureChain, FixtureError, node::merge_node_args};
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ContainerSpec {
@@ -75,10 +79,7 @@ pub(crate) fn electrs_spec<C: FixtureChain>(
     })
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 6 specification is consumed by the Task 7 LndPair startup"
-)]
+#[cfg(feature = "lnd")]
 pub(crate) fn lnd_spec(
     image: ContainerImage,
     network: String,

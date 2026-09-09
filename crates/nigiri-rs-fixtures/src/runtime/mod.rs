@@ -9,19 +9,20 @@ use crate::{
     diagnostics::{join_diagnostics, redacted_source, redacted_tail},
 };
 
+#[cfg(test)]
+pub(crate) use engine::EngineError;
+#[cfg(test)]
+pub(crate) use engine::EngineResult;
 pub(crate) use engine::{BollardEngine, ContainerEngine};
 #[cfg(test)]
-pub(crate) use engine::{EngineError, EngineResult};
-#[cfg(test)]
 pub(crate) use spec::ContainerSpec;
-#[allow(
-    unused_imports,
-    reason = "Task 6 specification is consumed by the Task 7 LndPair startup"
-)]
-pub(crate) use spec::{electrs_spec, lnd_spec, node_spec};
+#[cfg(feature = "lnd")]
+pub(crate) use spec::lnd_spec;
+pub(crate) use spec::{electrs_spec, node_spec};
+pub(crate) use supervisor::{RunningContainer, RuntimeHandle, Startup, supervise};
+
 pub(crate) use supervisor::{
-    CoordinatorCancellation, RunningContainer, RuntimeHandle, Startup, coordinate_startup,
-    supervise, supervise_for_coordinator,
+    CoordinatorCancellation, coordinate_startup, supervise_for_coordinator,
 };
 
 pub(crate) fn runtime_error(
@@ -105,19 +106,25 @@ pub(crate) async fn attach_container_log<E: ContainerEngine>(
     id_or_name: &str,
     error: FixtureError,
 ) -> FixtureError {
-    let diagnostics = match deadline
+    let diagnostics = deadline
         .run(
             service,
             "reading bounded startup diagnostics",
             startup.logs(id_or_name),
         )
-        .await
-    {
+        .await;
+    attach_diagnostics(error, render_log_diagnostics(service, diagnostics))
+}
+
+pub(crate) fn render_log_diagnostics(
+    service: &'static str,
+    result: Result<engine::EngineResult<String>, FixtureError>,
+) -> String {
+    match result {
         Ok(Ok(logs)) => redacted_tail(&format!("{service} log:\n{logs}\n[end {service} log]")),
         Ok(Err(failure)) => redacted_tail(&format!(
             "could not read the {service} diagnostic log: {failure}"
         )),
         Err(_) => format!("skipped the {service} diagnostic log: startup deadline exhausted"),
-    };
-    attach_diagnostics(error, diagnostics)
+    }
 }

@@ -58,6 +58,18 @@ So the destination comes out of the transaction and nothing the caller says can 
 it wrongly and no BTC arrives, which is exactly the outcome liquidv1 would give. That single decision
 is what makes the simulated half worth having at all.
 
+### What release validation guarantees
+
+The release requires exactly one peg-out output for the pair's parent chain, a readable explicit
+value, a standard Bitcoin destination, and an explicit asset matching the `pegged_asset` reported
+by `getsidechaininfo`. Missing/wrong assets and multiple same-parent peg-out outputs are rejected
+before any Bitcoin payment. Wrong-parent outputs are skipped while finding this pair's output.
+
+This validates what the transaction asks to release. It does not implement a federation's
+confirmation or replay rules. Unconfirmed transactions are accepted; repeated calls, including
+through `Peg` clones, pay again. Callers own that policy. This keeps the helper stateless and lets
+a consumer test its own release policy without competing with hidden release history.
+
 ### Why there is no reserve, and what it breaks
 
 On liquidv1 the released BTC comes from a pool the federation holds — the same coins that were pegged
@@ -89,9 +101,14 @@ at 11. **Different runs give different numbers.**
 That is the argument against a fixed margin. A hardcoded `+3` would encode a number measured once, on
 one machine, against one image, and would fail the first time a slower machine needed a fourth block.
 `complete_peg_in` mines **one block at a time and resubmits**, up to twenty, which adapts to however
-far behind the node happens to be on the day. And it retries only on the two error variants another
-block could plausibly fix — a dead socket or a malformed reply is not a maturity problem, and
-spending twenty blocks before reporting it would bury the real error.
+far behind the node happens to be on the day. The submission retry requires the Elements 23.3.3
+`claimpegin` error code `-8` and exact message `Peg-in Bitcoin transaction needs more confirmations
+to be sent.` Other uses of `-8` can be permanent invalid parameters, so the code alone does not
+justify mining. Unknown messages, other RPC errors, and transport/response failures return
+immediately. A deposit found immature before submission also returns immediately.
+
+That classification is tied to the [pinned Elements implementation](https://github.com/ElementsProject/elements/blob/elements-23.3.3/src/wallet/rpc/elements.cpp#L981-L984).
+A custom node version can use `claim_peg_in` and apply its own retry policy.
 
 The same reasoning applies to the depth itself: read `pegin_confirmation_depth()` rather than
 hardcoding 8, so a chain configured with a lowered `peginconfirmationdepth` and a production-shaped

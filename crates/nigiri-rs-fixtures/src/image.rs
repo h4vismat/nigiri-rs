@@ -134,10 +134,7 @@ impl ContainerImage {
             .with_digest("sha256:4f26e7f2e8d837b79638881415f6cbe84c699855ae568162db986321442a4288")
     }
 
-    #[allow(
-        dead_code,
-        reason = "Task 6 descriptor is consumed by the Task 7 LndPair builder"
-    )]
+    #[cfg(feature = "lnd")]
     pub(crate) fn lnd_default() -> Self {
         Self::new("lightninglabs/lnd", nigiri_rs_lnd::LND_PROTO_VERSION)
             .with_digest("sha256:4af8f9bbf98c8b86b0e54b065d6ea45d1387256a43fa9270c11ef849511abae0")
@@ -237,17 +234,20 @@ mod tests {
             .validate()
             .expect("the pinned Liquid Electrs image descriptor is valid");
 
-        let lnd = ContainerImage::lnd_default();
-        assert_eq!(lnd.name(), "lightninglabs/lnd");
-        assert_eq!(lnd.tag(), "v0.21.1-beta");
-        assert_eq!(lnd.tag(), nigiri_rs_lnd::LND_PROTO_VERSION);
-        assert_eq!(
-            lnd.digest(),
-            Some("sha256:4af8f9bbf98c8b86b0e54b065d6ea45d1387256a43fa9270c11ef849511abae0")
-        );
-        assert_eq!(lnd.entrypoint(), None);
-        lnd.validate()
-            .expect("the pinned LND image descriptor is valid");
+        #[cfg(feature = "lnd")]
+        {
+            let lnd = ContainerImage::lnd_default();
+            assert_eq!(lnd.name(), "lightninglabs/lnd");
+            assert_eq!(lnd.tag(), "v0.21.1-beta");
+            assert_eq!(lnd.tag(), nigiri_rs_lnd::LND_PROTO_VERSION);
+            assert_eq!(
+                lnd.digest(),
+                Some("sha256:4af8f9bbf98c8b86b0e54b065d6ea45d1387256a43fa9270c11ef849511abae0")
+            );
+            assert_eq!(lnd.entrypoint(), None);
+            lnd.validate()
+                .expect("the pinned LND image descriptor is valid");
+        }
     }
 
     // Catches a regression that accepts a blank entrypoint, which Docker would reject only once the

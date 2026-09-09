@@ -23,7 +23,7 @@ mod wallet_unlocker;
 pub use amount::{Millisats, Sats};
 pub use client::LndClient;
 pub use config::{LndConfig, MAX_MACAROON_BYTES, MAX_TLS_CERTIFICATE_BYTES};
-pub use error::LndError;
+pub use error::{LndError, LndStatusCode};
 pub use types::{
     Channel, CreateInvoiceRequest, InvoiceRecord, InvoiceState, NodeInfo, OpenChannelRequest,
     PaymentOptions, PaymentRecord, PaymentState, Peer, PeerAddress, WalletBalance,

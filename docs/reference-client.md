@@ -62,7 +62,8 @@ Read both from the client rather than assuming Nigiri's fixed ports. See
 
 `wait_ready` polls `block_height` every 100 ms and returns `Ok(())` on the first success. It gives up
 after `config.timeout` with `NigiriError::Timeout { operation: "wait for readiness", .. }`. Failures
-during the wait are swallowed, not returned — a service that is not up yet is retried.
+during the wait are retried. The deadline covers both requests and the 100 ms poll delays; an
+in-flight request is cancelled when the readiness budget expires.
 
 `block_height` reads Esplora (`GET /blocks/tip/height`), not the node. `best_block_hash` reads the
 node (`getbestblockhash`). During a sync lag the two disagree, which is exactly what
@@ -120,8 +121,9 @@ a conversion for LWK confidential addresses that are already strings.
 same non-atomic caveat and the same `PostTransactionMiningFailed` behaviour as `faucet`.
 
 `wait_for_confirmation` polls `get_tx_status` every 500 ms until `confirmed` is true. It takes its
-own `timeout` rather than using `config.timeout`. Unlike `wait_ready`, it **propagates** a query
-error immediately rather than retrying: a failed status lookup ends the wait with that error.
+own `timeout` rather than using `config.timeout`; the deadline covers requests and poll delays.
+An Esplora HTTP 404 means the transaction is not indexed yet and is retried. Other query errors
+return immediately. An in-flight lookup cannot extend the caller's deadline.
 
 ### Arbitrary node RPC
 
@@ -140,7 +142,12 @@ underscores. Anything else is `NigiriError::InvalidRequest`. The bound exists be
 runtime-computed name reaches `NigiriError` and therefore caller logs.
 
 Requests use JSON-RPC 1.0 with a constant id (`"nigiri-rs"`), which is safe while each POST carries
-one request whose response is fully read before the next call.
+one request with its own response. Responses must contain `result`, `error`, and a matching string
+`id`. An explicit `null` result is valid for unit-returning calls; a missing result is invalid.
+Duplicate fields and simultaneous non-null result/error values are rejected. A valid error envelope
+retains its RPC code even on HTTP 500; an unsuccessful HTTP status never becomes a successful RPC.
+Both HTTP adapters stop reading as soon as `max_response_bytes` is exceeded and classify request
+and body-read timeouts as `NigiriError::Timeout`.
 
 ### Liquid-only methods
 
@@ -155,7 +162,9 @@ enforced by `compile_fail` doctests.
 `mint` derives the asset ID from a JSON contract it builds itself (domain `nigiri-rs.invalid`,
 precision 0, zeroed issuer pubkey), so identical inputs produce a different asset ID than Nigiri's
 own `mint` command. It calls `issueasset` then `sendtoaddress`, and **those are not atomic**: if the
-send fails after issuance, the asset exists anyway. Retrying can create a second asset.
+send fails after issuance, the asset exists anyway. `NigiriError::AssetTransferFailed` retains
+its native asset ID, issuance transaction/input, and underlying transfer error for recovery.
+Retrying `mint` can create a second asset.
 
 Neither method mines. Follow them with `generate_to_address` if you need confirmation. See
 [How to work with Liquid assets](how-to-work-with-liquid-assets.md).
@@ -236,7 +245,9 @@ test named `naive_liquid_override_of_only_the_two_urls_keeps_bitcoins_electrum_p
 | `MAX_RESPONSE_BYTES_LIMIT` | `16 * 1024 * 1024` (16 MiB) | Largest accepted `max_response_bytes`. |
 
 One limit covers every response body, node JSON-RPC and Esplora alike. A body past the limit is
-rejected with `NigiriError::InvalidResponse` rather than buffered. Raise it for methods with large
+stopped immediately instead of drained to EOF. Successful Esplora bodies and RPC bodies over the
+limit produce `NigiriError::InvalidResponse`; Esplora HTTP errors retain a bounded, redacted
+`HttpStatus` body with a truncation marker. Raise the limit for methods with large
 results such as `listunspent`, `listtransactions`, or `getblock <hash> 2`.
 
 The 30-second default timeout has no public constant.
@@ -338,8 +349,8 @@ let peg = Peg::connect(
 There is deliberately no infallible constructor. `connect` reads the Liquid node's
 `getsidechaininfo` and compares its reported `parent_blockhash` against the Bitcoin node's
 `getblockhash 0`. A mismatch is `NigiriError::PegNotConfigured`, whose detail names both hashes. The
-reported `pegin_confirmation_depth` is cached at the same time, which is why the accessor for it
-below costs no round trip.
+reported `pegin_confirmation_depth` and `pegged_asset` are cached at the same time. Release
+validation uses that asset ID, and the depth accessor below costs no round trip.
 
 #### What `connect` proves, and what it does not
 
@@ -415,11 +426,15 @@ number measured once, on one machine, against one image.
 So one peg-in mines at least `pegin_confirmation_depth()` blocks and at most
 `pegin_confirmation_depth() + 20`. Assert `>=`, never `==`.
 
-Only `NigiriError::PegInImmature` and `NigiriError::RpcFailed` are treated as retryable; the node's
-rejection of a premature claim arrives as the latter. Any other error returns immediately rather than
-spending twenty blocks on something mining cannot fix. The decision is made on the error variant, not
-on the node's message text, which carries no compatibility promise. If the twenty blocks run out, the
-last retryable error is returned.
+Only the pinned Elements 23.3.3 maturity rejection is retried: method `claimpegin`, code `-8`,
+and message `Peg-in Bitcoin transaction needs more confirmations to be sent.` must all match.
+The same code also reports permanent invalid parameters, so it is insufficient by itself. Other
+RPC errors, unknown messages, and transport/response failures return immediately. An immature
+deposit discovered before submission also returns immediately. If twenty extra blocks are
+exhausted, the last maturity rejection is returned. Custom node versions can use `claim_peg_in`
+and supply their own retry policy.
+
+This classification follows the [pinned Elements implementation](https://github.com/ElementsProject/elements/blob/elements-23.3.3/src/wallet/rpc/elements.cpp#L981-L984).
 
 The deposit and its merkle proof are fetched once, before the loop: once mature, neither can change,
 so every retry resubmits the same pair instead of asking the Bitcoin node again.
@@ -451,8 +466,9 @@ consumer that encodes it wrongly gets no payout, exactly as on liquidv1.
 
 | Outcome | Result |
 | --- | --- |
-| A peg-out for this pair, decoded | `Ok(PegOut)` |
+| Exactly one peg-out for this parent, with the configured explicit pegged asset | `Ok(PegOut)` |
 | Its destination script is not a standard address, or its value is missing or unreadable | `NigiriError::PegOutputMalformed` |
+| Asset is missing or differs from `pegged_asset`, or multiple outputs name this parent | `NigiriError::PegOutputMalformed` |
 | Every peg-out-shaped output names a different parent chain | `NigiriError::PegOutputMalformed`, detail naming both chains |
 | No peg-out-shaped output at all | `NigiriError::PegOutputNotFound` |
 
@@ -461,7 +477,9 @@ may follow it; the mismatch is reported only if nothing better is found. A same-
 cannot be read is reported immediately — moving past it would hide a real problem with a real
 peg-out.
 
-Like `faucet`, the release mines exactly one confirming block.
+All validation completes before payment. The helper accepts unconfirmed Liquid transactions and
+keeps no release history: repeated calls, including through clones, pay again. Callers own
+confirmation and replay policy. Like `faucet`, a release mines exactly one Bitcoin confirming block.
 
 #### Peg-out has no reserve
 
@@ -659,8 +677,9 @@ their own RPC records.
 
 ## Lightning client API
 
-Enable the facade's `lnd` feature. `fixtures` implies it, but host-managed use does not need
-fixtures. `nigiri-rs-lnd` is independent of `nigiri-rs-core`; generated LND, Tonic, and Prost types
+Enable the facade's `lnd` feature for host-managed clients. `lightning-fixtures` enables both
+`lnd` and `fixtures` and exposes `LndPair`; `fixtures` alone provides Bitcoin/Liquid fixtures.
+Direct `nigiri-rs-fixtures` users enable its `lnd` feature for `LndPair`. `nigiri-rs-lnd` is independent of `nigiri-rs-core`; generated LND, Tonic, and Prost types
 are private, and no public signature exposes them.
 
 ### `LndConfig`
@@ -731,7 +750,8 @@ operational methods as `LndClient`: `get_info`, `new_address`, `wallet_balance`,
 `list_peers`, `open_channel`, `list_channels`, `create_invoice`, `lookup_invoice`, `pay_invoice`, and
 `lookup_payment`. Each returns `impl Future + Send`. `LndClient` implements it with `LndError`; the
 inherent and trait methods share one implementation path. The trait is not an object-safe generated
-RPC surface and does not promise another Lightning implementation.
+RPC surface. Downstream test doubles and adapters can construct all successful response records
+through the validated public constructors below; the crate supplies the LND adapter.
 
 ### Amounts and request records
 
@@ -748,7 +768,20 @@ whole satoshi.
 
 ### Response records and states
 
-All records are crate-owned and expose read-only accessors:
+All records are crate-owned and expose read-only accessors. Public construction validates domain
+invariants without contacting LND; failures return `LndError::InvalidRequest`:
+
+| Constructor | Validation |
+| --- | --- |
+| `NodeInfo::try_new(public_key, alias, version, block_height, network, synced_to_chain, synced_to_graph)` | Requires a nonempty network; the public key is already a parsed `PublicKey`. |
+| `WalletBalance::try_new(total, confirmed, unconfirmed)` | Checks addition overflow and requires total to equal confirmed plus unconfirmed. |
+| `Peer::try_new(public_key, address, connected)` | Validates and normalizes the host-and-port address. |
+| `Channel::try_new(channel_point, remote_public_key, active, capacity, local_balance, remote_balance)` | Requires the sum of millisatoshi balances to fit the satoshi capacity. |
+| `InvoiceRecord::from_invoice(invoice, state)` | Requires an amount-bearing parsed `Bolt11Invoice` and derives its hash and amount. |
+| `PaymentRecord::try_new(payment_hash, preimage, value, fee, state)` | Requires a preimage for `Succeeded` and checks any supplied preimage against the hash. |
+
+Identifiers, keys, amounts, and states use the same types as their corresponding accessors:
+
 
 | Record | Accessors |
 | --- | --- |
@@ -774,10 +807,16 @@ authenticated `LndConfig` from LND's returned admin macaroon. Passwords must be 
 bytes; seed words are capped at 1 KiB each. The password and generated seed are not returned or
 retained.
 
+Bootstrap validates endpoint, certificate, and timeout independently of macaroon authentication;
+the validated TLS settings are reused when the returned admin macaroon is attached. Its parsed
+HTTPS URL accepts the default port 443, including `https://localhost:443` normalized by `Url` to
+`https://localhost/`. The string-based `LndConfig` constructors still require an explicit port.
+
 The function does not blindly retry. Once `InitWallet` is sent, a timeout, missing response, or
 invalid returned macaroon is `OutcomeUnknown` because the wallet may already exist. `LndPair`
 retries only known transient failures whose operation is still `generate wallet seed`, using the
-same password and original deadline; it never retries `InitWallet`.
+same password and original deadline; it never retries `InitWallet`. Retry classification uses
+the `code` field of `LndError::Status` (`LndStatusCode`), not diagnostic text.
 
 ### Protocol baseline constants
 

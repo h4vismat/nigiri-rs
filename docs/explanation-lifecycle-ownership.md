@@ -73,6 +73,16 @@ cannot finish in the remaining budget, the public start returns on time while th
 supervisor continues best-effort reverse-order cleanup under per-request Docker bounds rather than
 leaking ownership into the client handles.
 
+The same coordinator ownership now protects `PegPair`: Liquid teardown finishes before Bitcoin
+and its shared network are removed, including when startup fails or its caller is cancelled.
+The public deadline can expire while this ordered cleanup continues.
+
+Single-chain startup delivers its original error before slow background cleanup can replace it
+with a generic timeout. Mutating Docker create requests are owned independently of the awaiting
+startup future: cancellation waits for their completion in the supervisor before taking down the
+resource ledger. This covers a late successful response; a process kill or an uncertain transport
+failure can still leave resources.
+
 Both can be used in the same test suite.
 
 ## Trade-offs

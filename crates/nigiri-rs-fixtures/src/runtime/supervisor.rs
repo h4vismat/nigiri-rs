@@ -27,6 +27,7 @@ pub(crate) struct RunningContainer {
 pub(crate) struct Startup<E: ContainerEngine> {
     engine: E,
     ledger: Arc<Mutex<ResourceLedger>>,
+    mutations: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     cancelled: watch::Receiver<bool>,
     labels: HashMap<String, String>,
 }
@@ -39,11 +40,16 @@ impl<E: ContainerEngine> Startup<E> {
             .expect_network(name.clone());
         let engine = self.engine.clone();
         let labels = self.labels.clone();
-        let id = self.run(engine.create_network(&name, labels)).await?;
-        self.ledger
-            .lock()
-            .expect("resource ledger is not poisoned")
-            .confirm_network(&name, id);
+        let ledger = Arc::clone(&self.ledger);
+        self.settle_mutation(async move {
+            let id = engine.create_network(&name, labels).await?;
+            ledger
+                .lock()
+                .expect("resource ledger is not poisoned")
+                .confirm_network(&name, id);
+            Ok(())
+        })
+        .await?;
         Ok(())
     }
 
@@ -58,6 +64,7 @@ impl<E: ContainerEngine> Startup<E> {
     /// Starts two already-validated specifications concurrently while reserving their cleanup
     /// order deterministically. Alice is reserved before Bob, so reverse-order teardown always
     /// removes Bob first even if its engine calls happen to finish first.
+    #[cfg(feature = "lnd")]
     pub(crate) async fn start_container_pair(
         &mut self,
         first: ContainerSpec,
@@ -83,10 +90,12 @@ impl<E: ContainerEngine> Startup<E> {
             .expect_container(name.to_owned());
     }
 
+    #[cfg(feature = "lnd")]
     fn branch(&self) -> Self {
         Self {
             engine: self.engine.clone(),
             ledger: Arc::clone(&self.ledger),
+            mutations: Arc::clone(&self.mutations),
             cancelled: self.cancelled.clone(),
             labels: self.labels.clone(),
         }
@@ -101,11 +110,18 @@ impl<E: ContainerEngine> Startup<E> {
 
         let engine = self.engine.clone();
         let labels = self.labels.clone();
-        let id = self.run(engine.create_container(&spec, labels)).await?;
-        self.ledger
-            .lock()
-            .expect("resource ledger is not poisoned")
-            .confirm_container(&spec.name, id.clone());
+        let ledger = Arc::clone(&self.ledger);
+        let create_spec = spec.clone();
+        let id = self
+            .settle_mutation(async move {
+                let id = engine.create_container(&create_spec, labels).await?;
+                ledger
+                    .lock()
+                    .expect("resource ledger is not poisoned")
+                    .confirm_container(&create_spec.name, id.clone());
+                Ok(id)
+            })
+            .await?;
 
         let engine = self.engine.clone();
         self.run(engine.start_container(&id)).await?;
@@ -129,10 +145,7 @@ impl<E: ContainerEngine> Startup<E> {
         self.run(engine.logs(id_or_name)).await
     }
 
-    #[allow(
-        dead_code,
-        reason = "Task 6 file reads are consumed by the Task 7 LndPair startup"
-    )]
+    #[cfg(any(feature = "lnd", test))]
     pub(crate) async fn read_container_file(
         &mut self,
         id: &str,
@@ -177,6 +190,31 @@ impl<E: ContainerEngine> Startup<E> {
         }
     }
 
+    /// Docker may commit creation after the waiting caller disappears. Keep the request and its
+    /// ledger confirmation alive on the owning runtime; teardown joins it before removing names.
+    async fn settle_mutation<T: Send + 'static>(
+        &mut self,
+        operation: impl Future<Output = EngineResult<T>> + Send + 'static,
+    ) -> EngineResult<T> {
+        if *self.cancelled.borrow() {
+            return Err(cancelled_error());
+        }
+        let (sender, receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = sender.send(operation.await);
+        });
+        self.mutations
+            .lock()
+            .expect("mutation registry is not poisoned")
+            .push(task);
+        self.run_until_cancelled(receiver).await?.map_err(|_| {
+            EngineError::new(
+                "settle container engine mutation",
+                std::io::Error::other("mutation task stopped"),
+            )
+        })?
+    }
+
     async fn run<T>(
         &mut self,
         operation: impl Future<Output = EngineResult<T>>,
@@ -205,39 +243,6 @@ impl RuntimeHandle {
                     std::io::Error::other("fixture supervisor stopped without reporting cleanup"),
                 )
             })?;
-        let joined = self.join_thread();
-        cleanup.and(joined)
-    }
-
-    /// Signals cleanup and waits only through a composite startup's remaining budget.
-    ///
-    /// When that budget expires the thread handle is deliberately detached. The dedicated
-    /// supervisor continues best-effort reverse-order cleanup, but the failed public startup call
-    /// is no longer coupled to Docker's per-request timeout.
-    pub(crate) async fn shutdown_within(mut self, deadline: &Deadline) -> EngineResult<()> {
-        self.signal_shutdown();
-        let mut completion = self
-            .completion
-            .take()
-            .expect("runtime completion is awaited once");
-        let cleanup = match deadline
-            .run(
-                "fixture cleanup",
-                "waiting for reverse-order fixture cleanup",
-                &mut completion,
-            )
-            .await
-        {
-            Ok(Ok(cleanup)) => cleanup,
-            Ok(Err(_)) => Err(EngineError::new(
-                "wait for fixture cleanup",
-                std::io::Error::other("fixture supervisor stopped without reporting cleanup"),
-            )),
-            Err(_) => {
-                self.thread = None;
-                return Err(cleanup_deadline_error());
-            }
-        };
         let joined = self.join_thread();
         cleanup.and(joined)
     }
@@ -430,6 +435,7 @@ where
     let (result_sender, result_receiver) = oneshot::channel();
     let (completed_sender, completed_receiver) = sync_channel(1);
 
+    let publish_before_cleanup = matches!(&wait, CancellationWait::Deadline(_));
     let thread = std::thread::Builder::new()
         .name("nigiri-rs-fixture".to_owned())
         .spawn(move || {
@@ -451,9 +457,11 @@ where
 
             runtime.block_on(async move {
                 let ledger = Arc::new(Mutex::new(ResourceLedger::default()));
+                let mutations = Arc::new(Mutex::new(Vec::new()));
                 let startup = Startup {
                     engine: engine.clone(),
                     ledger: Arc::clone(&ledger),
+                    mutations: Arc::clone(&mutations),
                     cancelled: cancel_receiver,
                     labels: HashMap::from([(
                         "nigiri-rs.fixture".to_owned(),
@@ -482,14 +490,20 @@ where
                         if result_sender.send(Ok((value, handle))).is_ok() {
                             let _ = shutdown_receiver.await;
                         }
-                        let _ = completion_sender.send(cleanup(&engine, &ledger).await);
+                        let _ = completion_sender.send(cleanup(&engine, &ledger, &mutations).await);
                     }
                     Ok(Err(error)) => {
-                        let _ = cleanup(&engine, &ledger).await;
-                        let _ = result_sender.send(Err(error));
+                        if publish_before_cleanup {
+                            let _ = result_sender.send(Err(error));
+                            let _ = cleanup(&engine, &ledger, &mutations).await;
+                        } else {
+                            // A dependency coordinator must not tear down its network before us.
+                            let _ = cleanup(&engine, &ledger, &mutations).await;
+                            let _ = result_sender.send(Err(error));
+                        }
                     }
                     Err(payload) => {
-                        let _ = cleanup(&engine, &ledger).await;
+                        let _ = cleanup(&engine, &ledger, &mutations).await;
                         let message = payload
                             .downcast_ref::<&str>()
                             .copied()
@@ -528,7 +542,12 @@ where
             Ok((value, handle))
         }
         Err(error) => {
-            cancellation.join_completed();
+            if matches!(&cancellation.wait, CancellationWait::Deadline(_)) {
+                // The supervisor retains the ledger and owns all teardown after error delivery.
+                drop(cancellation.disarm());
+            } else {
+                cancellation.join_completed();
+            }
             Err(error)
         }
     }
@@ -660,7 +679,14 @@ where
 async fn cleanup<E: ContainerEngine>(
     engine: &E,
     ledger: &Arc<Mutex<ResourceLedger>>,
+    mutations: &Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 ) -> EngineResult<()> {
+    let pending =
+        std::mem::take(&mut *mutations.lock().expect("mutation registry is not poisoned"));
+    for mutation in pending {
+        let _ = mutation.await;
+    }
+
     let resources = ledger
         .lock()
         .expect("resource ledger is not poisoned")
@@ -696,16 +722,6 @@ pub(super) fn cancelled_error() -> EngineError {
     )
 }
 
-fn cleanup_deadline_error() -> EngineError {
-    EngineError::new(
-        "wait for fixture cleanup",
-        std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "fixture cleanup exceeded the remaining startup deadline",
-        ),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -734,12 +750,40 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeEngine {
         block_create: bool,
+        block_network: bool,
+        create_release: Arc<Notify>,
+        committed: Arc<Mutex<Vec<String>>>,
+        commit_finished: Arc<Notify>,
+        block_remove: bool,
+        remove_release: Arc<Notify>,
         block_read: bool,
         create_entered: Arc<Notify>,
         read_entered: Arc<Notify>,
         read_contents: Arc<Mutex<Vec<u8>>>,
         read_requests: Arc<Mutex<Vec<(String, String, usize)>>>,
         removed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FakeEngine {
+        /// The server owns this commit independently of the client's request future. Dropping
+        /// that future cannot cancel creation or prevent the server from publishing its resource.
+        async fn delayed_commit(&self, id: String) -> EngineResult<String> {
+            let release = Arc::clone(&self.create_release);
+            let committed = Arc::clone(&self.committed);
+            let finished = Arc::clone(&self.commit_finished);
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                runtime.block_on(release.notified());
+                committed.lock().unwrap().push(id.clone());
+                finished.notify_one();
+                let _ = sender.send(id);
+            });
+            self.create_entered.notify_one();
+            Ok(receiver.await.unwrap())
+        }
     }
 
     impl ContainerEngine for FakeEngine {
@@ -752,7 +796,11 @@ mod tests {
             name: &str,
             _labels: HashMap<String, String>,
         ) -> EngineResult<String> {
-            Ok(format!("{name}-id"))
+            if self.block_network {
+                self.delayed_commit(format!("{name}-id")).await
+            } else {
+                Ok(format!("{name}-id"))
+            }
         }
 
         async fn ensure_image(
@@ -767,12 +815,12 @@ mod tests {
             spec: &crate::runtime::spec::ContainerSpec,
             _labels: HashMap<String, String>,
         ) -> EngineResult<String> {
-            self.create_entered.notify_waiters();
             if self.block_create {
-                std::future::pending().await
-            } else {
-                Ok(format!("{}-id", spec.name))
+                return self.delayed_commit(format!("{}-id", spec.name)).await;
             }
+            let id = format!("{}-id", spec.name);
+            self.committed.lock().unwrap().push(id.clone());
+            Ok(id)
         }
 
         async fn start_container(&self, _id: &str) -> EngineResult<()> {
@@ -807,6 +855,7 @@ mod tests {
         }
 
         async fn remove_container(&self, id_or_name: &str) -> EngineResult<()> {
+            self.committed.lock().unwrap().retain(|id| id != id_or_name);
             self.removed
                 .lock()
                 .expect("removal log is not poisoned")
@@ -815,6 +864,10 @@ mod tests {
         }
 
         async fn remove_network(&self, id_or_name: &str) -> EngineResult<()> {
+            if self.block_remove {
+                self.remove_release.notified().await;
+            }
+            self.committed.lock().unwrap().retain(|id| id != id_or_name);
             self.removed
                 .lock()
                 .expect("removal log is not poisoned")
@@ -924,54 +977,110 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_the_caller_removes_a_container_whose_create_never_answered() {
+    async fn cancellation_settles_late_create_commit_before_cleanup() {
+        for network in [false, true] {
+            let engine = FakeEngine {
+                block_create: !network,
+                block_network: network,
+                ..FakeEngine::default()
+            };
+            let observed = engine.clone();
+            let entered = engine.create_entered.clone();
+            let spec = node_spec::<Bitcoin>(
+                ContainerImage::bitcoind_default(),
+                "fixture-network".to_owned(),
+                "bitcoin-node".to_owned(),
+                Vec::new(),
+            )
+            .unwrap();
+            let caller = tokio::spawn(supervise(
+                engine,
+                Deadline::new(Duration::from_millis(50)).unwrap(),
+                move |mut startup| async move {
+                    if network {
+                        startup.create_network("fixture-network".into()).await
+                    } else {
+                        startup.start_container(spec).await.map(|_| ())
+                    }
+                },
+            ));
+            tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                .await
+                .unwrap();
+            caller.abort();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), caller)
+                    .await
+                    .expect("public cancellation remains bounded")
+                    .is_err()
+            );
+            let premature_cleanup = !observed.removed.lock().unwrap().is_empty();
+            observed.create_release.notify_one();
+            tokio::time::timeout(Duration::from_secs(1), observed.commit_finished.notified())
+                .await
+                .expect("the external server commits even after caller cancellation");
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if !observed.removed.lock().unwrap().is_empty()
+                        && observed.committed.lock().unwrap().is_empty()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("every externally committed resource must eventually be removed");
+            assert!(
+                !premature_cleanup,
+                "cleanup cannot race an unsettled create"
+            );
+            assert_eq!(
+                *observed.removed.lock().unwrap(),
+                [if network {
+                    "fixture-network-id"
+                } else {
+                    "bitcoin-node-id"
+                }]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concrete_failure_is_delivered_before_blocked_cleanup() {
         let engine = FakeEngine {
-            block_create: true,
+            block_remove: true,
             ..FakeEngine::default()
         };
         let observed = engine.clone();
-        let entered = engine.create_entered.clone();
-        let spec = node_spec::<Bitcoin>(
-            ContainerImage::bitcoind_default(),
-            "fixture-network".to_owned(),
-            "bitcoin-node".to_owned(),
-            Vec::new(),
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            supervise(
+                engine,
+                Deadline::new(Duration::from_secs(2)).unwrap(),
+                |mut startup| async move {
+                    startup.create_network("fixture-network".into()).await?;
+                    Err::<(), _>(EngineError::new(
+                        "concrete startup failure",
+                        std::io::Error::other("node rejected configuration"),
+                    ))
+                },
+            ),
         )
-        .expect("the pinned Bitcoin specification is valid");
-
-        let caller = tokio::spawn(supervise(
-            engine,
-            test_deadline(),
-            move |mut startup| async move { startup.start_container(spec).await },
-        ));
-        tokio::time::timeout(Duration::from_secs(1), entered.notified())
-            .await
-            .expect("container creation must begin");
-        caller.abort();
-
+        .await;
+        observed.remove_release.notify_one();
+        let error = match result {
+            Ok(Err(error)) => error,
+            _ => panic!("cleanup hid the original error"),
+        };
+        assert_eq!(error.operation(), "concrete startup failure");
         tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if !observed
-                    .removed
-                    .lock()
-                    .expect("removal log is not poisoned")
-                    .is_empty()
-                {
-                    break;
-                }
+            while observed.removed.lock().unwrap().is_empty() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("the supervisor must clean up after caller cancellation");
-
-        assert_eq!(
-            *observed
-                .removed
-                .lock()
-                .expect("removal log is not poisoned"),
-            ["bitcoin-node"]
-        );
+        .expect("background supervisor retains cleanup ownership");
     }
 
     #[tokio::test]

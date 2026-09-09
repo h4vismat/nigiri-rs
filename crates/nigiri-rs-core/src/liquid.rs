@@ -10,7 +10,8 @@ impl NigiriClient<Liquid> {
     /// Nigiri's `mint` command.
     ///
     /// This operation is not atomic: if `issueasset` succeeds but `sendtoaddress`
-    /// fails, the asset remains issued. Inspect the node state before retrying.
+    /// fails, [`NigiriError::AssetTransferFailed`] retains the asset ID and issuance
+    /// input for recovery. The asset remains issued; do not repeat issuance blindly.
     pub async fn mint(
         &self,
         address: &str,
@@ -46,7 +47,15 @@ impl NigiriClient<Liquid> {
                 issued.asset.to_string(),
             ),
         )
-        .await?;
+        .await
+        .map_err(|source| NigiriError::AssetTransferFailed {
+            asset: issued.asset,
+            issuance_txin: IssuanceTxIn {
+                txid: issued.txid,
+                vin: issued.vin,
+            },
+            source: Box::new(source),
+        })?;
         Ok(MintResponse {
             asset: issued.asset,
             txid,
@@ -332,14 +341,32 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(
-            error,
-            NigiriError::RpcFailed {
-                code: -6,
-                ref message,
-                ..
-            } if message == "Insufficient funds"
-        ));
+        assert!(
+            error.to_string().contains(ASSET),
+            "must retain issued asset: {error}"
+        );
+        assert!(
+            error.to_string().contains(ISSUE_TXID),
+            "must retain issuance input: {error}"
+        );
+        match error {
+            NigiriError::AssetTransferFailed {
+                asset,
+                issuance_txin,
+                source,
+            } => {
+                assert_eq!(asset.to_string(), ASSET);
+                assert_eq!(
+                    issuance_txin,
+                    IssuanceTxIn {
+                        txid: ISSUE_TXID.parse().unwrap(),
+                        vin: 2
+                    }
+                );
+                assert!(matches!(*source, NigiriError::RpcFailed { code: -6, .. }));
+            }
+            error => panic!("unexpected error: {error}"),
+        }
         let requests = requests.await.unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["method"], "issueasset");

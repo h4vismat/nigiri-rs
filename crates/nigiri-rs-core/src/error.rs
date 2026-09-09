@@ -60,6 +60,15 @@ pub enum NigiriError {
         #[source]
         source: Box<NigiriError>,
     },
+    /// Asset issuance succeeded, but its subsequent transfer failed. Retain this
+    /// data to recover the existing issuance instead of minting a second asset.
+    #[error("asset {asset} was issued at {issuance_txin:?}, but its transfer failed")]
+    AssetTransferFailed {
+        asset: elements::AssetId,
+        issuance_txin: crate::IssuanceTxIn,
+        #[source]
+        source: Box<NigiriError>,
+    },
     /// A Liquid transaction expected to carry a peg-out carried none.
     #[error("no peg-out output in Liquid transaction {liquid_txid}")]
     PegOutputNotFound { liquid_txid: String },

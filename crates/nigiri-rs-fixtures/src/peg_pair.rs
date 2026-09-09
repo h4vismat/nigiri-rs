@@ -1,12 +1,15 @@
 //! A Bitcoin and Liquid pair wired for Liquid's peg: four containers, one network.
 
-use std::{fmt, time::Duration};
+use std::{fmt, future::Future, time::Duration};
 
 use nigiri_rs_core::{Bitcoin, Liquid, NigiriClient, Peg};
 
 use crate::{
-    ContainerImage, Fixture, FixtureError, RPC_PASSWORD, RPC_USER, chain::FixtureChain,
+    ContainerImage, Fixture, FixtureError, RPC_PASSWORD, RPC_USER,
+    chain::FixtureChain,
     deadline::Deadline,
+    fixture::FixtureStartupOwner,
+    runtime::{CoordinatorCancellation, cancelled_startup_error, coordinate_startup},
 };
 
 /// Four containers rather than two, so twice the standalone fixture's budget.
@@ -204,54 +207,165 @@ impl PegPairBuilder {
 
         let deadline = Deadline::new(self.startup_timeout)?;
 
-        let bitcoin = Fixture::<Bitcoin>::builder()
-            .node_image(self.bitcoind_image)
-            .electrs_image(self.bitcoin_electrs_image)
-            .start_under(&deadline)
+        let started = self
+            .start_with_environment(RealPegEnvironment, deadline)
             .await?;
-
-        let liquid = match Fixture::<Liquid>::builder()
-            .node_image(self.elements_image)
-            .electrs_image(self.liquid_electrs_image)
-            .network(bitcoin.network_name().to_owned())
-            .extra_node_args(peg_node_args(bitcoin.node_container_name()))
-            .start_under(&deadline)
-            .await
-        {
-            Ok(liquid) => liquid,
-            // The Liquid half failed against a Bitcoin node whose log only that fixture holds.
-            Err(error) => {
-                let error = bitcoin.attach_inner_logs(&deadline, error).await;
-                let _ = bitcoin.shutdown_within(&deadline).await;
-                return Err(error);
-            }
-        };
-
-        // Run here rather than left to the first peg call: a parent-chain disagreement is then a
-        // startup failure, charged to the same clock as everything above it. Note how narrow that
-        // is — `Peg::connect` only compares the two reported parent chains, which catches an
-        // Elements image built for a different parent chain and cannot tell a wired pair from two
-        // unrelated nodes. Wiring is guaranteed by `peg_node_args` and the shared network above,
-        // not by this check. A disagreement surfaces as `NigiriError::PegNotConfigured`, whose
-        // detail already names both chains' block hashes; `FixtureError::Client` has no diagnostics
-        // field to attach a container log to, so none is.
-        let paired = deadline
-            .run(
-                PEG_SERVICE,
-                "verifying both chains report the same parent",
-                Peg::connect(bitcoin.client().clone(), liquid.client().clone()),
-            )
-            .await?;
-        let peg = match paired {
-            Ok(peg) => peg,
-            Err(source) => return Err(FixtureError::Client(source)),
-        };
-
         Ok(PegPair {
-            handles: PegHandles { liquid, bitcoin },
-            peg,
+            handles: started.handles,
+            peg: started.peg,
         })
     }
+
+    async fn start_with_environment<E: PegEnvironment>(
+        self,
+        environment: E,
+        deadline: Deadline,
+    ) -> Result<StartedPegPair<E>, FixtureError> {
+        let work_deadline = deadline.clone();
+        let coordinated = coordinate_startup(
+            deadline.clone(),
+            move |mut cancellation| async move {
+                start_peg_stacks(self, environment, work_deadline, &mut cancellation).await
+            },
+            std::future::ready(()),
+        );
+        deadline
+            .run(
+                PEG_SERVICE,
+                "coordinating complete peg startup",
+                coordinated,
+            )
+            .await?
+    }
+}
+
+struct StartedPegPair<E: PegEnvironment> {
+    handles: PegHandles<E::LiquidStack, E::BitcoinStack>,
+    peg: E::ConnectedPeg,
+}
+
+/// Lifecycle boundary used to exercise real coordinator ownership without running Docker.
+trait PegEnvironment: Send + 'static {
+    type BitcoinStack: Send + 'static;
+    type LiquidStack: Send + 'static;
+    type ConnectedPeg: Send + 'static;
+    fn start_bitcoin(
+        &self,
+        builder: &PegPairBuilder,
+        deadline: &Deadline,
+        owner: FixtureStartupOwner,
+    ) -> impl Future<Output = Result<Self::BitcoinStack, FixtureError>>;
+    fn start_liquid(
+        &self,
+        builder: &PegPairBuilder,
+        bitcoin: &Self::BitcoinStack,
+        deadline: &Deadline,
+        owner: FixtureStartupOwner,
+    ) -> impl Future<Output = Result<Self::LiquidStack, FixtureError>>;
+    fn connect(
+        &self,
+        bitcoin: &Self::BitcoinStack,
+        liquid: &Self::LiquidStack,
+    ) -> impl Future<Output = Result<Self::ConnectedPeg, FixtureError>>;
+    fn attach_bitcoin_logs(
+        &self,
+        bitcoin: &Self::BitcoinStack,
+        deadline: &Deadline,
+        error: FixtureError,
+    ) -> impl Future<Output = FixtureError>;
+    fn shutdown_bitcoin(&self, bitcoin: Self::BitcoinStack) -> impl Future<Output = ()>;
+}
+
+struct RealPegEnvironment;
+impl PegEnvironment for RealPegEnvironment {
+    type BitcoinStack = Fixture<Bitcoin>;
+    type LiquidStack = Fixture<Liquid>;
+    type ConnectedPeg = Peg;
+    async fn start_bitcoin(
+        &self,
+        builder: &PegPairBuilder,
+        deadline: &Deadline,
+        owner: FixtureStartupOwner,
+    ) -> Result<Self::BitcoinStack, FixtureError> {
+        Fixture::<Bitcoin>::builder()
+            .node_image(builder.bitcoind_image.clone())
+            .electrs_image(builder.bitcoin_electrs_image.clone())
+            .start_under_with_owner(deadline, owner)
+            .await
+    }
+    async fn start_liquid(
+        &self,
+        builder: &PegPairBuilder,
+        bitcoin: &Self::BitcoinStack,
+        deadline: &Deadline,
+        owner: FixtureStartupOwner,
+    ) -> Result<Self::LiquidStack, FixtureError> {
+        Fixture::<Liquid>::builder()
+            .node_image(builder.elements_image.clone())
+            .electrs_image(builder.liquid_electrs_image.clone())
+            .network(bitcoin.network_name().to_owned())
+            .extra_node_args(peg_node_args(bitcoin.node_container_name()))
+            .start_under_with_owner(deadline, owner)
+            .await
+    }
+    async fn connect(
+        &self,
+        bitcoin: &Self::BitcoinStack,
+        liquid: &Self::LiquidStack,
+    ) -> Result<Peg, FixtureError> {
+        Peg::connect(bitcoin.client().clone(), liquid.client().clone())
+            .await
+            .map_err(FixtureError::Client)
+    }
+    async fn attach_bitcoin_logs(
+        &self,
+        bitcoin: &Self::BitcoinStack,
+        deadline: &Deadline,
+        error: FixtureError,
+    ) -> FixtureError {
+        bitcoin.attach_inner_logs(deadline, error).await
+    }
+    async fn shutdown_bitcoin(&self, bitcoin: Self::BitcoinStack) {
+        let _ = bitcoin.shutdown().await;
+    }
+}
+
+async fn start_peg_stacks<E: PegEnvironment>(
+    builder: PegPairBuilder,
+    environment: E,
+    deadline: Deadline,
+    cancellation: &mut CoordinatorCancellation,
+) -> Result<StartedPegPair<E>, FixtureError> {
+    let bitcoin = tokio::select! {
+        biased;
+        bitcoin = environment.start_bitcoin(&builder, &deadline, FixtureStartupOwner::CompositeCoordinator) => bitcoin?,
+        () = cancellation.cancelled() => return Err(cancelled_startup_error("peg pair")),
+    };
+    // Dropping either in-flight startup waits for its owned supervisor to settle and clean up.
+    // Only this coordinator thread may wait without a deadline; the public guard can detach it.
+    let liquid = tokio::select! {
+        biased;
+        liquid = environment.start_liquid(&builder, &bitcoin, &deadline, FixtureStartupOwner::CompositeCoordinator) => liquid,
+        () = cancellation.cancelled() => Err(cancelled_startup_error("peg pair")),
+    };
+    let liquid = match liquid {
+        Ok(liquid) => liquid,
+        Err(error) => {
+            let error = environment
+                .attach_bitcoin_logs(&bitcoin, &deadline, error)
+                .await;
+            environment.shutdown_bitcoin(bitcoin).await;
+            return Err(error);
+        }
+    };
+    let handles = PegHandles { liquid, bitcoin };
+    // Holding both stacks in declaration order also protects connect failure and cancellation.
+    let peg = tokio::select! {
+        biased;
+        peg = deadline.run(PEG_SERVICE, "verifying both chains report the same parent", environment.connect(&handles.bitcoin, &handles.liquid)) => peg??,
+        () = cancellation.cancelled() => return Err(cancelled_startup_error("peg pair")),
+    };
+    Ok(StartedPegPair { handles, peg })
 }
 
 #[cfg(test)]
@@ -263,6 +377,203 @@ mod tests {
 
     use super::{PegHandles, PegPair, peg_node_args};
     use crate::{ContainerImage, node::merge_node_args};
+
+    #[derive(Clone, Default)]
+    struct SlowLiquidEngine {
+        removing_liquid: Arc<tokio::sync::Notify>,
+        release_liquid: Arc<tokio::sync::Notify>,
+        removed: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl crate::runtime::ContainerEngine for SlowLiquidEngine {
+        fn endpoint_host(&self) -> &str {
+            "127.0.0.1"
+        }
+        async fn create_network(
+            &self,
+            name: &str,
+            _: std::collections::HashMap<String, String>,
+        ) -> crate::runtime::EngineResult<String> {
+            Ok(name.to_owned())
+        }
+        async fn ensure_image(
+            &self,
+            _: &crate::runtime::ContainerSpec,
+        ) -> crate::runtime::EngineResult<()> {
+            Ok(())
+        }
+        async fn create_container(
+            &self,
+            spec: &crate::runtime::ContainerSpec,
+            _: std::collections::HashMap<String, String>,
+        ) -> crate::runtime::EngineResult<String> {
+            Ok(spec.name.clone())
+        }
+        async fn start_container(&self, id: &str) -> crate::runtime::EngineResult<()> {
+            if id == "bitcoin" {
+                return Ok(());
+            }
+            Err(crate::runtime::EngineError::new(
+                "start Liquid",
+                std::io::Error::other("Liquid configuration failed"),
+            ))
+        }
+        async fn mapped_port(&self, _: &str, port: u16) -> crate::runtime::EngineResult<u16> {
+            Ok(port)
+        }
+        async fn logs(&self, _: &str) -> crate::runtime::EngineResult<String> {
+            Ok(String::new())
+        }
+        async fn read_container_file(
+            &self,
+            _: &str,
+            _: &str,
+            _: usize,
+        ) -> crate::runtime::EngineResult<Vec<u8>> {
+            unreachable!()
+        }
+        async fn remove_container(&self, id: &str) -> crate::runtime::EngineResult<()> {
+            if id == "bitcoin" {
+                self.removed.lock().unwrap().push("bitcoin");
+                return Ok(());
+            }
+            self.removing_liquid.notify_one();
+            self.release_liquid.notified().await;
+            self.removed.lock().unwrap().push("liquid");
+            Ok(())
+        }
+        async fn remove_network(&self, _: &str) -> crate::runtime::EngineResult<()> {
+            self.removed.lock().unwrap().push("bitcoin-network");
+            Ok(())
+        }
+    }
+
+    struct FakePegEnvironment(SlowLiquidEngine);
+    impl super::PegEnvironment for FakePegEnvironment {
+        type BitcoinStack = crate::runtime::RuntimeHandle;
+        type LiquidStack = crate::runtime::RuntimeHandle;
+        type ConnectedPeg = ();
+        async fn start_bitcoin(
+            &self,
+            _: &super::PegPairBuilder,
+            deadline: &crate::deadline::Deadline,
+            owner: crate::fixture::FixtureStartupOwner,
+        ) -> Result<Self::BitcoinStack, crate::FixtureError> {
+            let work = |mut startup: crate::runtime::Startup<SlowLiquidEngine>| async move {
+                startup.create_network("bitcoin-network".into()).await?;
+                let spec = crate::runtime::node_spec::<nigiri_rs_core::Bitcoin>(
+                    ContainerImage::bitcoind_default(),
+                    "bitcoin-network".into(),
+                    "bitcoin".into(),
+                    Vec::new(),
+                )
+                .unwrap();
+                startup.start_container(spec).await.map(|_| ())
+            };
+            let (_, runtime) = match owner {
+                crate::fixture::FixtureStartupOwner::CallerDeadline => {
+                    crate::runtime::supervise(self.0.clone(), deadline.clone(), work).await?
+                }
+                crate::fixture::FixtureStartupOwner::CompositeCoordinator => {
+                    crate::runtime::supervise_for_coordinator(self.0.clone(), work).await?
+                }
+            };
+            Ok(runtime)
+        }
+        async fn start_liquid(
+            &self,
+            _: &super::PegPairBuilder,
+            _: &Self::BitcoinStack,
+            deadline: &crate::deadline::Deadline,
+            owner: crate::fixture::FixtureStartupOwner,
+        ) -> Result<Self::LiquidStack, crate::FixtureError> {
+            let spec = crate::runtime::node_spec::<nigiri_rs_core::Liquid>(
+                ContainerImage::elements_default(),
+                "bitcoin-network".into(),
+                "liquid".into(),
+                Vec::new(),
+            )?;
+            let work = |mut startup: crate::runtime::Startup<SlowLiquidEngine>| async move {
+                startup.start_container(spec).await
+            };
+            let (_, runtime) = match owner {
+                crate::fixture::FixtureStartupOwner::CallerDeadline => {
+                    crate::runtime::supervise(self.0.clone(), deadline.clone(), work).await?
+                }
+                crate::fixture::FixtureStartupOwner::CompositeCoordinator => {
+                    crate::runtime::supervise_for_coordinator(self.0.clone(), work).await?
+                }
+            };
+            Ok(runtime)
+        }
+        async fn connect(
+            &self,
+            _: &Self::BitcoinStack,
+            _: &Self::LiquidStack,
+        ) -> Result<(), crate::FixtureError> {
+            unreachable!()
+        }
+        async fn attach_bitcoin_logs(
+            &self,
+            _: &Self::BitcoinStack,
+            _: &crate::deadline::Deadline,
+            error: crate::FixtureError,
+        ) -> crate::FixtureError {
+            error
+        }
+        async fn shutdown_bitcoin(&self, bitcoin: Self::BitcoinStack) {
+            bitcoin.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_liquid_cleanup_keeps_bitcoin_and_network_alive_after_public_deadline() {
+        assert_failed_liquid_cleanup_is_ordered(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_peg_startup_keeps_bitcoin_alive_until_liquid_cleanup_finishes() {
+        assert_failed_liquid_cleanup_is_ordered(true).await;
+    }
+
+    async fn assert_failed_liquid_cleanup_is_ordered(abort_caller: bool) {
+        let engine = SlowLiquidEngine::default();
+        let deadline = crate::deadline::Deadline::new(Duration::from_millis(100)).unwrap();
+        let caller = tokio::spawn(
+            PegPair::builder().start_with_environment(FakePegEnvironment(engine.clone()), deadline),
+        );
+        tokio::time::timeout(Duration::from_secs(1), engine.removing_liquid.notified())
+            .await
+            .expect("Liquid failure begins cleanup");
+        if abort_caller {
+            caller.abort();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(1), caller)
+            .await
+            .expect("public startup and cancellation stay bounded");
+        let failed = match result {
+            Err(error) => error.is_cancelled(),
+            Ok(result) => result.is_err(),
+        };
+        let before_release = engine.removed.lock().unwrap().clone();
+        engine.release_liquid.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while engine.removed.lock().unwrap().len() < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background coordinator finishes both cleanup phases");
+        assert!(failed, "startup must fail or be cancelled");
+        assert!(
+            before_release.is_empty(),
+            "Bitcoin/network teardown raced Liquid: {before_release:?}"
+        );
+        assert_eq!(
+            *engine.removed.lock().unwrap(),
+            ["liquid", "bitcoin", "bitcoin-network"]
+        );
+    }
 
     /// Reports the order in which the pair released its inner stacks.
     struct DropOrderRecorder {
@@ -407,6 +718,7 @@ mod tests {
     // this is the one test that proves the whole assembly, so a pair that reports itself started
     // must have four containers on one network and a `Peg` that already verified the two chains
     // are paired.
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn a_started_pair_is_wired_and_reports_both_chains() {
         let pair = PegPair::start()
@@ -442,11 +754,13 @@ mod tests {
     }
 
     /// The label Docker puts on a volume it created implicitly for a container.
+    #[cfg(feature = "docker-tests")]
     const DOCKER_ANONYMOUS_VOLUME_LABEL: &str = "com.docker.volume.anonymous";
 
     // Catches a regression that leaves one of a pair's four containers, its shared network, or a
     // volume behind. A composite is where teardown is easiest to get wrong: the network belongs to
     // neither stack alone, and removing it with the first drop would strand the second.
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn explicit_shutdown_removes_every_resource_it_created() {
         use bollard::{Docker, models::MountPointTypeEnum};

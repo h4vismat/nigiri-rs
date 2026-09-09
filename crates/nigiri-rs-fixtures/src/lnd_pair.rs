@@ -39,7 +39,8 @@ const CHANNEL_CONFIRMATIONS: u64 = 6;
 const READINESS_PAYMENT: Millisats = Millisats::new(1_000);
 const READINESS_FEE_LIMIT: Millisats = Millisats::new(10_000);
 const READINESS_MEMO: &str = "nigiri-rs readiness probe";
-const LND_PEER_PORT: u16 = 9_735;
+use crate::lnd::LND_PEER_PORT;
+use nigiri_rs_lnd::LndStatusCode;
 
 /// A synchronized Bitcoin fixture and two authenticated LND clients joined by a ready channel.
 pub struct LndPair {
@@ -365,16 +366,13 @@ impl LndPairBuilder {
                 let connector = environment.connector();
                 let nodes = tokio::select! {
                     biased;
-                    nodes = start_lnd_nodes_for_coordinator(
+                    nodes = start_lnd_nodes(
                         engine,
-                        network_name,
-                        node_container_name,
-                        alice_image,
-                        bob_image,
+                        LndStartupPlan { network_name, bitcoind_name: node_container_name, alice_image, bob_image, allocation },
                         &work_deadline,
                         connector,
                         bitcoin_tip,
-                        allocation,
+                        LndStartupOwner::CompositeCoordinator,
                     ) => Some(nodes),
                     () = cancellation.cancelled() => None,
                 };
@@ -821,49 +819,27 @@ where
 {
     start_lnd_nodes(
         engine,
-        network_name,
-        bitcoind_name,
-        alice_image,
-        bob_image,
+        LndStartupPlan {
+            network_name,
+            bitcoind_name,
+            alice_image,
+            bob_image,
+            allocation,
+        },
         deadline,
         connector,
         bitcoin_tip,
-        allocation,
         LndStartupOwner::CallerDeadline,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn start_lnd_nodes_for_coordinator<E, C, B>(
-    engine: E,
+struct LndStartupPlan {
     network_name: String,
     bitcoind_name: String,
     alice_image: ContainerImage,
     bob_image: ContainerImage,
-    deadline: &Deadline,
-    connector: C,
-    bitcoin_tip: B,
     allocation: ChannelAllocation,
-) -> Result<(StartedLndNodes<C::Client>, RuntimeHandle), FixtureError>
-where
-    E: ContainerEngine,
-    C: LndNodeConnector,
-    B: BitcoinTip,
-{
-    start_lnd_nodes(
-        engine,
-        network_name,
-        bitcoind_name,
-        alice_image,
-        bob_image,
-        deadline,
-        connector,
-        bitcoin_tip,
-        allocation,
-        LndStartupOwner::CompositeCoordinator,
-    )
-    .await
 }
 
 #[derive(Clone, Copy)]
@@ -872,17 +848,12 @@ enum LndStartupOwner {
     CompositeCoordinator,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn start_lnd_nodes<E, C, B>(
     engine: E,
-    network_name: String,
-    bitcoind_name: String,
-    alice_image: ContainerImage,
-    bob_image: ContainerImage,
+    plan: LndStartupPlan,
     deadline: &Deadline,
     connector: C,
     bitcoin_tip: B,
-    allocation: ChannelAllocation,
     owner: LndStartupOwner,
 ) -> Result<(StartedLndNodes<C::Client>, RuntimeHandle), FixtureError>
 where
@@ -890,251 +861,41 @@ where
     C: LndNodeConnector,
     B: BitcoinTip,
 {
+    let LndStartupPlan {
+        network_name,
+        bitcoind_name,
+        alice_image,
+        bob_image,
+        allocation,
+    } = plan;
     let names = LndNames::scoped();
     let endpoint_host = engine.endpoint_host().to_owned();
     let work_deadline = deadline.clone();
     let supervisor_deadline = deadline.clone();
 
+    let context = LndStartupContext {
+        network_name,
+        bitcoind_name,
+        alice_image,
+        bob_image,
+        names,
+        endpoint_host,
+        deadline: work_deadline,
+        connector,
+        bitcoin_tip,
+        allocation,
+    };
     let work = move |mut startup: Startup<E>| async move {
-        let deadline = work_deadline;
-        let alice_spec = lnd_spec(
-            alice_image,
-            network_name.clone(),
-            names.alice.clone(),
-            &bitcoind_name,
-            &endpoint_host,
-        )?;
-        let bob_spec = lnd_spec(
-            bob_image,
-            network_name,
-            names.bob.clone(),
-            &bitcoind_name,
-            &endpoint_host,
-        )?;
-
-        let started = deadline
-            .run(
-                "lnd-alice",
-                "starting Alice and Bob LND containers",
-                startup.start_container_pair(alice_spec, bob_spec),
-            )
-            .await;
-        let (alice_container, bob_container) = match started {
-            Ok(started) => started,
+        let mut logs = [context.names.alice.clone(), context.names.bob.clone()];
+        match bootstrap_nodes(&mut startup, &context, &mut logs).await {
+            Ok(nodes) => Ok(nodes),
             Err(error) => {
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &names.alice,
-                    &names.bob,
-                    error,
+                Err(
+                    attach_lnd_logs(&mut startup, &context.deadline, &logs[0], &logs[1], error)
+                        .await,
                 )
-                .await);
-            }
-        };
-        let (alice_container, bob_container) = match (alice_container, bob_container) {
-            (Ok(alice), Ok(bob)) => (alice, bob),
-            (alice, bob) => {
-                let alice_log = alice
-                    .as_ref()
-                    .map_or_else(|_| names.alice.clone(), |container| container.id.clone());
-                let bob_log = bob
-                    .as_ref()
-                    .map_or_else(|_| names.bob.clone(), |container| container.id.clone());
-                let error = match (alice, bob) {
-                    (Err(error), _) => runtime_error("lnd-alice", error),
-                    (_, Err(error)) => runtime_error("lnd-bob", error),
-                    _ => unreachable!("the successful pair was handled above"),
-                };
-                return Err(
-                    attach_lnd_logs(&mut startup, &deadline, &alice_log, &bob_log, error).await,
-                );
-            }
-        };
-
-        let alice_certificate = match wait_for_tls_certificate(
-            &mut startup,
-            "lnd-alice",
-            &alice_container.id,
-            &deadline,
-        )
-        .await
-        {
-            Ok(certificate) => certificate,
-            Err(error) => {
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &alice_container.id,
-                    &bob_container.id,
-                    error,
-                )
-                .await);
-            }
-        };
-        let bob_certificate =
-            match wait_for_tls_certificate(&mut startup, "lnd-bob", &bob_container.id, &deadline)
-                .await
-            {
-                Ok(certificate) => certificate,
-                Err(error) => {
-                    return Err(attach_lnd_logs(
-                        &mut startup,
-                        &deadline,
-                        &alice_container.id,
-                        &bob_container.id,
-                        error,
-                    )
-                    .await);
-                }
-            };
-
-        let alice_endpoint = match mapped_lnd_endpoint(&alice_container) {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &alice_container.id,
-                    &bob_container.id,
-                    bootstrap_configuration_error(error),
-                )
-                .await);
-            }
-        };
-        let bob_endpoint = match mapped_lnd_endpoint(&bob_container) {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &alice_container.id,
-                    &bob_container.id,
-                    bootstrap_configuration_error(error),
-                )
-                .await);
-            }
-        };
-
-        let alice_config = LndBootstrapConfig {
-            endpoint: alice_endpoint,
-            tls_certificate: alice_certificate,
-            timeout: deadline.budget(),
-        };
-        let bob_config = LndBootstrapConfig {
-            endpoint: bob_endpoint,
-            tls_certificate: bob_certificate,
-            timeout: deadline.budget(),
-        };
-        let initialized = startup
-            .run_until_cancelled(initialize_lnd_clients(
-                &connector,
-                alice_config,
-                bob_config,
-                &deadline,
-            ))
-            .await;
-        let (alice, bob) = match initialized {
-            Ok(Ok(clients)) => clients,
-            Ok(Err(error)) => {
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &alice_container.id,
-                    &bob_container.id,
-                    error,
-                )
-                .await);
-            }
-            Err(error) => {
-                let error = runtime_error("LND pair", error);
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &alice_container.id,
-                    &bob_container.id,
-                    error,
-                )
-                .await);
-            }
-        };
-
-        let synchronized = startup
-            .run_until_cancelled(wait_for_lnd_sync(
-                &connector,
-                &alice,
-                &bob,
-                &bitcoin_tip,
-                &deadline,
-            ))
-            .await;
-        match synchronized {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &alice_container.id,
-                    &bob_container.id,
-                    error,
-                )
-                .await);
-            }
-            Err(error) => {
-                let error = runtime_error("LND pair", error);
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &alice_container.id,
-                    &bob_container.id,
-                    error,
-                )
-                .await);
             }
         }
-
-        let bootstrapped = startup
-            .run_until_cancelled(Box::pin(bootstrap_ready_channel(
-                &connector,
-                &alice,
-                &bob,
-                &bitcoin_tip,
-                &names.bob,
-                allocation,
-                &deadline,
-            )))
-            .await;
-        let channel_point = match bootstrapped {
-            Ok(Ok(channel_point)) => channel_point,
-            Ok(Err(error)) => {
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &alice_container.id,
-                    &bob_container.id,
-                    error,
-                )
-                .await);
-            }
-            Err(error) => {
-                let error = runtime_error("LND pair", error);
-                return Err(attach_lnd_logs(
-                    &mut startup,
-                    &deadline,
-                    &alice_container.id,
-                    &bob_container.id,
-                    error,
-                )
-                .await);
-            }
-        };
-
-        Ok(StartedLndNodes {
-            alice,
-            bob,
-            channel_point,
-            container_ids: [alice_container.id, bob_container.id],
-        })
     };
     let supervised = match owner {
         LndStartupOwner::CallerDeadline => {
@@ -1149,543 +910,109 @@ where
         .await?
 }
 
-async fn bootstrap_ready_channel<C: LndNodeConnector, B: BitcoinTip>(
-    connector: &C,
-    alice: &C::Client,
-    bob: &C::Client,
-    bitcoin: &B,
-    bob_host: &str,
+struct LndStartupContext<C, B> {
+    network_name: String,
+    bitcoind_name: String,
+    alice_image: ContainerImage,
+    bob_image: ContainerImage,
+    names: LndNames,
+    endpoint_host: String,
+    deadline: Deadline,
+    connector: C,
+    bitcoin_tip: B,
     allocation: ChannelAllocation,
-    deadline: &Deadline,
-) -> Result<OutPoint, FixtureError> {
-    let alice_info = lnd_operation(
-        deadline,
-        "lnd-alice",
-        "query Alice identity for channel bootstrap",
-        connector.get_info(alice),
-    )
-    .await?;
-    let bob_info = lnd_operation(
-        deadline,
-        "lnd-bob",
-        "query Bob identity for channel bootstrap",
-        connector.get_info(bob),
-    )
-    .await?;
+}
 
-    let address = lnd_operation(
-        deadline,
-        "lnd-alice",
-        "request Alice P2WPKH funding address",
-        connector.new_address(alice),
-    )
-    .await?;
-    deadline
+async fn bootstrap_nodes<E: ContainerEngine, C: LndNodeConnector, B: BitcoinTip>(
+    startup: &mut Startup<E>,
+    context: &LndStartupContext<C, B>,
+    logs: &mut [String; 2],
+) -> Result<StartedLndNodes<C::Client>, FixtureError> {
+    let deadline = &context.deadline;
+    let alice_spec = lnd_spec(
+        context.alice_image.clone(),
+        context.network_name.clone(),
+        context.names.alice.clone(),
+        &context.bitcoind_name,
+        &context.endpoint_host,
+    )?;
+    let bob_spec = lnd_spec(
+        context.bob_image.clone(),
+        context.network_name.clone(),
+        context.names.bob.clone(),
+        &context.bitcoind_name,
+        &context.endpoint_host,
+    )?;
+    let (alice, bob) = deadline
         .run(
-            "lightning-channel",
-            "fund Alice on-chain wallet and mine its confirmation",
-            bitcoin.fund_address(&address, allocation.funding_amount),
-        )
-        .await??;
-    wait_for_confirmed_balance(connector, alice, allocation.capacity, deadline).await?;
-
-    ensure_peer_connected(connector, alice, bob_info.public_key, bob_host, deadline).await?;
-    let request =
-        OpenChannelRequest::new(bob_info.public_key, allocation.capacity, allocation.push)
-            .map_err(|error| lightning_bootstrap_error("configure channel opening", error))?;
-    let channel_point =
-        open_and_confirm_channel(connector, alice, bitcoin, request, deadline).await?;
-
-    wait_for_active_channel(
-        connector,
-        alice,
-        bob,
-        bitcoin,
-        channel_point,
-        alice_info.public_key,
-        bob_info.public_key,
-        bob_host,
-        deadline,
-    )
-    .await?;
-    prove_readiness_payment(connector, alice, bob, deadline).await?;
-    Box::pin(prove_reverse_readiness_with_retry(
-        connector,
-        alice,
-        bob,
-        bitcoin,
-        channel_point,
-        alice_info.public_key,
-        bob_info.public_key,
-        bob_host,
-        deadline,
-    ))
-    .await?;
-    Ok(channel_point)
-}
-
-async fn wait_for_confirmed_balance<C: LndNodeConnector>(
-    connector: &C,
-    alice: &C::Client,
-    required: Sats,
-    deadline: &Deadline,
-) -> Result<(), FixtureError> {
-    let mut observation = format!(
-        "waiting for Alice confirmed balance to reach {} satoshis",
-        required.as_u64()
-    );
-    loop {
-        match deadline
-            .run(
-                "lnd-alice",
-                &observation,
-                connector.confirmed_balance(alice),
-            )
-            .await?
-        {
-            Ok(balance) if balance >= required => return Ok(()),
-            Ok(balance) => {
-                observation = format!(
-                    "Alice confirmed balance={} required={}",
-                    balance.as_u64(),
-                    required.as_u64()
-                );
-            }
-            Err(error) if is_transient_lnd_readiness(&error) => {
-                observation = redacted_tail(&format!("Alice wallet balance is not ready: {error}"));
-            }
-            Err(error) => {
-                return Err(lightning_bootstrap_error(
-                    "query Alice confirmed balance",
-                    error,
-                ));
-            }
-        }
-        wait_before_retry(deadline, "lnd-alice", &observation).await?;
-    }
-}
-
-async fn ensure_peer_connected<C: LndNodeConnector>(
-    connector: &C,
-    alice: &C::Client,
-    bob_public_key: PublicKey,
-    bob_host: &str,
-    deadline: &Deadline,
-) -> Result<(), FixtureError> {
-    let peer = PeerAddress::new(bob_public_key, bob_host, LND_PEER_PORT)
-        .map_err(|error| lightning_bootstrap_error("configure Bob peer address", error))?;
-    let mut observation = "waiting for Alice to connect to Bob over the private network".to_owned();
-    loop {
-        match deadline
-            .run(
-                "lightning-channel",
-                &observation,
-                connector.peer_connected(alice, bob_public_key),
-            )
-            .await?
-        {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
-            Err(error) if is_transient_lnd_readiness(&error) => {
-                observation = redacted_tail(&format!("peer listing is not ready: {error}"));
-            }
-            Err(error) => {
-                return Err(lightning_bootstrap_error(
-                    "query Alice peer connection",
-                    error,
-                ));
-            }
-        }
-
-        match deadline
-            .run(
-                "lightning-channel",
-                &observation,
-                connector.connect_peer(alice, peer.clone()),
-            )
-            .await?
-        {
-            Ok(()) => {}
-            Err(error) if is_transient_lnd_readiness(&error) || is_already_connected(&error) => {
-                observation = redacted_tail(&format!("peer connection is converging: {error}"));
-            }
-            Err(error) => {
-                return Err(lightning_bootstrap_error("connect Alice to Bob", error));
-            }
-        }
-        wait_before_retry(deadline, "lightning-channel", &observation).await?;
-    }
-}
-
-async fn open_and_confirm_channel<C: LndNodeConnector, B: BitcoinTip>(
-    connector: &C,
-    alice: &C::Client,
-    bitcoin: &B,
-    request: OpenChannelRequest,
-    deadline: &Deadline,
-) -> Result<OutPoint, FixtureError> {
-    let baseline = deadline
-        .run(
-            "lightning-channel",
-            "capture mempool before opening Alice-to-Bob channel",
-            bitcoin.mempool_transactions(),
-        )
-        .await??;
-    let open = deadline.run(
-        "lightning-channel",
-        "open Alice-to-Bob channel",
-        connector.open_channel(alice, request),
-    );
-    tokio::pin!(open);
-    let mut opened = None;
-    let mut observation = "waiting for the channel funding transaction in mempool".to_owned();
-
-    let trigger_transactions = loop {
-        let current = {
-            let mempool = deadline.run(
-                "lightning-channel",
-                &observation,
-                bitcoin.mempool_transactions(),
-            );
-            tokio::pin!(mempool);
-            tokio::select! {
-                biased;
-                result = &mut open, if opened.is_none() => {
-                    opened = Some(flatten_lnd_operation("open channel", result)?);
-                    None
-                },
-                result = &mut mempool => Some(result??),
-            }
-        };
-        let Some(current) = current else {
-            continue;
-        };
-        let newly_observed = current
-            .difference(&baseline)
-            .copied()
-            .collect::<BTreeSet<_>>();
-        if !newly_observed.is_empty() {
-            break newly_observed;
-        }
-        observation = "channel funding transaction is not yet in mempool".to_owned();
-        wait_before_retry(deadline, "lightning-channel", &observation).await?;
-    };
-
-    deadline
-        .run(
-            "lightning-channel",
-            "mine six channel funding confirmations",
-            bitcoin.mine_blocks(CHANNEL_CONFIRMATIONS),
-        )
-        .await??;
-    let channel_point = match opened {
-        Some(channel_point) => channel_point,
-        None => flatten_lnd_operation("open channel", open.await)?,
-    };
-    // This fixture owns an isolated regtest mempool. If callers inject simultaneous transactions,
-    // the trigger set may contain more than one txid, but the final funding txid must still be one
-    // of the transactions whose appearance caused this fixture to mine exactly once.
-    if !trigger_transactions.contains(&channel_point.txid) {
-        return Err(lightning_bootstrap_error(
-            "verify channel funding transaction",
-            LndError::InvalidResponse {
-                operation: "open channel".into(),
-                detail: "funding transaction was not observed before confirmation mining".into(),
-                identifier: Some(channel_point.txid.to_string()),
-            },
-        ));
-    }
-    Ok(channel_point)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn wait_for_active_channel<C: LndNodeConnector, B: BitcoinTip>(
-    connector: &C,
-    alice: &C::Client,
-    bob: &C::Client,
-    bitcoin: &B,
-    channel_point: OutPoint,
-    alice_public_key: PublicKey,
-    bob_public_key: PublicKey,
-    bob_host: &str,
-    deadline: &Deadline,
-) -> Result<(), FixtureError> {
-    let mut observation = format!("waiting for active channel {channel_point}");
-    loop {
-        ensure_peer_connected(connector, alice, bob_public_key, bob_host, deadline).await?;
-        let alice_channel = async {
-            let result = deadline
-                .run(
-                    "lnd-alice",
-                    &observation,
-                    connector.channel_readiness(alice, channel_point, bob_public_key),
-                )
-                .await?;
-            channel_observation("query Alice channel", result)
-        };
-        let bob_channel = async {
-            let result = deadline
-                .run(
-                    "lnd-bob",
-                    &observation,
-                    connector.channel_readiness(bob, channel_point, alice_public_key),
-                )
-                .await?;
-            channel_observation("query Bob channel", result)
-        };
-        let alice_info = async {
-            let result = deadline
-                .run("lnd-alice", &observation, connector.get_info(alice))
-                .await?;
-            info_observation("query Alice graph synchronization", result)
-        };
-        let bob_info = async {
-            let result = deadline
-                .run("lnd-bob", &observation, connector.get_info(bob))
-                .await?;
-            info_observation("query Bob graph synchronization", result)
-        };
-        let bitcoin_height = async {
-            deadline
-                .run("bitcoind", &observation, bitcoin.block_height())
-                .await?
-        };
-        let (alice_channel, bob_channel, alice_info, bob_info, bitcoin_height) = tokio::try_join!(
-            alice_channel,
-            bob_channel,
-            alice_info,
-            bob_info,
-            bitcoin_height,
-        )?;
-        if channel_is_spendable(alice_channel)
-            && channel_is_spendable(bob_channel)
-            && alice_info.is_some_and(|info| graph_synchronized(info, bitcoin_height))
-            && bob_info.is_some_and(|info| graph_synchronized(info, bitcoin_height))
-        {
-            return Ok(());
-        }
-        observation = format!(
-            "channel {channel_point} at Bitcoin height {bitcoin_height}: Alice={alice_channel:?} info={alice_info:?}; Bob={bob_channel:?} info={bob_info:?}"
-        );
-        wait_before_retry(deadline, "lightning-channel", &observation).await?;
-    }
-}
-
-fn info_observation(
-    operation: &'static str,
-    result: Result<LndSyncStatus, LndError>,
-) -> Result<Option<LndSyncStatus>, FixtureError> {
-    match result {
-        Ok(info) => Ok(Some(info)),
-        Err(error) if is_transient_lnd_readiness(&error) => Ok(None),
-        Err(error) => Err(lightning_bootstrap_error(operation, error)),
-    }
-}
-
-fn channel_observation(
-    operation: &'static str,
-    result: Result<Option<ChannelReadiness>, LndError>,
-) -> Result<Option<ChannelReadiness>, FixtureError> {
-    match result {
-        Ok(channel) => Ok(channel),
-        Err(error) if is_transient_lnd_readiness(&error) => Ok(None),
-        Err(error) => Err(lightning_bootstrap_error(operation, error)),
-    }
-}
-
-fn channel_is_spendable(channel: Option<ChannelReadiness>) -> bool {
-    matches!(
-        channel,
-        Some(ChannelReadiness { active: true, local_balance })
-            if local_balance > READINESS_PAYMENT
-    )
-}
-
-async fn prove_readiness_payment<C: LndNodeConnector>(
-    connector: &C,
-    alice: &C::Client,
-    bob: &C::Client,
-    deadline: &Deadline,
-) -> Result<(), FixtureError> {
-    let (invoice, payment_hash) =
-        create_readiness_invoice(connector, bob, "lnd-bob", deadline).await?;
-    let payment = lnd_operation(
-        deadline,
-        "lnd-alice",
-        "pay Alice-to-Bob 1000-msat readiness invoice",
-        connector.pay_readiness_invoice(alice, &invoice),
-    )
-    .await?;
-    verify_readiness_payment(payment_hash, payment)?;
-    wait_for_settled_invoice(connector, bob, "lnd-bob", payment_hash, deadline).await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn prove_reverse_readiness_with_retry<C: LndNodeConnector, B: BitcoinTip>(
-    connector: &C,
-    alice: &C::Client,
-    bob: &C::Client,
-    bitcoin: &B,
-    channel_point: OutPoint,
-    alice_public_key: PublicKey,
-    bob_public_key: PublicKey,
-    bob_host: &str,
-    deadline: &Deadline,
-) -> Result<(), FixtureError> {
-    let mut observation = "waiting for Bob-to-Alice routing policy propagation".to_owned();
-    loop {
-        wait_for_active_channel(
-            connector,
-            alice,
-            bob,
-            bitcoin,
-            channel_point,
-            alice_public_key,
-            bob_public_key,
-            bob_host,
-            deadline,
+            "lnd-alice",
+            "starting Alice and Bob LND containers",
+            startup.start_container_pair(alice_spec, bob_spec),
         )
         .await?;
-        let (invoice, payment_hash) =
-            create_readiness_invoice(connector, alice, "lnd-alice", deadline).await?;
-        let payment = deadline
-            .run(
-                "lnd-bob",
-                &observation,
-                connector.pay_readiness_invoice(bob, &invoice),
-            )
-            .await?;
-        match payment {
-            Ok(payment) => {
-                verify_readiness_payment(payment_hash, payment)?;
-                return wait_for_settled_invoice(
-                    connector,
-                    alice,
-                    "lnd-alice",
-                    payment_hash,
-                    deadline,
-                )
-                .await;
-            }
-            Err(error) if is_transient_routing_failure(&error) => {
-                observation = redacted_tail(&format!(
-                    "Bob-to-Alice route is not ready for invoice {payment_hash}: {error}"
-                ));
-            }
-            Err(error) => {
-                return Err(lightning_bootstrap_error(
-                    "pay Bob-to-Alice readiness invoice",
-                    error,
-                ));
-            }
-        }
-        wait_before_retry(deadline, "lightning-channel", &observation).await?;
+    if let Ok(container) = &alice {
+        logs[0] = container.id.clone();
     }
-}
-
-async fn create_readiness_invoice<C: LndNodeConnector>(
-    connector: &C,
-    receiver: &C::Client,
-    service: &'static str,
-    deadline: &Deadline,
-) -> Result<(C::Invoice, sha256::Hash), FixtureError> {
-    lnd_operation(
-        deadline,
-        service,
-        "create 1000-msat readiness invoice",
-        connector.create_readiness_invoice(receiver),
-    )
-    .await
-}
-
-fn verify_readiness_payment(
-    payment_hash: sha256::Hash,
-    payment: PaymentReadiness,
-) -> Result<(), FixtureError> {
-    if payment.payment_hash != payment_hash || payment.state != PaymentState::Succeeded {
-        return Err(lightning_bootstrap_error(
-            "verify readiness payment",
-            LndError::InvalidResponse {
-                operation: "readiness payment".into(),
-                detail: "payment did not succeed with the readiness invoice hash".into(),
-                identifier: Some(payment_hash.to_string()),
-            },
-        ));
+    if let Ok(container) = &bob {
+        logs[1] = container.id.clone();
     }
-    Ok(())
+    let alice_container = alice.map_err(|error| runtime_error("lnd-alice", error))?;
+    let bob_container = bob.map_err(|error| runtime_error("lnd-bob", error))?;
+    let alice_certificate =
+        wait_for_tls_certificate(startup, "lnd-alice", &alice_container.id, deadline).await?;
+    let bob_certificate =
+        wait_for_tls_certificate(startup, "lnd-bob", &bob_container.id, deadline).await?;
+    let alice_config = LndBootstrapConfig {
+        endpoint: mapped_lnd_endpoint(&alice_container).map_err(bootstrap_configuration_error)?,
+        tls_certificate: alice_certificate,
+        timeout: deadline.budget(),
+    };
+    let bob_config = LndBootstrapConfig {
+        endpoint: mapped_lnd_endpoint(&bob_container).map_err(bootstrap_configuration_error)?,
+        tls_certificate: bob_certificate,
+        timeout: deadline.budget(),
+    };
+    let (alice, bob) = startup
+        .run_until_cancelled(initialize_lnd_clients(
+            &context.connector,
+            alice_config,
+            bob_config,
+            deadline,
+        ))
+        .await
+        .map_err(|error| runtime_error("LND pair", error))??;
+    startup
+        .run_until_cancelled(wait_for_lnd_sync(
+            &context.connector,
+            &alice,
+            &bob,
+            &context.bitcoin_tip,
+            deadline,
+        ))
+        .await
+        .map_err(|error| runtime_error("LND pair", error))??;
+    let channel_point = startup
+        .run_until_cancelled(Box::pin(bootstrap_ready_channel(
+            &context.connector,
+            &alice,
+            &bob,
+            &context.bitcoin_tip,
+            &context.names.bob,
+            context.allocation,
+            deadline,
+        )))
+        .await
+        .map_err(|error| runtime_error("LND pair", error))??;
+    Ok(StartedLndNodes {
+        alice,
+        bob,
+        channel_point,
+        container_ids: [alice_container.id, bob_container.id],
+    })
 }
 
-async fn wait_for_settled_invoice<C: LndNodeConnector>(
-    connector: &C,
-    receiver: &C::Client,
-    service: &'static str,
-    payment_hash: sha256::Hash,
-    deadline: &Deadline,
-) -> Result<(), FixtureError> {
-    let mut observation = format!("waiting for readiness invoice {payment_hash} to settle");
-    loop {
-        match deadline
-            .run(
-                service,
-                &observation,
-                connector.invoice_state(receiver, payment_hash),
-            )
-            .await?
-        {
-            Ok(InvoiceState::Settled) => return Ok(()),
-            Ok(InvoiceState::Open | InvoiceState::Accepted) => {}
-            Ok(state) => {
-                return Err(lightning_bootstrap_error(
-                    "verify readiness invoice",
-                    LndError::InvalidResponse {
-                        operation: "readiness invoice".into(),
-                        detail: format!("invoice reached non-settled state {state:?}").into(),
-                        identifier: Some(payment_hash.to_string()),
-                    },
-                ));
-            }
-            Err(error) if is_transient_lnd_readiness(&error) => {
-                observation = redacted_tail(&format!("readiness invoice is not ready: {error}"));
-            }
-            Err(error) => {
-                return Err(lightning_bootstrap_error("lookup readiness invoice", error));
-            }
-        }
-        wait_before_retry(deadline, service, &observation).await?;
-    }
-}
-
-fn is_transient_routing_failure(error: &LndError) -> bool {
-    matches!(
-        error,
-        LndError::PaymentFailed { reason, .. }
-            if matches!(reason.as_ref(), "no route" | "insufficient balance")
-    )
-}
-
-async fn lnd_operation<T>(
-    deadline: &Deadline,
-    service: &'static str,
-    operation: &'static str,
-    future: impl Future<Output = Result<T, LndError>>,
-) -> Result<T, FixtureError> {
-    let result = deadline.run(service, operation, future).await?;
-    result.map_err(|error| lightning_bootstrap_error(operation, error))
-}
-
-fn flatten_lnd_operation<T>(
-    operation: &'static str,
-    result: Result<Result<T, LndError>, FixtureError>,
-) -> Result<T, FixtureError> {
-    result?.map_err(|error| lightning_bootstrap_error(operation, error))
-}
-
-fn is_already_connected(error: &LndError) -> bool {
-    matches!(
-        error,
-        LndError::Status { detail, .. } if detail.as_ref() == "gRPC status AlreadyExists"
-    )
-}
+mod channel;
+use channel::*;
 
 fn mapped_lnd_endpoint(container: &crate::runtime::RunningContainer) -> Result<Url, FixtureError> {
     let port = container
@@ -1861,13 +1188,13 @@ async fn wait_for_lnd_sync<C: LndNodeConnector, B: BitcoinTip>(
 fn is_transient_lnd_readiness(error: &LndError) -> bool {
     match error {
         LndError::Transport { .. } | LndError::Timeout { .. } => true,
-        LndError::Status { detail, .. } => matches!(
-            detail.as_ref(),
-            "gRPC status Unavailable"
-                | "gRPC status DeadlineExceeded"
-                | "gRPC status ResourceExhausted"
-                | "gRPC status Aborted"
-                | "gRPC status Unknown error"
+        LndError::Status { code, .. } => matches!(
+            code,
+            LndStatusCode::Unavailable
+                | LndStatusCode::DeadlineExceeded
+                | LndStatusCode::ResourceExhausted
+                | LndStatusCode::Aborted
+                | LndStatusCode::Unknown
         ),
         LndError::InvalidRequest { .. }
         | LndError::CredentialRead { .. }
@@ -1955,29 +1282,13 @@ async fn initialize_lnd_client<C: LndNodeConnector>(
 }
 
 fn is_transient_seed_generation(error: &LndError) -> bool {
-    match error {
-        LndError::Transport { operation, .. } | LndError::Timeout { operation, .. } => {
-            operation.as_ref() == "generate wallet seed"
-        }
-        LndError::Status { operation, detail } => {
-            operation.as_ref() == "generate wallet seed"
-                && matches!(
-                    detail.as_ref(),
-                    "gRPC status Unavailable"
-                        | "gRPC status DeadlineExceeded"
-                        | "gRPC status ResourceExhausted"
-                        | "gRPC status Aborted"
-                        | "gRPC status Unknown error"
-                )
-        }
-        LndError::InvalidRequest { .. }
-        | LndError::CredentialRead { .. }
-        | LndError::Authentication { .. }
-        | LndError::InvalidResponse { .. }
-        | LndError::PaymentFailed { .. }
-        | LndError::OutcomeUnknown { .. }
-        | _ => false,
-    }
+    let operation = match error {
+        LndError::Transport { operation, .. }
+        | LndError::Timeout { operation, .. }
+        | LndError::Status { operation, .. } => operation,
+        _ => return false,
+    };
+    operation.as_ref() == "generate wallet seed" && is_transient_lnd_readiness(error)
 }
 
 async fn attach_lnd_logs<E: ContainerEngine>(
@@ -2038,8 +1349,8 @@ mod tests {
         secp256k1::{PublicKey, SecretKey},
     };
     use nigiri_rs_lnd::{
-        InvoiceState, LndBootstrapConfig, LndError, Millisats, OpenChannelRequest, PaymentState,
-        PeerAddress, Sats,
+        InvoiceState, LndBootstrapConfig, LndError, LndStatusCode, Millisats, OpenChannelRequest,
+        PaymentState, PeerAddress, Sats,
     };
     use tokio::sync::{Barrier, Notify};
 
@@ -2058,6 +1369,38 @@ mod tests {
             supervise_for_coordinator,
         },
     };
+
+    #[test]
+    fn retry_policies_use_status_codes_and_seed_operation_not_diagnostics() {
+        for code in [
+            LndStatusCode::Unavailable,
+            LndStatusCode::DeadlineExceeded,
+            LndStatusCode::ResourceExhausted,
+            LndStatusCode::Aborted,
+            LndStatusCode::Unknown,
+        ] {
+            let error = LndError::Status {
+                operation: "generate wallet seed".into(),
+                code,
+                detail: "arbitrary localized diagnostic".into(),
+            };
+            assert!(super::is_transient_lnd_readiness(&error));
+            assert!(super::is_transient_seed_generation(&error));
+            let committed = LndError::Status {
+                operation: "initialize wallet".into(),
+                code,
+                detail: "arbitrary".into(),
+            };
+            assert!(!super::is_transient_seed_generation(&committed));
+        }
+        let permanent = LndError::Status {
+            operation: "generate wallet seed".into(),
+            code: LndStatusCode::InvalidArgument,
+            detail: "gRPC status Unavailable".into(),
+        };
+        assert!(!super::is_transient_lnd_readiness(&permanent));
+        assert!(!super::is_transient_seed_generation(&permanent));
+    }
 
     #[derive(Clone, Copy)]
     enum CertificateRead {
@@ -2191,6 +1534,7 @@ mod tests {
         alice_started: Arc<Notify>,
         removal_delay: Duration,
         specs: Arc<Mutex<Vec<ContainerSpec>>>,
+        removal_finished: Arc<Notify>,
         removed: Arc<Mutex<Vec<String>>>,
     }
 
@@ -2207,6 +1551,7 @@ mod tests {
                 alice_started: Arc::new(Notify::new()),
                 removal_delay: Duration::ZERO,
                 specs: Arc::new(Mutex::new(Vec::new())),
+                removal_finished: Arc::new(Notify::new()),
                 removed: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -2319,6 +1664,7 @@ mod tests {
                 .lock()
                 .expect("fake removals are never poisoned")
                 .push(id_or_name.to_owned());
+            self.removal_finished.notify_one();
             Ok(())
         }
 
@@ -2464,6 +1810,7 @@ mod tests {
             {
                 Err(LndError::Status {
                     operation: "generate wallet seed".into(),
+                    code: LndStatusCode::Unknown,
                     detail: "gRPC status Unknown error".into(),
                 })
             } else if matches!(
@@ -2494,6 +1841,7 @@ mod tests {
             } else if self.fail_initialization {
                 Err(LndError::Status {
                     operation: "initialize wallet".into(),
+                    code: LndStatusCode::FailedPrecondition,
                     detail: "fake rejected initialization".into(),
                 })
             } else {
@@ -2520,12 +1868,14 @@ mod tests {
                 Some(InfoFailure::UnavailableOnce) if call < 2 => {
                     return Err(LndError::Status {
                         operation: "get node information".into(),
+                        code: LndStatusCode::Unavailable,
                         detail: "gRPC status Unavailable".into(),
                     });
                 }
                 Some(InfoFailure::UnknownOnce) if call < 2 => {
                     return Err(LndError::Status {
                         operation: "get node information".into(),
+                        code: LndStatusCode::Unknown,
                         detail: "gRPC status Unknown error".into(),
                     });
                 }
@@ -3707,6 +3057,13 @@ mod tests {
         let bob_log = diagnostics.find("lnd-bob log").unwrap();
         let alice_log = diagnostics.find("lnd-alice log").unwrap();
         assert!(bob_log < alice_log, "{diagnostics}");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while engine.removed.lock().unwrap().len() < 2 {
+                engine.removal_finished.notified().await;
+            }
+        })
+        .await
+        .expect("the owned supervisor must finish cleanup after publishing the failure");
         let removed = engine.removed.lock().unwrap().clone();
         assert_eq!(removed.len(), 2, "{removed:?}");
         assert!(removed[0].contains("bob"), "{removed:?}");
@@ -4177,8 +3534,10 @@ mod tests {
         assert!(connector.payment_attempts.load(Ordering::SeqCst) >= 1);
     }
 
+    #[cfg(feature = "docker-tests")]
     const DOCKER_ANONYMOUS_VOLUME_LABEL: &str = "com.docker.volume.anonymous";
 
+    #[cfg(feature = "docker-tests")]
     async fn inspect_pair_resources(
         pair: &LndPair,
     ) -> (bollard::Docker, Vec<String>, String, Vec<String>) {
@@ -4217,6 +3576,7 @@ mod tests {
         (docker, containers, network, volumes)
     }
 
+    #[cfg(feature = "docker-tests")]
     async fn assert_pair_resources_removed(
         docker: &bollard::Docker,
         containers: &[String],
@@ -4248,6 +3608,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "docker-tests")]
     async fn explicit_shutdown_removes_four_containers_volumes_and_network() {
         let pair = LndPair::start()
             .await
@@ -4262,6 +3623,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "docker-tests")]
     async fn dropping_pair_removes_four_containers_volumes_and_network() {
         let pair = LndPair::start()
             .await

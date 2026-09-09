@@ -61,12 +61,14 @@ pub struct Peg {
     liquid: NigiriClient<Liquid>,
     parent_genesis: bitcoin::BlockHash,
     pegin_confirmation_depth: u64,
+    pegged_asset: elements::AssetId,
 }
 
 #[derive(Deserialize)]
 struct SideChainInfo {
     parent_blockhash: bitcoin::BlockHash,
     pegin_confirmation_depth: u64,
+    pegged_asset: elements::AssetId,
 }
 
 /// How many extra blocks `complete_peg_in` will mine while waiting for the Liquid node to catch
@@ -79,20 +81,24 @@ struct SideChainInfo {
 /// is; a fixed margin would bake in a number measured once, on one machine, against one image.
 const CLAIM_RETRY_BLOCKS: u64 = 20;
 
-/// Whether mining another block could plausibly change the outcome of a claim.
-///
-/// The Liquid node's view of the mainchain lags the mainchain, so a claim it has considered and
-/// rejected may succeed a block later — that is the whole reason `complete_peg_in` retries. A
-/// transport failure or an unusable response is not that: no amount of mining fixes a dead socket
-/// or a malformed reply, and retrying one only delays the real error by twenty blocks.
-///
-/// Matched on the variant rather than the node's message text, which carries no compatibility
-/// promise.
+/// Retry only the maturity rejection verified in Elements 23.3.3. Its -8 code
+/// also covers permanent invalid parameters, so the code alone is insufficient.
+/// Unknown messages fail closed; custom node versions can use `claim_peg_in`
+/// and choose their own retry policy.
+/// https://github.com/ElementsProject/elements/blob/elements-23.3.3/src/wallet/rpc/elements.cpp#L981-L984
 fn worth_retrying(error: &NigiriError) -> bool {
-    matches!(
-        error,
-        NigiriError::PegInImmature { .. } | NigiriError::RpcFailed { .. }
-    )
+    match error {
+        NigiriError::PegInImmature { .. } => true,
+        NigiriError::RpcFailed {
+            method,
+            code: -8,
+            message,
+        } => {
+            method == "claimpegin"
+                && message == "Peg-in Bitcoin transaction needs more confirmations to be sent."
+        }
+        _ => false,
+    }
 }
 
 impl Peg {
@@ -135,6 +141,7 @@ impl Peg {
             liquid,
             parent_genesis: genesis,
             pegin_confirmation_depth: info.pegin_confirmation_depth,
+            pegged_asset: info.pegged_asset,
         })
     }
 
@@ -329,6 +336,12 @@ impl Peg {
     ///
     /// The destination is read out of the transaction rather than taken as an argument, so a
     /// consumer who encodes it wrongly gets no payout, exactly as on liquidv1.
+    /// Requires exactly one same-parent peg-out with an explicit value and the
+    /// configured pegged asset. Ambiguous outputs are rejected before payment.
+    ///
+    /// This helper is stateless: it accepts unconfirmed transactions, and repeated
+    /// calls (including through clones) pay again. The caller owns confirmation
+    /// and replay policy; this is not a production federation release service.
     pub async fn release_peg_out(
         &self,
         liquid_txid: &elements::Txid,
@@ -368,6 +381,7 @@ impl Peg {
         // for this pair may still follow it. The mismatch detail is kept around only in case
         // nothing better is ever found.
         let mut mismatch: Option<String> = None;
+        let mut selected = None;
 
         for output in &transaction.vout {
             let Ok(raw) = Vec::<u8>::from_hex(&output.script_pub_key.hex) else {
@@ -388,6 +402,12 @@ impl Peg {
                 continue;
             }
 
+            if selected.is_some() {
+                return Err(malformed(
+                    "multiple peg-out outputs name this parent chain".to_owned(),
+                ));
+            }
+
             // Deliberately asymmetric with the mismatch above: a wrong-chain output is not this
             // pair's peg-out, so scanning continues past it. A same-chain output with a bad
             // destination or value *is* this pair's peg-out — it is reported with `?` rather than
@@ -405,7 +425,16 @@ impl Peg {
             let amount = Amount::from_str_in(&value.to_string(), Denomination::Bitcoin)
                 .map_err(|_| malformed(format!("peg-out value {value} is not an amount")))?;
 
-            return Ok((destination, amount));
+            if output.asset != Some(self.pegged_asset) {
+                return Err(malformed(
+                    "peg-out output must carry the explicit configured pegged asset".to_owned(),
+                ));
+            }
+            selected = Some((destination, amount));
+        }
+
+        if let Some(output) = selected {
+            return Ok(output);
         }
 
         match mismatch {
@@ -437,6 +466,8 @@ struct LiquidTransaction {
 
 #[derive(Deserialize)]
 struct LiquidOutput {
+    #[serde(default)]
+    asset: Option<elements::AssetId>,
     /// Deserialized as a `Number`, never `f64`: `arbitrary_precision` keeps it exact.
     #[serde(default)]
     value: Option<serde_json::Number>,
@@ -484,4 +515,48 @@ struct MainchainTransaction {
     hex: String,
     #[serde(default)]
     confirmations: u64,
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::worth_retrying;
+    use crate::NigiriError;
+
+    #[test]
+    fn permanent_claim_errors_do_not_trigger_more_mining() {
+        for (method, code, message) in [
+            ("claimpegin", -5, "Invalid address"),
+            (
+                "claimpegin",
+                -5,
+                "Peg-in Bitcoin transaction needs more confirmations to be sent.",
+            ),
+            ("claimpegin", -32601, "Method not found"),
+            ("claimpegin", -32602, "Invalid params"),
+            ("claimpegin", -8, "Invalid proof"),
+            (
+                "other",
+                -8,
+                "Peg-in Bitcoin transaction needs more confirmations to be sent.",
+            ),
+        ] {
+            assert!(
+                !worth_retrying(&NigiriError::RpcFailed {
+                    method: method.into(),
+                    code,
+                    message: message.into()
+                }),
+                "{method}: {code}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_elements_maturity_rejection_can_be_retried() {
+        assert!(worth_retrying(&NigiriError::RpcFailed {
+            method: "claimpegin".into(),
+            code: -8,
+            message: "Peg-in Bitcoin transaction needs more confirmations to be sent.".into()
+        }));
+    }
 }

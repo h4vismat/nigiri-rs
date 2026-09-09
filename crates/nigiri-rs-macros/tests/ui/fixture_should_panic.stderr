@@ -1,0 +1,5 @@
+error: `#[should_panic]` is unsupported on fixture tests: setup failures could pass without running the body; assert the expected failure inside the test instead
+ --> tests/ui/fixture_should_panic.rs:2:1
+  |
+2 | #[should_panic]
+  | ^
